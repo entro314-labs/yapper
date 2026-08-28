@@ -1,0 +1,272 @@
+import { IconAlertTriangle, IconPlus, IconTrash, IconUsers } from '@tabler/icons-react'
+import { Link, createFileRoute } from '@tanstack/react-router'
+import { openUrl } from '@tauri-apps/plugin-opener'
+import * as React from 'react'
+import { toast } from 'sonner'
+
+import { EmptyState } from '@/components/shell/empty-state'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { brandOf } from '@/lib/platform-brand'
+import { useAccounts, useConnectAccount, useDisconnectAccount, usePlatforms } from '@/lib/query'
+import { humanMessage } from '@/lib/tauri/client'
+import type { PlatformInfo } from '@/lib/tauri/types'
+import { cn, formatAbsolute } from '@/lib/utils'
+
+export const Route = createFileRoute('/accounts')({ component: AccountsScreen })
+
+function AccountsScreen() {
+  const accounts = useAccounts()
+  const platforms = usePlatforms()
+  const disconnect = useDisconnectAccount()
+  const [connecting, setConnecting] = React.useState<PlatformInfo | null>(null)
+
+  return (
+    <div className="mx-auto flex max-w-3xl flex-col gap-6 p-4">
+      <section>
+        <h2 className="font-display mb-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+          Connected
+        </h2>
+        {accounts.data && accounts.data.length > 0 ? (
+          <ul className="flex flex-col gap-2">
+            {accounts.data.map((account) => {
+              const brand = brandOf(account.platform)
+              const Icon = brand.icon
+              const stale = account.status === 'needs_reauth'
+              return (
+                <li
+                  key={account.id}
+                  className={cn(
+                    'flex items-center gap-3 rounded-lg border bg-card/60 px-3 py-2.5',
+                    stale ? 'border-destructive/40' : 'border-border/60',
+                  )}
+                >
+                  {account.avatarUrl ? (
+                    <img
+                      src={account.avatarUrl}
+                      alt=""
+                      className="size-8 shrink-0 rounded-full object-cover ring-1"
+                      style={{ ['--tw-ring-color' as string]: brand.tone }}
+                    />
+                  ) : (
+                    <span
+                      className="grid size-8 shrink-0 place-items-center rounded-full bg-muted"
+                      style={{ color: brand.tone }}
+                    >
+                      <Icon className="size-4" />
+                    </span>
+                  )}
+
+                  <div className="min-w-0 flex-1">
+                    <p className="flex items-center gap-1.5 truncate text-sm font-medium">
+                      {account.displayName ?? account.handle}
+                      <Icon className="size-3.5 shrink-0" style={{ color: brand.tone }} />
+                    </p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {account.handle}
+                      {account.instance ? ` · ${account.instance.replace('https://', '')}` : ''}
+                      {account.charLimit ? ` · ${account.charLimit} chars` : ''}
+                    </p>
+                  </div>
+
+                  {stale ? (
+                    <span className="flex items-center gap-1 text-xs text-destructive">
+                      <IconAlertTriangle className="size-3.5" />
+                      Reconnect
+                    </span>
+                  ) : account.tokenExpiresAt ? (
+                    <span
+                      className="hidden text-xs text-muted-foreground sm:block"
+                      title={`Access token expires ${formatAbsolute(account.tokenExpiresAt)}`}
+                    >
+                      Signed in
+                    </span>
+                  ) : null}
+
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    aria-label={`Disconnect ${account.handle}`}
+                    onClick={() => {
+                      void (async () => {
+                        try {
+                          await disconnect.mutateAsync(account.id)
+                          toast.success(`Disconnected ${account.handle}`)
+                        } catch (err) {
+                          toast.error(humanMessage(err))
+                        }
+                      })()
+                    }}
+                  >
+                    <IconTrash />
+                  </Button>
+                </li>
+              )
+            })}
+          </ul>
+        ) : (
+          <EmptyState
+            icon={IconUsers}
+            title="No accounts yet"
+            description="Bluesky is the quickest — an app password and you are done. The rest need a developer app you register yourself."
+            className="rounded-lg border border-dashed border-border/60 py-12"
+          />
+        )}
+      </section>
+
+      <section>
+        <h2 className="font-display mb-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+          Add
+        </h2>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {(platforms.data ?? []).map((info) => {
+            const brand = brandOf(info.id)
+            const Icon = brand.icon
+            return (
+              <button
+                key={info.id}
+                type="button"
+                onClick={() => {
+                  setConnecting(info)
+                }}
+                className="flex items-start gap-3 rounded-lg border border-border/60 bg-card/50 px-3 py-2.5 text-left transition-colors hover:border-border hover:bg-card"
+              >
+                <span
+                  className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-md bg-muted"
+                  style={{ color: brand.tone }}
+                >
+                  <Icon className="size-4" />
+                </span>
+                <span className="min-w-0">
+                  <span className="flex items-center gap-1.5 text-sm font-medium">
+                    {info.name}
+                    <IconPlus className="size-3 text-muted-foreground" />
+                  </span>
+                  <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
+                    {info.notes}
+                  </span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </section>
+
+      {connecting ? (
+        <ConnectDialog
+          info={connecting}
+          onClose={() => {
+            setConnecting(null)
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * The connect dialog, drawn entirely from the platform's own [`PlatformInfo`].
+ *
+ * Nothing here knows what Bluesky or Reddit needs — Rust says which fields to ask for, so adding an
+ * adapter needs no change in this file.
+ */
+function ConnectDialog({ info, onClose }: { info: PlatformInfo; onClose: () => void }) {
+  const connect = useConnectAccount()
+  const [fields, setFields] = React.useState<Record<string, string>>({})
+  const [busy, setBusy] = React.useState(false)
+
+  const missing = info.connectFields.filter((field) => field.required && !fields[field.key]?.trim())
+
+  const submit = React.useCallback(async () => {
+    setBusy(true)
+    try {
+      await connect.mutateAsync({ platform: info.id, fields })
+      if (info.auth === 'oAuth2') {
+        toast.info(`Finish signing in to ${info.name} in your browser`)
+      }
+      onClose()
+    } catch (err) {
+      toast.error(humanMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }, [connect, info, fields, onClose])
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose()
+      }}
+    >
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Connect {info.name}</DialogTitle>
+          <DialogDescription>{info.notes}</DialogDescription>
+        </DialogHeader>
+
+        {info.appFields.length > 0 ? (
+          <p className="rounded-md bg-muted/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+            This needs your own developer app. Add its details in{' '}
+            <Link to="/settings" className="text-primary underline-offset-2 hover:underline">
+              Settings → Platform apps
+            </Link>{' '}
+            first, then come back here.
+          </p>
+        ) : null}
+
+        <div className="flex flex-col gap-3">
+          {info.connectFields.map((field) => (
+            <label key={field.key} className="flex flex-col gap-1 text-xs">
+              <span className="font-medium">
+                {field.label}
+                {field.required ? <span className="text-destructive"> *</span> : null}
+              </span>
+              <Input
+                type={field.secret ? 'password' : 'text'}
+                value={fields[field.key] ?? ''}
+                placeholder={field.placeholder}
+                autoComplete="off"
+                onChange={(event) => {
+                  setFields((current) => ({ ...current, [field.key]: event.target.value }))
+                }}
+              />
+              <span className="leading-relaxed text-muted-foreground">{field.help}</span>
+            </label>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {info.setupUrl ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                void openUrl(info.setupUrl ?? '')
+              }}
+            >
+              Open {info.name} setup
+            </Button>
+          ) : null}
+          <Button
+            className="ml-auto"
+            size="sm"
+            disabled={missing.length > 0 || busy}
+            onClick={() => {
+              void submit()
+            }}
+          >
+            {info.auth === 'oAuth2' ? 'Continue in browser' : 'Connect'}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}

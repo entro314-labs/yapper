@@ -1,6 +1,10 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "entry": ["src/index.css", "src/components/ui/**/*.tsx"],
-  "project": ["src/**/*.{ts,tsx}"],
-  "ignore": ["src/routeTree.gen.ts"]
+  "entry": [
+    "src/index.css",
+    "src/components/ui/**/*.tsx",
+    "src/routes/**/*.tsx",
+    "src/lib/tauri/types.ts"
+  ],
+  "project": ["src/**/*.{ts,tsx,css}"]
 }

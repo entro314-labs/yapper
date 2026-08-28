@@ -62,6 +62,10 @@
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) * 1.4);
   --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  /* The pill: badges and status chips. Fixed rather than derived, because a
+     capsule stops reading as a capsule the moment a theme sharpens the radius. */
+  --radius-4xl: 999px;
 
   --shadow-elevated: var(--app-shadow-elevated);
 
