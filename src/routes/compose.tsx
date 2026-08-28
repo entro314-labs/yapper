@@ -1,9 +1,10 @@
-import { IconPaperclip, IconSend, IconTrash, IconUsers } from '@tabler/icons-react'
+import { IconPaperclip, IconSend, IconSparkles, IconTrash, IconUsers } from '@tabler/icons-react'
 import { Link, createFileRoute, useNavigate } from '@tanstack/react-router'
 import { open } from '@tauri-apps/plugin-dialog'
 import * as React from 'react'
 import { toast } from 'sonner'
 
+import { SuggestPanel } from '@/components/compose/suggest-panel'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
@@ -12,21 +13,32 @@ import { brandOf } from '@/lib/platform-brand'
 import {
   useAccounts,
   useCheckPost,
+  useNotes,
   usePlatforms,
   usePosts,
   usePublishNow,
   useResolveMedia,
   useSavePost,
+  useSettings,
 } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
-import type { PlatformInfo } from '@/lib/tauri/types'
+import type { PlatformInfo, Suggestion } from '@/lib/tauri/types'
 import { cn, formatBytes, fromLocalInputValue, toLocalInputValue } from '@/lib/utils'
 
 export const Route = createFileRoute('/compose')({
   component: ComposeScreen,
-  validateSearch: (search: Record<string, unknown>): { id?: number } => {
-    const id = Number(search.id)
-    return Number.isInteger(id) && id > 0 ? { id } : {}
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { id?: number; noteId?: number; suggest?: boolean } => {
+    const positive = (value: unknown) => {
+      const parsed = Number(value)
+      return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+    }
+    return {
+      ...(positive(search.id) === undefined ? {} : { id: positive(search.id) }),
+      ...(positive(search.noteId) === undefined ? {} : { noteId: positive(search.noteId) }),
+      ...(search.suggest ? { suggest: true } : {}),
+    }
   },
 })
 
@@ -38,7 +50,7 @@ interface Attachment {
 }
 
 function ComposeScreen() {
-  const { id } = Route.useSearch()
+  const { id, noteId, suggest: openSuggest } = Route.useSearch()
   const navigate = useNavigate()
   const accounts = useAccounts()
   const platforms = usePlatforms()
@@ -46,6 +58,8 @@ function ComposeScreen() {
   const savePost = useSavePost()
   const publishNow = usePublishNow()
   const resolveMedia = useResolveMedia()
+  const notes = useNotes()
+  const settings = useSettings()
 
   const editing = React.useMemo(
     () => (id ? posts.data?.find((post) => post.id === id) : undefined),
@@ -60,6 +74,8 @@ function ComposeScreen() {
   const [options, setOptions] = React.useState<Record<number, Record<string, string>>>({})
   const [media, setMedia] = React.useState<Attachment[]>([])
   const [loadedId, setLoadedId] = React.useState<number | null>(null)
+  const [suggesting, setSuggesting] = React.useState(Boolean(openSuggest))
+  const [seededNote, setSeededNote] = React.useState<number | null>(null)
 
   // Loads an existing post exactly once per id. A plain effect on `editing`
   // would re-seed the form every time the queue refetched and throw away
@@ -84,6 +100,19 @@ function ComposeScreen() {
     )
     setLoadedId(editing.id)
   }, [editing, loadedId])
+
+  // Arriving from a note: seed the body once, so "Turn into a post" does not
+  // mean retyping. Only when composing something NEW — an existing post's own
+  // text must never be replaced by a note's.
+  React.useEffect(() => {
+    if (id !== undefined || noteId === undefined || seededNote === noteId) return
+    const note = notes.data?.find((candidate) => candidate.id === noteId)
+    if (!note) return
+    setSeededNote(noteId)
+    if (openSuggest) return
+    setTitle((current) => current || note.title)
+    setBody((current) => current || note.body)
+  }, [id, noteId, seededNote, notes.data, openSuggest])
 
   const checks = useCheckPost(body, title || null, media.length, selected)
   const platformById = React.useMemo(
@@ -163,6 +192,17 @@ function ComposeScreen() {
     }
   }, [media, resolveMedia])
 
+  const assistantOn = settings.data ? settings.data.aiBackend !== 'off' : false
+
+  const applySuggestion = React.useCallback((suggestion: Suggestion) => {
+    // Fills the composer and nothing else: from here the draft is subject to
+    // the same counters, the same validation and the same human click as
+    // anything typed by hand.
+    setBody(suggestion.body)
+    if (suggestion.title) setTitle(suggestion.title)
+    setSuggesting(false)
+  }, [])
+
   if (accounts.data?.length === 0) {
     return (
       <div className="grid h-full place-items-center px-6 text-center">
@@ -194,6 +234,29 @@ function ComposeScreen() {
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4">
+      {suggesting ? (
+        <SuggestPanel
+          accountIds={selected}
+          {...(noteId === undefined ? {} : { initialNoteId: noteId })}
+          onApply={applySuggestion}
+          onClose={() => {
+            setSuggesting(false)
+          }}
+        />
+      ) : assistantOn ? (
+        <Button
+          size="sm"
+          variant="outline"
+          className="self-start"
+          onClick={() => {
+            setSuggesting(true)
+          }}
+        >
+          <IconSparkles data-icon="inline-start" />
+          Draft with the assistant
+        </Button>
+      ) : null}
+
       {needsTitle ? (
         <Input
           value={title}

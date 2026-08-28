@@ -5,14 +5,21 @@ import { invokeCommand } from '@/lib/tauri/client'
 import { IPC_COMMANDS } from '@/lib/tauri/ipc'
 import type {
   Account,
+  AiAvailability,
   AppCredentialsView,
   Attempt,
   PlatformId,
   PlatformInfo,
   PostDetail,
+  Note,
+  RefreshReport,
   ResolvedMedia,
+  SaveNoteInput,
   SavePostInput,
   Settings,
+  Stats,
+  StatsFilter,
+  Suggestion,
   TargetCheck,
 } from '@/lib/tauri/types'
 
@@ -111,6 +118,38 @@ export function useCheckPost(
     // old verdicts around would let a stale "fits" survive an edit.
     gcTime: 0,
     placeholderData: (previous) => previous,
+  })
+}
+
+export function useNotes() {
+  return useQuery({
+    queryKey: queryKeys.notes.list(),
+    queryFn: async () => invokeCommand<Note[]>(IPC_COMMANDS.listNotes),
+  })
+}
+
+/**
+ * The stats view. Reads nothing remote — every figure is computed from Yapper's own records — so it
+ * is cheap enough to recompute on every filter change.
+ */
+export function useStats(filter: StatsFilter) {
+  return useQuery({
+    queryKey: queryKeys.stats.view(filter),
+    queryFn: async () => invokeCommand<Stats>(IPC_COMMANDS.getStats, { filter }),
+    placeholderData: (previous) => previous,
+  })
+}
+
+/**
+ * What each assistant backend can do right now. Probing runs a `--version` per CLI, so this is
+ * deliberately not folded into `useSettings` — Settings would then pay for two process spawns on
+ * every render of an unrelated toggle.
+ */
+export function useAiAvailability() {
+  return useQuery({
+    queryKey: queryKeys.ai.availability(),
+    queryFn: async () => invokeCommand<AiAvailability[]>(IPC_COMMANDS.aiAvailability),
+    staleTime: 30_000,
   })
 }
 
@@ -232,6 +271,52 @@ export function useUpdateSettings() {
     [queryKeys.settings.root],
     (settings) => ({ settings }),
   )
+}
+
+export function useSaveNote() {
+  return useInvalidating<SaveNoteInput, number>(
+    IPC_COMMANDS.saveNote,
+    [queryKeys.notes.root],
+    (input) => ({ input }),
+  )
+}
+
+export function useDeleteNote() {
+  return useInvalidating<number, Nothing>(
+    IPC_COMMANDS.deleteNote,
+    [queryKeys.notes.root],
+    (id) => ({
+      id,
+    }),
+  )
+}
+
+/**
+ * Asks the assistant for drafts.
+ *
+ * Deliberately a mutation and not a query: it spends real time and, on the CLI backends, a real
+ * quota. Nothing should ever re-run it on a refetch.
+ */
+export function useSuggestPosts() {
+  return useMutation({
+    mutationFn: async (input: {
+      context: string
+      instructions: string
+      noteIds: number[]
+      accountIds: number[]
+      count: number
+    }) => invokeCommand<Suggestion[]>(IPC_COMMANDS.suggestPosts, input),
+  })
+}
+
+export function useRefreshEngagement() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: async () => invokeCommand<RefreshReport>(IPC_COMMANDS.refreshEngagement),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.stats.root })
+    },
+  })
 }
 
 export function useResolveMedia() {

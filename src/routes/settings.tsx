@@ -1,4 +1,10 @@
-import { IconCheck, IconCopy, IconExternalLink } from '@tabler/icons-react'
+import {
+  IconAlertTriangle,
+  IconCheck,
+  IconCircleCheck,
+  IconCopy,
+  IconExternalLink,
+} from '@tabler/icons-react'
 import { createFileRoute } from '@tanstack/react-router'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import * as React from 'react'
@@ -10,6 +16,7 @@ import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { brandOf } from '@/lib/platform-brand'
 import {
+  useAiAvailability,
   useAppCredentials,
   useForgetAppCredentials,
   usePlatforms,
@@ -19,7 +26,7 @@ import {
   useUpdateSettings,
 } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
-import type { PlatformInfo, Settings } from '@/lib/tauri/types'
+import type { AiBackend, PlatformInfo, Settings } from '@/lib/tauri/types'
 
 export const Route = createFileRoute('/settings')({ component: SettingsScreen })
 
@@ -121,6 +128,56 @@ function SettingsScreen() {
       </Section>
 
       <Section
+        title="Assistant"
+        note="Yapper ships no API key and no model of its own — it borrows an assistant you already have. It only ever hands you drafts: they land in the composer, where the same limits and the same click still apply before anything goes out."
+      >
+        <AssistantRow
+          value={current.aiBackend}
+          onChange={(aiBackend) => {
+            patch({ aiBackend })
+          }}
+        />
+        {current.aiBackend === 'claude' || current.aiBackend === 'codex' ? (
+          <>
+            <Row
+              label="Model"
+              hint="Passed straight to the CLI. Leave blank for its own default, which is usually right."
+            >
+              <Input
+                value={current.aiModel}
+                placeholder="default"
+                onChange={(event) => {
+                  patch({ aiModel: event.target.value })
+                }}
+                className="w-40"
+              />
+            </Row>
+            <Row label="Effort" hint="How hard it should think. Blank uses the tool's default.">
+              <Select
+                value={current.aiEffort}
+                onChange={(event) => {
+                  patch({ aiEffort: event.target.value })
+                }}
+                className="w-32"
+              >
+                <option value="">Default</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </Select>
+            </Row>
+          </>
+        ) : null}
+      </Section>
+
+      <Section
+        title="Agent door"
+        note="Yapper ships an MCP server so an agent host can read your queue and schedule posts directly — where you see and approve each tool call. Build it with `cargo build --release --bin yapper-mcp`, then register the binary:"
+      >
+        <AgentDoorRow />
+      </Section>
+
+      <Section
         title="Platform apps"
         note="X, Reddit and LinkedIn all gate posting behind a developer app that has to be registered to a person. Yapper cannot ship one, so you register your own and paste its client id here — it is stored in your OS keychain, never in the app's database."
       >
@@ -211,6 +268,94 @@ function RedirectUriRow({ uri }: { uri: string }) {
         )}
       </button>
     </Row>
+  )
+}
+
+/**
+ * The assistant picker, with each backend's live availability beside it.
+ *
+ * The reason a backend is unavailable is shown verbatim — Apple's own words when the model is not
+ * resident, the CLI's absence from PATH — because "unavailable" with no reason is a dead end rather
+ * than a setting.
+ */
+function AssistantRow({
+  value,
+  onChange,
+}: {
+  value: AiBackend
+  onChange: (backend: AiBackend) => void
+}) {
+  const availability = useAiAvailability()
+
+  return (
+    <div className="px-3 py-2.5">
+      <Row label="Use" hint="Off by default. Nothing is sent anywhere until you pick one.">
+        <Select
+          value={value}
+          onChange={(event) => {
+            onChange(event.target.value as AiBackend)
+          }}
+          className="w-44"
+        >
+          <option value="off">Off</option>
+          <option value="apple">Apple Intelligence</option>
+          <option value="claude">Claude Code</option>
+          <option value="codex">Codex</option>
+        </Select>
+      </Row>
+
+      <ul className="mt-1 flex flex-col gap-1 border-t border-border/50 pt-2.5">
+        {(availability.data ?? []).map((entry) => (
+          <li key={entry.backend} className="flex items-start gap-1.5 text-xs">
+            {entry.available ? (
+              <IconCircleCheck className="mt-px size-3.5 shrink-0 text-success" />
+            ) : (
+              <IconAlertTriangle className="mt-px size-3.5 shrink-0 text-muted-foreground" />
+            )}
+            <span className="font-medium">{entry.label}</span>
+            <span className="min-w-0 flex-1 leading-relaxed text-muted-foreground">
+              {entry.reason}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+/** The one command that registers the MCP server, copyable rather than retyped. */
+function AgentDoorRow() {
+  const [copied, setCopied] = React.useState(false)
+  const command = 'claude mcp add yapper -- /path/to/yapper-mcp'
+
+  return (
+    <div className="flex flex-col gap-2 px-3 py-2.5">
+      <button
+        type="button"
+        onClick={() => {
+          void (async () => {
+            await navigator.clipboard.writeText(command)
+            setCopied(true)
+            window.setTimeout(() => {
+              setCopied(false)
+            }, 1600)
+          })()
+        }}
+        className="flex items-center gap-1.5 self-start rounded-md border border-border/60 bg-background/40 px-2 py-1 font-mono text-xs hover:border-border"
+      >
+        {command}
+        {copied ? (
+          <IconCheck className="size-3.5 text-success" />
+        ) : (
+          <IconCopy className="size-3.5 text-muted-foreground" />
+        )}
+      </button>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        It reads the same store this app uses, so it works whether or not Yapper is open — but a
+        post it schedules still only goes out while Yapper is running. It refuses anything that
+        would not fit its destinations, using each platform&apos;s own message.
+      </p>
+    </div>
   )
 }
 

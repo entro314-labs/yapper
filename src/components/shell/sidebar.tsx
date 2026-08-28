@@ -1,7 +1,9 @@
 import {
   IconCalendarClock,
+  IconChartBar,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
+  IconNotebook,
   IconPencilPlus,
   IconSettings,
   IconStack2,
@@ -33,6 +35,8 @@ const NAV: NavItem[] = [
   { to: '/', label: 'Queue', icon: IconStack2 },
   { to: '/compose', label: 'Compose', icon: IconPencilPlus },
   { to: '/calendar', label: 'Calendar', icon: IconCalendarClock },
+  { to: '/notes', label: 'Notes', icon: IconNotebook },
+  { to: '/stats', label: 'Stats', icon: IconChartBar },
   { to: '/accounts', label: 'Accounts', icon: IconUsers },
 ]
 

@@ -23,6 +23,16 @@ export const IPC_COMMANDS = {
   checkPost: 'check_post',
   resolveMedia: 'resolve_media',
 
+  listNotes: 'list_notes',
+  saveNote: 'save_note',
+  deleteNote: 'delete_note',
+
+  aiAvailability: 'ai_availability',
+  suggestPosts: 'suggest_posts',
+
+  getStats: 'get_stats',
+  refreshEngagement: 'refresh_engagement',
+
   getSettings: 'get_settings',
   updateSettings: 'update_settings',
   oauthRedirectUri: 'oauth_redirect_uri',
@@ -37,6 +47,7 @@ export const IPC_EVENTS = {
   publishing: 'yapper://publishing',
   /** A connect flow finished, either way. Payload: `AuthOutcome`. */
   auth: 'yapper://auth',
+  notesChanged: 'yapper://notes-changed',
 } as const
 
 type ValueOf<T> = T[keyof T]

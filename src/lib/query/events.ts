@@ -16,6 +16,12 @@ export async function attachEventBridge(client: QueryClient): Promise<() => void
   const unlisteners = await Promise.all([
     subscribeEvent(IPC_EVENTS.queueChanged, () => {
       void client.invalidateQueries({ queryKey: queryKeys.queue.root })
+      // Stats are computed FROM the queue, so anything that moves a post moves
+      // them too — without this the figures go stale the moment one publishes.
+      void client.invalidateQueries({ queryKey: queryKeys.stats.root })
+    }),
+    subscribeEvent(IPC_EVENTS.notesChanged, () => {
+      void client.invalidateQueries({ queryKey: queryKeys.notes.root })
     }),
     subscribeEvent(IPC_EVENTS.accountsChanged, () => {
       void client.invalidateQueries({ queryKey: queryKeys.accounts.root })

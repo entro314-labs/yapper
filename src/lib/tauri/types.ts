@@ -153,6 +153,11 @@ export interface Settings {
   missedPolicy: 'skip' | 'post_late'
   graceMinutes: number
   launchAtLogin: boolean
+  /** Off by default — the assistant surfaces stay hidden until it is switched on. */
+  aiBackend: AiBackend
+  /** Empty means the tool's own default model, which is usually the right one. */
+  aiModel: string
+  aiEffort: string
 }
 
 /** `commands::AuthOutcome`, delivered on `yapper://auth`. */
@@ -172,4 +177,105 @@ export interface SavePostInput {
   scheduledAt: string | null
   targets: Array<{ accountId: number; options: Record<string, string> }>
   media: Array<{ path: string; altText: string | null }>
+}
+
+// ─── Notes ──────────────────────────────────────────────────────────────────
+
+/** `db::Note` */
+export interface Note {
+  id: number
+  title: string
+  body: string
+  pinned: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+/** `commands::SaveNoteInput` */
+export interface SaveNoteInput {
+  id: number | null
+  title: string
+  body: string
+  pinned: boolean
+}
+
+// ─── Assistant ──────────────────────────────────────────────────────────────
+
+/** `ai::Backend` */
+export type AiBackend = 'off' | 'apple' | 'claude' | 'codex'
+
+/** `ai::Availability` */
+export interface AiAvailability {
+  backend: AiBackend
+  label: string
+  available: boolean
+  /**
+   * The framework's or the tool's own words — an assistant that is "unavailable" with no reason is
+   * unfixable.
+   */
+  reason: string
+}
+
+/** `ai::Suggestion` */
+export interface Suggestion {
+  body: string
+  title?: string | null
+  rationale?: string | null
+}
+
+// ─── Stats ──────────────────────────────────────────────────────────────────
+
+/** `stats::StatsFilter` */
+export interface StatsFilter {
+  since: string | null
+  until: string | null
+  platforms: PlatformId[]
+  accountIds: number[]
+}
+
+/** `stats::Bucket`. `postIds` is what makes a bar a drilldown rather than a picture. */
+export interface Bucket {
+  key: string
+  label: string
+  published: number
+  failed: number
+  postIds: number[]
+}
+
+/** `stats::EngagementTotals` */
+export interface EngagementTotals {
+  likes: number
+  reposts: number
+  replies: number
+  /**
+   * How many destinations the totals are summed from — without it, "0 likes" and "nothing fetched
+   * yet" look identical.
+   */
+  measured: number
+  oldestFetch: string | null
+}
+
+/** `stats::Stats` */
+export interface Stats {
+  published: number
+  failed: number
+  scheduled: number
+  drafts: number
+  missed: number
+  byPlatform: Bucket[]
+  byAccount: Bucket[]
+  byHour: Bucket[]
+  byWeekday: Bucket[]
+  byDay: Bucket[]
+  failures: Bucket[]
+  engagement: EngagementTotals
+  /** Platforms in scope whose engagement Yapper cannot read, with the reason. */
+  engagementGaps: Array<[PlatformId, string]>
+}
+
+/** `stats::RefreshReport` */
+export interface RefreshReport {
+  updated: number
+  skipped: number
+  problems: string[]
 }
