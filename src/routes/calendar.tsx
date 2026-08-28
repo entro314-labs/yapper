@@ -16,7 +16,13 @@ export const Route = createFileRoute('/calendar')({ component: CalendarScreen })
 
 const WEEKDAY = new Intl.DateTimeFormat(undefined, { weekday: 'short' })
 const MONTH = new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' })
-const TIME = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })
+// 24-hour on purpose: a day cell is roughly ten characters wide, and "5:12 AM"
+// wraps onto two lines in it where "05:12" does not.
+const TIME = new Intl.DateTimeFormat(undefined, {
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+})
 
 /**
  * A month of the queue, laid out so the shape of a posting week is visible — which is the thing a
@@ -166,7 +172,7 @@ function CalendarScreen() {
                   className="flex w-full items-center gap-1 rounded border border-border/50 bg-background/50 px-1 py-0.5 text-left text-[11px] hover:border-border"
                 >
                   <StatusDot status={post.status} />
-                  <span className="tabular-nums text-muted-foreground">
+                  <span className="shrink-0 whitespace-nowrap tabular-nums text-muted-foreground">
                     {TIME.format(new Date(post.scheduledAt ?? ''))}
                   </span>
                   <span className="flex -space-x-0.5">

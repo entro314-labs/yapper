@@ -151,7 +151,11 @@ export function PostCard({ post, accounts }: { post: PostDetail; accounts: Map<n
                   r/{target.options.subreddit}
                 </span>
               ) : null}
-              <StatusDot status={target.status} className="ml-auto" />
+              {/* The dot sits WITH the destination it describes. Pushed to the far
+                  edge it read as a separate right-hand column, which is exactly
+                  the collapsed single-status view this row exists to avoid. */}
+              <StatusDot status={target.status} />
+              <span className="ml-auto" />
 
               {target.remoteUrl ? (
                 <button
