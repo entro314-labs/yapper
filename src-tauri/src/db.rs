@@ -18,7 +18,7 @@ use serde::Serialize;
 use crate::error::{AppError, Result, internal};
 use crate::platforms::PlatformId;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -106,6 +106,31 @@ pub struct Media {
     pub position: i64,
 }
 
+/// A note: the scratch surface, and the context the assistant reads from.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Note {
+    pub id: i64,
+    pub title: String,
+    pub body: String,
+    pub pinned: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// What one published destination earned, as of the last refresh. `None` counts
+/// are a platform that does not report that dimension, not a zero.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Metrics {
+    pub target_id: i64,
+    pub fetched_at: String,
+    pub likes: Option<i64>,
+    pub reposts: Option<i64>,
+    pub replies: Option<i64>,
+    pub quotes: Option<i64>,
+}
+
 /// A post with everything the renderer draws in one row of the queue.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -179,89 +204,45 @@ impl Db {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// The schema ladder.
+    ///
+    /// Each step is applied once, in order, and the version is written after
+    /// each one — so an interrupted upgrade resumes rather than re-running a
+    /// step that already landed. `CREATE TABLE IF NOT EXISTS` alone stops being
+    /// enough the first time a column is added to a table that already holds a
+    /// user's scheduled posts, which is why this exists before that happens.
     fn migrate(&self) -> Result<()> {
         let conn = self.lock();
+
+        // `meta` first and unconditionally: it is where the version lives, so it
+        // cannot itself be gated on the version.
         conn.execute_batch(
-            r"
-            CREATE TABLE IF NOT EXISTS meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS accounts (
-                id               INTEGER PRIMARY KEY,
-                platform         TEXT NOT NULL,
-                remote_id        TEXT NOT NULL,
-                handle           TEXT NOT NULL,
-                display_name     TEXT,
-                avatar_url       TEXT,
-                instance         TEXT,
-                scopes           TEXT,
-                char_limit       INTEGER,
-                token_expires_at TEXT,
-                status           TEXT NOT NULL DEFAULT 'ok',
-                created_at       TEXT NOT NULL,
-                UNIQUE(platform, remote_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS posts (
-                id           INTEGER PRIMARY KEY,
-                body         TEXT NOT NULL,
-                title        TEXT,
-                link         TEXT,
-                scheduled_at TEXT,
-                status       TEXT NOT NULL,
-                created_at   TEXT NOT NULL,
-                updated_at   TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS posts_due ON posts(status, scheduled_at);
-
-            CREATE TABLE IF NOT EXISTS post_targets (
-                id              INTEGER PRIMARY KEY,
-                post_id         INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-                account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                options         TEXT NOT NULL DEFAULT '{}',
-                status          TEXT NOT NULL DEFAULT 'pending',
-                remote_id       TEXT,
-                remote_url      TEXT,
-                error           TEXT,
-                attempts        INTEGER NOT NULL DEFAULT 0,
-                next_attempt_at TEXT,
-                published_at    TEXT,
-                UNIQUE(post_id, account_id)
-            );
-            CREATE INDEX IF NOT EXISTS targets_by_post ON post_targets(post_id);
-
-            -- Media columns exist from the first schema even where the adapter
-            -- cannot upload yet: retrofitting an attachment table onto a store
-            -- with live scheduled posts is the expensive path.
-            CREATE TABLE IF NOT EXISTS media (
-                id         INTEGER PRIMARY KEY,
-                post_id    INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-                path       TEXT NOT NULL,
-                mime       TEXT NOT NULL,
-                bytes      INTEGER NOT NULL,
-                alt_text   TEXT,
-                position   INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS media_by_post ON media(post_id, position);
-
-            CREATE TABLE IF NOT EXISTS attempts (
-                id        INTEGER PRIMARY KEY,
-                target_id INTEGER NOT NULL REFERENCES post_targets(id) ON DELETE CASCADE,
-                at        TEXT NOT NULL,
-                ok        INTEGER NOT NULL,
-                detail    TEXT
-            );
-            CREATE INDEX IF NOT EXISTS attempts_by_target ON attempts(target_id, at DESC);
-            ",
+            "CREATE TABLE IF NOT EXISTS meta (
+                 key   TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );",
         )?;
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![SCHEMA_VERSION.to_string()],
-        )?;
+
+        let mut version: i64 = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+
+        while version < SCHEMA_VERSION {
+            let next = version + 1;
+            conn.execute_batch(step_sql(next))?;
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![next.to_string()],
+            )?;
+            version = next;
+        }
         Ok(())
     }
 
@@ -774,7 +755,234 @@ impl Db {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
+
+    // ─── Notes ──────────────────────────────────────────────────────────────
+
+    /// Pinned first, then most recently touched — a note you keep coming back to
+    /// should not sink because you edited something else.
+    pub fn list_notes(&self) -> Result<Vec<Note>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, body, pinned, created_at, updated_at
+               FROM notes ORDER BY pinned DESC, updated_at DESC",
+        )?;
+        stmt.query_map([], map_note)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn get_note(&self, id: i64) -> Result<Note> {
+        self.lock()
+            .query_row(
+                "SELECT id, title, body, pinned, created_at, updated_at
+                   FROM notes WHERE id = ?1",
+                params![id],
+                map_note,
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    AppError::NotFound(format!("No note with id {id}."))
+                }
+                other => other.into(),
+            })
+    }
+
+    pub fn save_note(&self, id: Option<i64>, title: &str, body: &str, pinned: bool) -> Result<i64> {
+        let conn = self.lock();
+        let now = now_rfc3339();
+        if let Some(id) = id {
+            let changed = conn.execute(
+                "UPDATE notes SET title = ?2, body = ?3, pinned = ?4, updated_at = ?5
+                  WHERE id = ?1",
+                params![id, title, body, pinned, now],
+            )?;
+            if changed == 0 {
+                return Err(AppError::NotFound(format!("No note with id {id}.")));
+            }
+            return Ok(id);
+        }
+        conn.execute(
+            "INSERT INTO notes (title, body, pinned, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![title, body, pinned, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn delete_note(&self, id: i64) -> Result<()> {
+        let changed = self
+            .lock()
+            .execute("DELETE FROM notes WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            return Err(AppError::NotFound(format!("No note with id {id}.")));
+        }
+        Ok(())
+    }
+
+    // ─── Engagement metrics ─────────────────────────────────────────────────
+
+    pub fn save_metrics(&self, metrics: &Metrics) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO metrics (target_id, fetched_at, likes, reposts, replies, quotes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(target_id) DO UPDATE SET
+               fetched_at = excluded.fetched_at,
+               likes      = excluded.likes,
+               reposts    = excluded.reposts,
+               replies    = excluded.replies,
+               quotes     = excluded.quotes",
+            params![
+                metrics.target_id,
+                metrics.fetched_at,
+                metrics.likes,
+                metrics.reposts,
+                metrics.replies,
+                metrics.quotes
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_metrics(&self) -> Result<Vec<Metrics>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT target_id, fetched_at, likes, reposts, replies, quotes FROM metrics",
+        )?;
+        stmt.query_map([], map_metrics)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Every destination that actually published, with the account it went to —
+    /// the input to a metrics refresh and to the stats screen alike.
+    pub fn published_targets(&self) -> Result<Vec<(PostTarget, Account)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {TARGET_COLUMNS_T}, {ACCOUNT_COLUMNS_A}
+               FROM post_targets t
+               JOIN accounts a ON a.id = t.account_id
+              WHERE t.status = '{TARGET_PUBLISHED}' AND t.remote_id IS NOT NULL
+              ORDER BY t.published_at DESC"
+        ))?;
+        stmt.query_map([], |row| {
+            Ok((map_target(row)?, map_account_at(row, TARGET_COLUMN_COUNT)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+    }
 }
+
+/// The SQL for one ladder step. Steps are append-only: once a version has
+/// shipped its statement never changes, because a store that already ran it
+/// will never run it again.
+fn step_sql(version: i64) -> &'static str {
+    match version {
+        1 => V1_INITIAL,
+        2 => V2_NOTES_AND_METRICS,
+        // Unreachable while `SCHEMA_VERSION` and this match move together, and a
+        // no-op rather than a panic if they ever do not: a store one version
+        // ahead of the binary (a downgrade) is better left alone than crashed on.
+        _ => "",
+    }
+}
+
+const V1_INITIAL: &str = r"
+    CREATE TABLE IF NOT EXISTS accounts (
+        id               INTEGER PRIMARY KEY,
+        platform         TEXT NOT NULL,
+        remote_id        TEXT NOT NULL,
+        handle           TEXT NOT NULL,
+        display_name     TEXT,
+        avatar_url       TEXT,
+        instance         TEXT,
+        scopes           TEXT,
+        char_limit       INTEGER,
+        token_expires_at TEXT,
+        status           TEXT NOT NULL DEFAULT 'ok',
+        created_at       TEXT NOT NULL,
+        UNIQUE(platform, remote_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS posts (
+        id           INTEGER PRIMARY KEY,
+        body         TEXT NOT NULL,
+        title        TEXT,
+        link         TEXT,
+        scheduled_at TEXT,
+        status       TEXT NOT NULL,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS posts_due ON posts(status, scheduled_at);
+
+    CREATE TABLE IF NOT EXISTS post_targets (
+        id              INTEGER PRIMARY KEY,
+        post_id         INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+        account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        options         TEXT NOT NULL DEFAULT '{}',
+        status          TEXT NOT NULL DEFAULT 'pending',
+        remote_id       TEXT,
+        remote_url      TEXT,
+        error           TEXT,
+        attempts        INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT,
+        published_at    TEXT,
+        UNIQUE(post_id, account_id)
+    );
+    CREATE INDEX IF NOT EXISTS targets_by_post ON post_targets(post_id);
+
+    -- Media columns exist from the first schema even where the adapter cannot
+    -- upload yet: retrofitting an attachment table onto a store with live
+    -- scheduled posts is the expensive path.
+    CREATE TABLE IF NOT EXISTS media (
+        id         INTEGER PRIMARY KEY,
+        post_id    INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+        path       TEXT NOT NULL,
+        mime       TEXT NOT NULL,
+        bytes      INTEGER NOT NULL,
+        alt_text   TEXT,
+        position   INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS media_by_post ON media(post_id, position);
+
+    CREATE TABLE IF NOT EXISTS attempts (
+        id        INTEGER PRIMARY KEY,
+        target_id INTEGER NOT NULL REFERENCES post_targets(id) ON DELETE CASCADE,
+        at        TEXT NOT NULL,
+        ok        INTEGER NOT NULL,
+        detail    TEXT
+    );
+    CREATE INDEX IF NOT EXISTS attempts_by_target ON attempts(target_id, at DESC);
+";
+
+/// Notes (the scratch surface, and what the assistant reads as context) and
+/// engagement metrics (what a published destination earned, when last fetched).
+const V2_NOTES_AND_METRICS: &str = r"
+    CREATE TABLE IF NOT EXISTS notes (
+        id         INTEGER PRIMARY KEY,
+        title      TEXT NOT NULL DEFAULT '',
+        body       TEXT NOT NULL,
+        pinned     INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS notes_recent ON notes(pinned DESC, updated_at DESC);
+
+    -- ONE row per destination, replaced on each refresh rather than appended.
+    -- Nothing polls in the background, so a history would be a handful of rows
+    -- at whatever moments someone happened to press Refresh — a shape that
+    -- invites being read as a trend when it is not one. The counts are `as of
+    -- fetched_at`, and the UI says so.
+    CREATE TABLE IF NOT EXISTS metrics (
+        target_id  INTEGER PRIMARY KEY REFERENCES post_targets(id) ON DELETE CASCADE,
+        fetched_at TEXT NOT NULL,
+        likes      INTEGER,
+        reposts    INTEGER,
+        replies    INTEGER,
+        quotes     INTEGER
+    );
+";
 
 /// One attachment as the renderer hands it over: a path on disk the user picked,
 /// resolved to its type and size by [`crate::media`] before it is stored.
@@ -866,6 +1074,28 @@ fn map_target(row: &rusqlite::Row<'_>) -> rusqlite::Result<PostTarget> {
     })
 }
 
+fn map_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<Note> {
+    Ok(Note {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        body: row.get(2)?,
+        pinned: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn map_metrics(row: &rusqlite::Row<'_>) -> rusqlite::Result<Metrics> {
+    Ok(Metrics {
+        target_id: row.get(0)?,
+        fetched_at: row.get(1)?,
+        likes: row.get(2)?,
+        reposts: row.get(3)?,
+        replies: row.get(4)?,
+        quotes: row.get(5)?,
+    })
+}
+
 fn map_media(row: &rusqlite::Row<'_>) -> rusqlite::Result<Media> {
     Ok(Media {
         id: row.get(0)?,
@@ -919,6 +1149,146 @@ mod tests {
         db.set_targets(post, &[(account, serde_json::json!({}))])
             .expect("targets");
         (db, account, post)
+    }
+
+    #[test]
+    fn a_fresh_store_lands_on_the_current_schema_version() {
+        let db = Db::open_in_memory().expect("store");
+        assert_eq!(
+            db.get_meta("schema_version").expect("version"),
+            Some(SCHEMA_VERSION.to_string())
+        );
+    }
+
+    #[test]
+    fn a_v1_store_upgrades_without_losing_anything() {
+        // A store as it looked before notes and metrics existed, complete with a
+        // scheduled post — the case the ladder exists to protect.
+        let conn = Connection::open_in_memory().expect("conn");
+        conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .expect("meta");
+        conn.execute_batch(V1_INITIAL).expect("v1");
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('schema_version', '1')",
+            [],
+        )
+        .expect("stamp");
+        conn.execute(
+            "INSERT INTO posts (body, title, link, scheduled_at, status, created_at, updated_at)
+             VALUES ('kept', NULL, NULL, '2026-01-01T00:00:00Z', 'scheduled', 'x', 'x')",
+            [],
+        )
+        .expect("seed");
+
+        let db = Db::from_connection(conn).expect("upgrade");
+        assert_eq!(
+            db.get_meta("schema_version").expect("version"),
+            Some("2".to_string())
+        );
+        assert_eq!(db.list_posts().expect("posts").len(), 1);
+        // The v2 tables now exist and are empty.
+        assert!(db.list_notes().expect("notes").is_empty());
+        assert!(db.list_metrics().expect("metrics").is_empty());
+    }
+
+    #[test]
+    fn migrating_twice_is_a_no_op() {
+        let db = Db::open_in_memory().expect("store");
+        db.save_note(None, "kept", "body", false).expect("note");
+        db.migrate().expect("second run");
+        assert_eq!(db.list_notes().expect("notes").len(), 1);
+    }
+
+    #[test]
+    fn a_note_round_trips_and_updates_in_place() {
+        let db = Db::open_in_memory().expect("store");
+        let id = db
+            .save_note(None, "Idea", "the body", false)
+            .expect("create");
+        let same = db
+            .save_note(Some(id), "Idea", "edited", true)
+            .expect("update");
+        assert_eq!(id, same);
+
+        let note = db.get_note(id).expect("read");
+        assert_eq!(note.body, "edited");
+        assert!(note.pinned);
+        assert_eq!(db.list_notes().expect("list").len(), 1);
+    }
+
+    #[test]
+    fn pinned_notes_sort_above_more_recent_ones() {
+        let db = Db::open_in_memory().expect("store");
+        let pinned = db.save_note(None, "pinned", "a", true).expect("a");
+        db.save_note(None, "newer", "b", false).expect("b");
+        assert_eq!(db.list_notes().expect("list")[0].id, pinned);
+    }
+
+    #[test]
+    fn metrics_replace_rather_than_accumulate() {
+        let (db, _, post, target) = {
+            let db = Db::open_in_memory().expect("store");
+            let account = db
+                .upsert_account(PlatformId::Bluesky, &connected("did:1", "me"))
+                .expect("account");
+            let post = db
+                .create_post("hi", None, None, Some(&now_rfc3339()), POST_SCHEDULED)
+                .expect("post");
+            db.set_targets(post, &[(account, serde_json::json!({}))])
+                .expect("targets");
+            let target = db.list_targets(post).expect("targets")[0].id;
+            (db, account, post, target)
+        };
+        let _ = post;
+
+        for likes in [3, 9] {
+            db.save_metrics(&Metrics {
+                target_id: target,
+                fetched_at: now_rfc3339(),
+                likes: Some(likes),
+                reposts: Some(1),
+                replies: None,
+                quotes: None,
+            })
+            .expect("save");
+        }
+
+        let stored = db.list_metrics().expect("metrics");
+        assert_eq!(stored.len(), 1, "a refresh replaces, it does not append");
+        assert_eq!(stored[0].likes, Some(9));
+        assert_eq!(
+            stored[0].replies, None,
+            "an unreported dimension is not a zero"
+        );
+    }
+
+    #[test]
+    fn published_targets_skips_everything_still_pending() {
+        let (db, _, post) = {
+            let db = Db::open_in_memory().expect("store");
+            let a = db
+                .upsert_account(PlatformId::Bluesky, &connected("did:a", "a"))
+                .expect("a");
+            let b = db
+                .upsert_account(PlatformId::Mastodon, &connected("id:b", "b"))
+                .expect("b");
+            let post = db
+                .create_post("hi", None, None, Some(&now_rfc3339()), POST_SCHEDULED)
+                .expect("post");
+            db.set_targets(
+                post,
+                &[(a, serde_json::json!({})), (b, serde_json::json!({}))],
+            )
+            .expect("targets");
+            (db, a, post)
+        };
+        let targets = db.list_targets(post).expect("targets");
+        db.finish_target_ok(targets[0].id, "at://1", None)
+            .expect("ok");
+
+        let published = db.published_targets().expect("published");
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].0.id, targets[0].id);
     }
 
     #[test]

@@ -1,14 +1,17 @@
 //! Yapper — a desktop composer and scheduler for social platforms with an open API.
 
+mod ai;
 mod commands;
-mod db;
+pub mod db;
 mod error;
 mod http;
+pub mod mcp;
 mod media;
 mod oauth;
 mod platforms;
 mod scheduler;
 mod secrets;
+mod stats;
 mod windowing;
 
 use std::sync::Arc;
@@ -40,6 +43,10 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        // Apple's on-device model. Registered unconditionally: the plugin ships
+        // its own non-Apple-silicon stub, so one builder covers every platform
+        // and the assistant tier simply reports "unavailable" off macOS.
+        .plugin(tauri_plugin_apple_intelligence::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         // Started with `--hidden` so a login launch waits in the background: a
@@ -109,6 +116,13 @@ pub fn run() {
             commands::retry_target,
             commands::check_post,
             commands::resolve_media,
+            commands::list_notes,
+            commands::save_note,
+            commands::delete_note,
+            commands::ai_availability,
+            commands::suggest_posts,
+            commands::get_stats,
+            commands::refresh_engagement,
             commands::get_settings,
             commands::update_settings,
             commands::oauth_redirect_uri,

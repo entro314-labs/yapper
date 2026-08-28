@@ -3,19 +3,22 @@
 //! what is worth retrying (see `src/lib/query/client.ts`).
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::db::{self, Account, Attempt, Db, MediaInput, PostDetail};
+use crate::ai::{self, Availability, Backend, DraftRequest, Suggestion};
+use crate::db::{self, Account, Attempt, Db, MediaInput, Note, PostDetail};
 use crate::error::{AppError, Result};
 use crate::platforms::{self, AppCredentials, ConnectInput, PlatformId, PlatformInfo};
 use crate::scheduler::{
     self, EVENT_ACCOUNTS_CHANGED, EVENT_QUEUE_CHANGED, META_GRACE_MINUTES, META_MISSED_POLICY,
     MissedPolicy, Scheduler,
 };
+use crate::stats::{self, RefreshReport, Stats, StatsFilter};
 use crate::{media, secrets};
 
 pub const EVENT_AUTH: &str = "yapper://auth";
@@ -497,6 +500,142 @@ pub fn resolve_media(paths: Vec<String>) -> Result<Vec<ResolvedMedia>> {
         .collect()
 }
 
+// ─── Notes ──────────────────────────────────────────────────────────────────
+
+pub const EVENT_NOTES_CHANGED: &str = "yapper://notes-changed";
+
+#[tauri::command]
+pub fn list_notes(state: State<'_, AppState>) -> Result<Vec<Note>> {
+    state.db.list_notes()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveNoteInput {
+    pub id: Option<i64>,
+    #[serde(default)]
+    pub title: String,
+    pub body: String,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+#[tauri::command]
+pub fn save_note(app: AppHandle, state: State<'_, AppState>, input: SaveNoteInput) -> Result<i64> {
+    let body = input.body.trim();
+    if body.is_empty() {
+        return Err(AppError::InvalidInput("A note needs some text.".into()));
+    }
+    let id = state
+        .db
+        .save_note(input.id, input.title.trim(), body, input.pinned)?;
+    let _ = app.emit(EVENT_NOTES_CHANGED, id);
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn delete_note(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<()> {
+    state.db.delete_note(id)?;
+    let _ = app.emit(EVENT_NOTES_CHANGED, id);
+    Ok(())
+}
+
+// ─── Assistant ──────────────────────────────────────────────────────────────
+
+/// What every backend can do right now, for the Settings picker. Probing runs a
+/// `--version` per CLI, so this is a command rather than part of `get_settings`.
+#[tauri::command]
+pub fn ai_availability(app: AppHandle) -> Vec<Availability> {
+    ai::all_availability(&app)
+}
+
+/// Asks the configured assistant for drafts.
+///
+/// The drafts come back to the CALLER; nothing is written. They land in the
+/// composer, where the same validation and the same human click that guard every
+/// other post still apply — the assistant has no path to the queue.
+#[tauri::command]
+pub fn suggest_posts(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    context: String,
+    instructions: String,
+    note_ids: Vec<i64>,
+    account_ids: Vec<i64>,
+    count: usize,
+) -> Result<Vec<Suggestion>> {
+    let backend = Backend::parse(state.db.get_meta(ai::META_BACKEND)?.as_deref());
+    let model = state.db.get_meta(ai::META_MODEL)?;
+    let effort = state.db.get_meta(ai::META_EFFORT)?;
+
+    // Notes are pulled here rather than pasted by the renderer: the assistant
+    // should read what is actually saved, not a copy that may have drifted.
+    let mut material = context.trim().to_string();
+    for id in note_ids {
+        let note = state.db.get_note(id)?;
+        if !material.is_empty() {
+            material.push_str("\n\n");
+        }
+        if !note.title.trim().is_empty() {
+            let _ = writeln!(material, "## {}", note.title.trim());
+        }
+        material.push_str(note.body.trim());
+    }
+    if material.is_empty() {
+        return Err(AppError::InvalidInput(
+            "Give the assistant something to work from — a note, or some text.".into(),
+        ));
+    }
+
+    // The destinations' real limits go into the prompt, so drafts are written to
+    // fit rather than trimmed to fit afterwards.
+    let destinations = account_ids
+        .iter()
+        .map(|id| {
+            let account = state.db.get_account(*id)?;
+            let adapter = platforms::adapter(account.platform);
+            Ok((
+                adapter.info().name.to_string(),
+                scheduler::effective_char_limit(&account, adapter),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    ai::suggest(
+        &app,
+        backend,
+        model.as_deref(),
+        effort.as_deref(),
+        &DraftRequest {
+            context: material,
+            instructions,
+            destinations,
+            count,
+        },
+    )
+}
+
+// ─── Stats ──────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_stats(state: State<'_, AppState>, filter: StatsFilter) -> Result<Stats> {
+    // Bounds are parsed for their side effect: a value the store could not have
+    // written would silently match nothing, which reads as "you posted nothing".
+    stats::parse_bound(filter.since.as_deref())?;
+    stats::parse_bound(filter.until.as_deref())?;
+    stats::compute(&state.db, &filter)
+}
+
+/// Fetches engagement for every published destination Yapper can read. Manual
+/// on purpose: a background poller against five APIs spends a rate-limit budget
+/// on numbers nobody is looking at.
+#[tauri::command]
+pub fn refresh_engagement(app: AppHandle, state: State<'_, AppState>) -> Result<RefreshReport> {
+    let report = stats::refresh_engagement(&state.db)?;
+    let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+    Ok(report)
+}
+
 // ─── Settings ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -510,6 +649,15 @@ pub struct Settings {
     pub missed_policy: String,
     pub grace_minutes: i64,
     pub launch_at_login: bool,
+    /// `off` | `apple` | `claude` | `codex`. Off by default: an assistant panel
+    /// that errors on first click because nothing is configured is worse than
+    /// one you opted into.
+    pub ai_backend: String,
+    /// Passed to the CLI backends as `--model` / `-m`. Empty means the tool's
+    /// own default, which is almost always the right one.
+    pub ai_model: String,
+    /// `low` | `medium` | `high` | `xhigh`. Empty means the tool's default.
+    pub ai_effort: String,
 }
 
 impl Default for Settings {
@@ -520,6 +668,9 @@ impl Default for Settings {
             missed_policy: MissedPolicy::Skip.as_str().into(),
             grace_minutes: 15,
             launch_at_login: false,
+            ai_backend: Backend::Off.as_str().into(),
+            ai_model: String::new(),
+            ai_effort: String::new(),
         }
     }
 }
@@ -545,6 +696,11 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
             .db
             .get_meta("launch_at_login")?
             .is_some_and(|value| value == "true"),
+        ai_backend: Backend::parse(state.db.get_meta(ai::META_BACKEND)?.as_deref())
+            .as_str()
+            .into(),
+        ai_model: state.db.get_meta(ai::META_MODEL)?.unwrap_or_default(),
+        ai_effort: state.db.get_meta(ai::META_EFFORT)?.unwrap_or_default(),
     })
 }
 
@@ -575,6 +731,16 @@ pub fn update_settings(
     state
         .db
         .set_meta("launch_at_login", &settings.launch_at_login.to_string())?;
+    state.db.set_meta(
+        ai::META_BACKEND,
+        Backend::parse(Some(&settings.ai_backend)).as_str(),
+    )?;
+    state
+        .db
+        .set_meta(ai::META_MODEL, settings.ai_model.trim())?;
+    state
+        .db
+        .set_meta(ai::META_EFFORT, settings.ai_effort.trim())?;
     get_settings(state)
 }
 

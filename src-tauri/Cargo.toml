@@ -13,8 +13,19 @@ default-run = "yapper"
 name = "yapper_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# The agent door: an MCP stdio server over the same store, spawnable by any
+# agent host (`claude mcp add yapper -- .../yapper-mcp`). A separate binary so it
+# runs whether or not the app is open.
+[[bin]]
+name = "yapper-mcp"
+path = "src/bin/mcp.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# build.rs reads `cargo metadata` to locate the Apple Intelligence prebuilt
+# dylib (macOS only) — cargo is the only thing that knows where a vendored or
+# path-overridden dependency actually lives.
+serde_json = "1"
 
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
@@ -26,6 +37,11 @@ tauri-plugin-single-instance = "2"
 # have the app open is not a scheduler.
 tauri-plugin-autostart = "2"
 tauri-plugin-window-state = "2"
+# Apple's on-device Foundation model: the free, offline, keyless assistant tier.
+# Deliberately NOT platform-gated — the plugin carries its own non-Apple-silicon
+# stub whose every command rejects with `UnsupportedPlatform`, so registering it
+# unconditionally keeps ONE builder and one capability file across platforms.
+tauri-plugin-apple-intelligence = "0.12.0"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
