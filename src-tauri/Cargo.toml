@@ -1,6 +1,6 @@
 [package]
 name = "yapper"
-version = "0.1.0"
+version = "0.2.0"
 description = "Yapper - compose, schedule and publish to Bluesky, Mastodon, Reddit, X and LinkedIn"
 authors = ["entro314-labs"]
 license = "MIT"

@@ -47,26 +47,24 @@ pub struct StatsFilter {
 }
 
 impl StatsFilter {
-    /// Whether one published destination is in scope.
-    fn matches(&self, target: &PostTarget, account: &db::Account) -> bool {
+    /// Whether one destination is in scope.
+    ///
+    /// `fallback_at` is the POST's own time, and it is load-bearing: a FAILED
+    /// destination has no `published_at`, so dating it by that alone drops every
+    /// failure out of any range — which would leave "why things failed" silently
+    /// empty exactly when it matters most.
+    fn matches(&self, target: &PostTarget, account: &db::Account, fallback_at: &str) -> bool {
         if !self.platforms.is_empty() && !self.platforms.contains(&account.platform) {
             return false;
         }
         if !self.account_ids.is_empty() && !self.account_ids.contains(&account.id) {
             return false;
         }
-        let at = target
-            .published_at
-            .as_deref()
-            .or(target.next_attempt_at.as_deref());
-        match (at, self.since.as_deref(), self.until.as_deref()) {
-            (Some(at), Some(since), _) if at < since => false,
-            (Some(at), _, Some(until)) if at >= until => false,
-            // A destination with no timestamp at all (never attempted) is only
-            // excluded when a bound was actually asked for.
-            (None, None, None) | (Some(_), _, _) => true,
-            (None, _, _) => false,
+        let at = target.published_at.as_deref().unwrap_or(fallback_at);
+        if self.since.as_deref().is_some_and(|since| at < since) {
+            return false;
         }
+        self.until.as_deref().is_none_or(|until| at < until)
     }
 }
 
@@ -212,7 +210,15 @@ pub fn compute(database: &Db, filter: &StatsFilter) -> Result<Stats> {
             let Some(account) = accounts.get(&target.account_id) else {
                 continue;
             };
-            if !filter.matches(target, account) {
+            // A post is dated by when it was meant to go out, falling back to
+            // when it was last touched — the only timestamps a never-published
+            // destination has.
+            let fallback = detail
+                .post
+                .scheduled_at
+                .as_deref()
+                .unwrap_or(&detail.post.updated_at);
+            if !filter.matches(target, account, fallback) {
                 continue;
             }
             if !platforms_in_scope.contains(&account.platform) {
@@ -741,6 +747,24 @@ mod tests {
             stats.engagement.oldest_fetch.as_deref(),
             Some("2026-01-01T00:00:00+00:00")
         );
+    }
+
+    #[test]
+    fn a_failed_destination_stays_in_range_despite_having_no_publish_time() {
+        // The regression this guards: a failure has no `published_at`, so dating
+        // it by that alone dropped every one of them out of the default view and
+        // "why things failed" was always empty.
+        let (db, _, _) = seeded();
+        let stats = compute(
+            &db,
+            &StatsFilter {
+                since: Some((Utc::now() - chrono::Duration::days(30)).to_rfc3339()),
+                ..Default::default()
+            },
+        )
+        .expect("stats");
+        assert_eq!(stats.failed, 1, "a failure must survive a date filter");
+        assert_eq!(stats.failures.len(), 1);
     }
 
     #[test]

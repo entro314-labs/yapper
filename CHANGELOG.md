@@ -4,6 +4,39 @@ All notable changes to Yapper are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-08-28
+
+### Added
+
+- **Notes.** A scratch surface with no obligation to publish, and the material
+  the assistant reads. "Draft from this" opens the composer with the suggest
+  panel already pointed at the note.
+- **An assistant tier**, off by default: Apple's on-device Foundation model
+  through the Tauri plugin's Rust API, or the `claude` / `codex` CLIs invoked
+  one-shot with the prompt on stdin. Yapper ships no API key. Drafts are written
+  to the real character limits of the destinations you picked, and land in the
+  composer — the assistant has no path to the queue.
+- **Stats**, split between delivery (from Yapper's own records: what published,
+  what failed under which error code, which hours you post at, filtered by
+  range, platform and account, with every bar a drilldown) and engagement (only
+  from Bluesky and Mastodon, which serve it free; the other three are named as
+  gaps rather than shown as zeroes).
+- **An MCP server**, `yapper-mcp`, so an agent host can read the queue, read and
+  write notes, and schedule posts — with each tool call visible to you. It runs
+  the same validation the composer does and tells an agent that a scheduled post
+  needs the app running.
+
+### Changed
+
+- The schema is now a versioned ladder rather than create-if-not-exists, so a
+  future column added to a table holding live scheduled posts has a path.
+
+### Fixed
+
+- A failed destination has no publish time, so any date filter on the stats
+  screen dropped every failure — "why things failed" was empty exactly when it
+  mattered. Destinations now fall back to the post's own time.
+
 ## [0.1.0] — 2026-08-28
 
 First working version.

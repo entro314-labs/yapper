@@ -16,6 +16,14 @@ in a local SQLite store and every credential in your OS keychain.
   rate-limited is the normal case, so the queue shows each destination's own
   status, permalink, error and retry — never a single collapsed "failed".
 - **A calendar you can drag on.** Move a post to another day; it keeps its time.
+- **Notes.** A scratch surface with no obligation to publish — and the material
+  the assistant reads when it drafts for you.
+- **An assistant, if you already have one.** Apple's on-device model, or the
+  Claude Code or Codex CLI on your PATH. Off by default; Yapper ships no API key.
+- **Stats.** What published, what failed and why, and when you actually post —
+  every bar is a drilldown into the posts behind it.
+- **An agent door.** An MCP server so Claude Code or Codex can read your queue
+  and schedule posts, where you approve each tool call.
 - **Honest about missing.** See "The one real constraint" below.
 
 ## The one real constraint
@@ -48,6 +56,54 @@ is not a secret — so you register your own and paste the client id into
 the app's database. Every OAuth app registers the same redirect URI, which
 Settings shows for copying: `http://127.0.0.1:8917/callback`.
 
+## The assistant
+
+Yapper ships no API key, no gateway and no model catalogue. It borrows an
+assistant you already have, and it is **off until you pick one** in
+Settings → Assistant:
+
+| Backend | What it needs | Notes |
+| --- | --- | --- |
+| **Apple Intelligence** | macOS on Apple silicon | On-device, offline, keyless, free. |
+| **Claude Code** | `claude` on your PATH | Run one-shot and restricted: no tools, no session saved. |
+| **Codex** | `codex` on your PATH | Run with plugins, hooks, memories and apps disabled. |
+
+The assistant reads notes you select plus anything you paste, is told your
+destinations' real character limits, and hands back three drafts. **It has no
+path to the queue.** A draft you pick fills the composer, where the same
+counters, the same validation and the same click still stand between it and a
+published post.
+
+## The agent door
+
+For actual agency — "read my notes, draft a week of posts, schedule them" —
+Yapper ships an MCP server. An agent host shows you each tool call before it
+runs, which is the trust boundary that makes write access reasonable.
+
+```sh
+cargo build --release --bin yapper-mcp
+claude mcp add yapper -- "$PWD/src-tauri/target/release/yapper-mcp"
+```
+
+It opens the same store the app uses, so it works whether or not Yapper is
+running — but nothing publishes until the app next runs, and `create_post` says
+so in its own answer. Tools: `list_accounts`, `list_posts`, `list_notes`,
+`create_note`, `create_post`, `get_stats`. A post that would not fit its
+destinations is refused at the tool, with the platform's own message.
+
+## Stats
+
+Two halves, deliberately kept apart:
+
+- **Delivery** is computed from Yapper's own records. Always there, always
+  current: what published, what failed and under which error code, which hours
+  you actually post at, per platform and per account. Filter by range, platform
+  or account; click any bar to see the posts behind it.
+- **Engagement** comes from the platforms, and only Bluesky and Mastodon give it
+  away on endpoints Yapper already has credentials for. X's metrics need a paid
+  tier and LinkedIn's need approved read scopes, so those are named as gaps
+  rather than drawn as zeroes. Fetched when you press Refresh — nothing polls.
+
 ## Development
 
 ```sh
@@ -69,10 +125,14 @@ src/                    React 19 + TanStack Router + Tailwind 4
   lib/query/            TanStack Query keys, hooks, and the Rust event bridge
   routes/               queue, compose, calendar, accounts, settings
 src-tauri/src/
-  db.rs                 SQLite: accounts, posts, targets, media, attempts
+  db.rs                 SQLite + the schema ladder: accounts, posts, targets,
+                        media, attempts, notes, metrics
   secrets.rs            OS credential store
   oauth.rs              one OAuth 2.0 + PKCE loopback flow for every provider
   scheduler.rs          the worker: due posts, backoff, missed-post policy
+  ai.rs                 three assistant backends behind one verb
+  stats.rs              delivery figures, and engagement where it is free
+  mcp.rs + bin/mcp.rs   the agent door
   platforms/            one adapter per destination behind the Platform trait
 ```
 
