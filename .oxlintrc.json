@@ -1,0 +1,622 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+
+  // ─── Type-aware linting ────────────────────────────────────────────────────
+  // Requires: pnpm add -D oxlint-tsgolint@latest
+  // typeAware: true makes every run type-aware (no need to pass --type-aware).
+  "options": { "typeAware": true },
+
+  "plugins": ["oxc", "typescript", "unicorn", "react", "jsx-a11y", "vitest", "import", "promise"],
+
+  // Vendored shadcn baseline dump under apps/landing (mostly unimported; kept by decision
+  // 2026-07-07). Not our code style — excluded from linting instead of being reworked.
+  "ignorePatterns": [
+    "apps/landing/src/components/ui/**",
+    "**/*.gen.ts",
+    "**/*.gen.tsx"
+  ],
+
+  "env": { "browser": true, "es2022": true },
+
+  "globals": { "React": "readonly", "JSX": "readonly", "NodeJS": "readonly" },
+
+  "settings": {
+    "react": { "version": "19.2" },
+    "jsx-a11y": { "polymorphicPropName": "as", "components": {}, "attributes": {} }
+  },
+
+  "rules": {
+    // ─── Correctness ─────────────────────────────────────────────────────────
+
+    "no-const-assign": "error",
+    "no-this-before-super": "error",
+    "no-unsafe-finally": "error",
+    "no-unsafe-optional-chaining": "error",
+    "no-unsafe-negation": "error",
+    "no-setter-return": "error",
+    "no-constructor-return": "error",
+    "no-obj-calls": "error",
+    "no-dupe-keys": "error",
+    "no-dupe-class-members": "error",
+    "no-duplicate-case": "error",
+    "no-fallthrough": "error",
+    "no-func-assign": "error",
+    "no-class-assign": "error",
+    "no-import-assign": "error",
+    "no-redeclare": "error",
+    "no-shadow-restricted-names": "error",
+    "no-ex-assign": "error",
+    "use-isnan": "error",
+    "valid-typeof": ["error", { "requireStringLiterals": true }],
+    "no-compare-neg-zero": "error",
+    "no-loss-of-precision": "error",
+    "no-self-compare": "error",
+    // `5 & 0`, `x === x`, `!foo === bar` and other always-constant/short-circuit
+    // expressions - reliably a logic bug.
+    "no-constant-binary-expression": "error",
+    // `new Promise(async (resolve) => …)` swallows rejections from the executor.
+    "no-async-promise-executor": "error",
+    // `let x;` that is declared, read, but never assigned - always undefined.
+    "no-unassigned-vars": "error",
+
+    // ─── Variables ────────────────────────────────────────────────────────────
+
+    "no-unused-vars": [
+      "warn",
+      {
+        "vars": "all",
+        "args": "none",
+        "ignoreRestSiblings": true,
+        "caughtErrors": "all",
+        "caughtErrorsIgnorePattern": "^_"
+      }
+    ],
+    "no-unused-private-class-members": "error",
+    "no-empty-pattern": "warn",
+    "no-debugger": "error",
+
+    // ─── Best practices ───────────────────────────────────────────────────────
+
+    "eqeqeq": ["error", "always", { "null": "ignore" }],
+    "prefer-const": "error",
+    "no-var": "error",
+    "no-empty": ["error", { "allowEmptyCatch": true }],
+    "no-else-return": "error",
+    "no-array-constructor": "error",
+    "no-console": "error",
+    "no-void": ["error", { "allowAsStatement": true }],
+    "no-useless-concat": "error",
+    "no-useless-catch": "error",
+    "no-useless-constructor": "error",
+    "new-cap": ["error", { "properties": false, "capIsNew": false }],
+    "prefer-destructuring": ["off", { "array": false, "object": true }],
+    "prefer-object-has-own": "error",
+    "prefer-template": "error",
+    "prefer-rest-params": "error",
+    "prefer-spread": "error",
+    "prefer-promise-reject-errors": "error",
+    "radix": ["error", "as-needed"],
+    // Security / correctness
+    "no-eval": "error",
+    // `new Foo()` used only for a side effect - construct-and-discard is a smell.
+    "no-new": "error",
+    "no-extend-native": "error",
+    // Standalone expressions whose value is discarded (missing call, stray a && b()).
+    "no-unused-expressions": "error",
+    "no-unneeded-ternary": "error",
+    "yoda": "error",
+    // Modern object patterns (autofixable)
+    "object-shorthand": "error",
+    "prefer-object-spread": "error",
+    // Preserve the original error as `cause` when rethrowing from a catch block.
+    "preserve-caught-error": "error",
+    // Shadowing and sequential awaits: warn - legitimate cases exist.
+    "no-shadow": "warn",
+    "no-await-in-loop": "warn",
+
+    // ─── OXC ─────────────────────────────────────────────────────────────────
+
+    "oxc/approx-constant": "error",
+    "oxc/misrefactored-assign-op": "error",
+    // Raised from "off": O(n²) allocations in reduce() - legitimate perf warning
+    "oxc/no-accumulating-spread": "warn",
+    "oxc/no-map-spread": "warn",
+    // const enums don't survive isolatedModules / esbuild (Vite) transpilation cleanly.
+    "oxc/no-const-enum": "error",
+
+    // ─── TypeScript ───────────────────────────────────────────────────────────
+
+    "typescript/no-explicit-any": "error",
+    "typescript/no-confusing-void-expression": "error",
+    "typescript/no-invalid-void-type": "error",
+    "typescript/no-unsafe-declaration-merging": "error",
+    "typescript/no-extraneous-class": "error",
+    "typescript/no-import-type-side-effects": "error",
+    "typescript/no-inferrable-types": "error",
+    "typescript/no-wrapper-object-types": "error",
+    "typescript/only-throw-error": "error",
+    "typescript/require-await": "error",
+    "typescript/restrict-plus-operands": "error",
+    "typescript/restrict-template-expressions": "error",
+    "typescript/switch-exhaustiveness-check": "error",
+    "typescript/array-type": ["error", { "default": "array-simple" }],
+    "typescript/ban-ts-comment": [
+      "error",
+      {
+        "ts-expect-error": "allow-with-description",
+        "ts-ignore": true,
+        "ts-nocheck": true,
+        "minimumDescriptionLength": 3
+      }
+    ],
+    "typescript/ban-tslint-comment": "error",
+    "typescript/consistent-generic-constructors": "error",
+    "typescript/consistent-indexed-object-style": ["error", "record"],
+    "typescript/consistent-type-assertions": "error",
+    "typescript/consistent-type-definitions": ["error", "interface"],
+    "typescript/consistent-type-imports": ["error", { "fixStyle": "separate-type-imports" }],
+    "typescript/prefer-enum-initializers": "error",
+    "typescript/prefer-includes": "error",
+    "typescript/prefer-ts-expect-error": "error",
+    "typescript/no-confusing-non-null-assertion": "error",
+    "typescript/no-extra-non-null-assertion": "error",
+    "typescript/no-unnecessary-type-constraint": "error",
+    // `a?.b!` - non-null assertion on an optional chain that can be nullish.
+    "typescript/no-non-null-asserted-optional-chain": "error",
+    // `a! ?? b` - the `!` makes the `??` fallback dead.
+    "typescript/no-non-null-asserted-nullish-coalescing": "error",
+    // enum with two members sharing the same value - almost always a copy-paste bug.
+    "typescript/no-duplicate-enum-values": "error",
+    // `new` / `constructor` signatures on interfaces used as if they construct.
+    "typescript/no-misused-new": "error",
+    // `const self = this` - use an arrow function instead.
+    "typescript/no-this-alias": "error",
+    // `{ x: 1 } as { x: 1 }` → `as const`. Autofix.
+    "typescript/prefer-as-const": "error",
+    // Lone `export {}` used only to coerce a module - redundant once real exports exist.
+    "typescript/no-useless-empty-export": "error",
+
+    // ─── TypeScript - type-aware ───────────────────────────────────────────────
+    // All rules below require oxlint-tsgolint and --type-aware mode.
+
+    // Async / Promise correctness
+    // Unhandled floating promises are runtime silent failures.
+    // ignoreVoid: true allows `void asyncFn()` as an explicit discard pattern.
+    "typescript/no-floating-promises": ["error", { "ignoreVoid": true }],
+    // Functions returning Promise should be declared async for consistent error handling.
+    "typescript/promise-function-async": "warn",
+    "typescript/await-thenable": "error",
+    "typescript/no-misused-promises": ["error", { "checksVoidReturn": false }],
+    "typescript/return-await": ["warn", "error-handling-correctness-only"],
+
+    // Unsafe `any` propagation - these work as a set
+    // Start no-unsafe-assignment at warn: codebases with third-party `any` types
+    // will have many violations here. Promote to error once the codebase is clean.
+    "typescript/no-unsafe-argument": "error",
+    "typescript/no-unsafe-assignment": "warn",
+    "typescript/no-unsafe-call": "error",
+    "typescript/no-unsafe-member-access": "error",
+    "typescript/no-unsafe-return": "error",
+    // Stricter than no-unnecessary-type-assertion - catches `x as Foo` where
+    // Foo isn't actually assignable from x's type.
+    // Off (2026-06-15): the ~103 hits are dominated by two intentional patterns —
+    // the settings-panel generic schema-field cast (`field.key as keyof XSettings`,
+    // repeated across ~25 panels) and DOM `event.target.value as <union>` narrowing.
+    // Neither is a real bug; enabling it is warn-tier noise on the type-aware run.
+    "typescript/no-unsafe-type-assertion": "off",
+
+    // Type correctness bugs
+    // delete arr[0] leaves a sparse hole, doesn't shift - almost always wrong.
+    "typescript/no-array-delete": "error",
+    // for (x in arr) iterates string indices - nearly always a bug with arrays.
+    "typescript/no-for-in-array": "error",
+    // [1, 3, 2].sort() uses lexicographic order without a comparator - silent bug.
+    "typescript/require-array-sort-compare": ["error", { "ignoreStringArrays": true }],
+    // `${obj}` where obj has no useful toString → "[object Object]" at runtime.
+    // Complements restrict-template-expressions for method-call paths.
+    "typescript/no-base-to-string": "error",
+    // Mixed numeric/string enum members - TypeScript allows it, footgun in practice.
+    "typescript/no-mixed-enums": "error",
+    // Spreading non-iterable into array, or non-object into object.
+    "typescript/no-misused-spread": "error",
+
+    // Type redundancy / dead type logic
+    // Condition always true/false given the types - logic error or type mismatch.
+    // Off (2026-06-15): the ~317 hits are overwhelmingly intentional defensive runtime
+    // guards where the static type is narrower than runtime reality — `?? false` / `|| 'x'`
+    // on partially-hydrated persisted settings, optional chains on IPC/index access, etc.
+    // oxlint trusts the declared types, so it flags guards that genuinely protect against
+    // runtime nullish values; auto-removing them ("--fix-dangerously") deletes real guards.
+    "typescript/no-unnecessary-condition": "off",
+    // type A = string | string - duplicate union/intersection constituent.
+    "typescript/no-duplicate-type-constituents": "error",
+    // string | never, string & unknown - constituent has no effect on the type.
+    "typescript/no-redundant-type-constituents": "error",
+    // String(str) where str is already string, Number(num), etc. - no-op conversion.
+    "typescript/no-unnecessary-type-conversion": "error",
+    // function f<T>(x: T): T where T is used once - generic buys nothing.
+    "typescript/no-unnecessary-type-parameters": "warn",
+    // x === true / x === false when x is already boolean - visual noise.
+    "typescript/no-unnecessary-boolean-literal-compare": "error",
+    // `${someString}` wrapping a value that's already a string - redundant.
+    "typescript/no-unnecessary-template-expression": "error",
+    // function f(x = undefined) when x is already optional - redundant default.
+    "typescript/no-useless-default-assignment": "error",
+    // These were already present (non-type-aware variant); type-aware versions
+    // catch more cases that require resolved types:
+    "typescript/no-unnecessary-type-arguments": "error",
+    "typescript/no-unnecessary-type-assertion": "error",
+    "typescript/no-unsafe-enum-comparison": "error",
+    "typescript/prefer-nullish-coalescing": "error",
+
+    // Modern patterns / DX
+    // a && a.b && a.b.c → a?.b?.c. Has autofix.
+    "typescript/prefer-optional-chain": "error",
+    // arr.filter(x => pred(x))[0] → arr.find(x => pred(x)).
+    "typescript/prefer-find": "error",
+    // str.startsWith/endsWith instead of .indexOf or .slice comparisons.
+    // Type-aware version handles more cases than unicorn/prefer-string-starts-ends-with.
+    "typescript/prefer-string-starts-ends-with": "error",
+    // Enforce `export type { Foo }` when the export is only used as a type.
+    "typescript/consistent-type-exports": "error",
+    // Mark calls to functions/methods annotated @deprecated - warn to avoid blocking
+    // incremental migrations on codebases with legacy APIs.
+    "typescript/no-deprecated": "warn",
+    // Catch callbacks (in .catch(e => ...)) should use unknown, not assume Error.
+    "typescript/use-unknown-in-catch-callback-variable": "error",
+    // Unbound method - off. React event handlers and class methods are commonly
+    // passed as callbacks; this generates too many false positives.
+    "typescript/unbound-method": "off",
+
+    // Added (oxlint 1.73) - further type-aware correctness / quality
+    // setTimeout("code") / setInterval("code") - executes strings as code.
+    "typescript/no-implied-eval": "error",
+    // `-someNonNumber` - unary minus on a non-number is almost always a bug.
+    "typescript/no-unsafe-unary-minus": "error",
+    // `void` applied to an already-void expression - no effect.
+    "typescript/no-meaningless-void-operator": "error",
+    // Prefer `x!` over `x as NonNullable<T>` for non-null assertions. Autofix.
+    "typescript/non-nullable-type-assertion-style": "error",
+    // `arr.reduce<T>(…)` type argument instead of casting the accumulator. Autofix.
+    "typescript/prefer-reduce-type-parameter": "error",
+    // Chainable methods should return the `this` type, not the concrete class. Autofix.
+    "typescript/prefer-return-this-type": "error",
+    // Getter and setter of the same property must have compatible types.
+    "typescript/related-getter-setter-pairs": "error",
+    // `str.match(re)` → `re.exec(str)` when capture groups aren't needed - faster.
+    "typescript/prefer-regexp-exec": "error",
+    // Private fields that are never reassigned should be `readonly`.
+    "typescript/prefer-readonly": "warn",
+
+    // ─── React ────────────────────────────────────────────────────────────────
+
+    "react/exhaustive-deps": "warn",
+    "react/rules-of-hooks": "error",
+    "react/forward-ref-uses-ref": "error",
+    "react/jsx-fragments": "error",
+    "react/no-children-prop": "warn",
+    "react/void-dom-elements-no-children": "error",
+    "react/no-danger-with-children": "error",
+    "react/no-danger": "off",
+    "react/jsx-no-useless-fragment": "off",
+    "react/self-closing-comp": ["error", { "html": false }],
+    "react/jsx-key": "error",
+    "react/jsx-no-duplicate-props": "error",
+    "react/no-direct-mutation-state": "error",
+    "react/no-find-dom-node": "error",
+    "react/no-string-refs": "error",
+    "react/no-this-in-sfc": "error",
+    // Array index as key breaks reconciliation on reorder/insert/delete.
+    // Static visual rows/skeletons use positional rendering in many places.
+    // Keep react/jsx-key enabled for missing keys; do not warn on index keys.
+    "react/no-array-index-key": "off",
+
+    // Security
+    // target="_blank" without rel="noreferrer" enables reverse tabnabbing.
+    "react/jsx-no-target-blank": "error",
+    // href="javascript:..." in JSX.
+    "react/jsx-no-script-url": "error",
+    // <iframe> without a sandbox attribute.
+    "react/iframe-missing-sandbox": "error",
+    // Correctness / performance
+    // Components declared inside render remount every parent render - state loss + churn.
+    "react/no-unstable-nested-components": "error",
+    // Inline object/array as a Context value re-renders all consumers every render.
+    "react/jsx-no-constructed-context-values": "error",
+    // Object/array literal as a default prop - new identity every render.
+    "react/no-object-type-as-default-prop": "error",
+    // <button> without an explicit type defaults to submit - accidental form posts.
+    "react/button-has-type": "error",
+    // style={...} must be an object, not a string.
+    "react/style-prop-object": "error",
+    // <Foo.Bar.Baz /> namespaced components aren't supported.
+    "react/no-namespace": "error",
+    // Controlled <input checked> without onChange/readOnly warns at runtime.
+    "react/checked-requires-onchange-or-readonly": "error",
+    // class= instead of className=, unknown DOM attributes. Autofix.
+    "react/no-unknown-property": "error",
+    // <Foo bool={true}> → <Foo bool>. Autofix.
+    "react/jsx-boolean-value": "error",
+    // Remove needless {"literal"} / {`x`} braces in JSX. Autofix.
+    "react/jsx-curly-brace-presence": "error",
+    // Unescaped >, ", ', } in JSX text - warn (apostrophes in prose are common).
+    "react/no-unescaped-entities": "warn",
+
+    // ─── JSX A11y ─────────────────────────────────────────────────────────────
+
+    "jsx-a11y/no-aria-hidden-on-focusable": "error",
+    "jsx-a11y/no-redundant-roles": "error",
+    "jsx-a11y/alt-text": "error",
+    "jsx-a11y/anchor-has-content": "error",
+    "jsx-a11y/anchor-is-valid": "error",
+    "jsx-a11y/click-events-have-key-events": "warn",
+    // Radix/shadcn primitives (Switch, Checkbox) are the labelled control when a
+    // <label> wraps them; list them so the rule recognises the nested control.
+    "jsx-a11y/label-has-associated-control": ["error", { "controlComponents": ["Switch", "Checkbox"] }],
+    "jsx-a11y/no-autofocus": "warn",
+    "jsx-a11y/role-has-required-aria-props": "error",
+    "jsx-a11y/role-supports-aria-props": "error",
+    // ARIA validity - invalid attributes/roles/values are broken markup, not style.
+    "jsx-a11y/aria-props": "error",
+    "jsx-a11y/aria-proptypes": "error",
+    "jsx-a11y/aria-role": "error",
+    "jsx-a11y/aria-unsupported-elements": "error",
+    "jsx-a11y/aria-activedescendant-has-tabindex": "error",
+    // Document / element semantics
+    "jsx-a11y/html-has-lang": "error",
+    "jsx-a11y/lang": "error",
+    "jsx-a11y/heading-has-content": "error",
+    "jsx-a11y/iframe-has-title": "error",
+    "jsx-a11y/img-redundant-alt": "error",
+    "jsx-a11y/autocomplete-valid": "error",
+    "jsx-a11y/tabindex-no-positive": "error",
+    "jsx-a11y/no-distracting-elements": "error",
+    // Interaction-heavy rules: warn (more prone to false positives).
+    "jsx-a11y/media-has-caption": "warn",
+    "jsx-a11y/mouse-events-have-key-events": "warn",
+    "jsx-a11y/no-noninteractive-tabindex": "warn",
+    // Radix/shadcn-style primitives often need explicit ARIA roles on divs.
+    // This rule suggests invalid replacements such as <address> for role=group.
+    "jsx-a11y/prefer-tag-over-role": "off",
+
+    // ─── Import ───────────────────────────────────────────────────────────────
+
+    "import/consistent-type-specifier-style": ["error", "prefer-top-level"],
+    "import/default": "error",
+    "import/namespace": "error",
+    "import/no-cycle": ["error", { "maxDepth": 3 }],
+    "import/no-duplicates": "error",
+    "import/no-named-as-default": "error",
+    "import/no-named-as-default-member": "error",
+    "import/no-self-import": "error",
+    // `import {} from 'x'` - empty named block is dead weight. Autofix.
+    "import/no-empty-named-blocks": "error",
+    // `export let` - mutable bindings leak reassignment across modules.
+    "import/no-mutable-exports": "error",
+
+    // ─── Promise ──────────────────────────────────────────────────────────────
+
+    "promise/always-return": "error",
+    "promise/no-callback-in-promise": "warn",
+    // `new Promise.resolve()` / `new Promise.all()` - misuse of static methods. Autofix.
+    "promise/no-new-statics": "error",
+    // `Promise.all(x)` with a non-iterable, `Promise.race()` with no args, etc.
+    "promise/valid-params": "error",
+
+    // ─── Vitest ───────────────────────────────────────────────────────────────
+
+    "vitest/consistent-vitest-vi": "error",
+    "vitest/hoisted-apis-on-top": "error",
+    "vitest/no-import-node-test": "error",
+    "vitest/no-importing-vitest-globals": "error",
+    "vitest/prefer-called-once": "error",
+    "vitest/prefer-describe-function-title": "error",
+    "vitest/prefer-expect-type-of": "error",
+
+    // ─── Unicorn ──────────────────────────────────────────────────────────────
+
+    "unicorn/catch-error-name": ["error", { "name": "err" }],
+    "unicorn/consistent-assert": "error",
+    "unicorn/consistent-date-clone": "error",
+    "unicorn/consistent-empty-array-spread": "error",
+    "unicorn/consistent-existence-index-check": "error",
+    "unicorn/error-message": "error",
+    "unicorn/escape-case": "error",
+    "unicorn/no-anonymous-default-export": "error",
+    "unicorn/no-console-spaces": "error",
+    "unicorn/no-hex-escape": "error",
+    "unicorn/no-immediate-mutation": "error",
+    "unicorn/no-instanceof-array": "error",
+    "unicorn/no-instanceof-builtins": "error",
+    "unicorn/no-length-as-slice-end": "error",
+    "unicorn/no-object-as-default-parameter": "error",
+    "unicorn/no-typeof-undefined": "error",
+    "unicorn/no-unnecessary-array-splice-count": "error",
+    "unicorn/no-useless-collection-argument": "error",
+    "unicorn/numeric-separators-style": "error",
+    "unicorn/prefer-array-find": "error",
+    "unicorn/prefer-array-flat": "error",
+    "unicorn/prefer-array-flat-map": "error",
+    "unicorn/prefer-array-some": "error",
+    "unicorn/prefer-at": "error",
+    "unicorn/prefer-code-point": "error",
+    "unicorn/prefer-date-now": "error",
+    "unicorn/prefer-dom-node-dataset": "error",
+    "unicorn/prefer-dom-node-text-content": "error",
+    "unicorn/prefer-global-this": "off",
+    "unicorn/prefer-includes": "error",
+    "unicorn/prefer-keyboard-event-key": "error",
+    "unicorn/prefer-math-min-max": "error",
+    "unicorn/prefer-modern-dom-apis": "error",
+    "unicorn/prefer-native-coercion-functions": "error",
+    "unicorn/prefer-node-protocol": "error",
+    "unicorn/prefer-number-properties": "error",
+    "unicorn/prefer-regexp-test": "error",
+    "unicorn/prefer-set-has": "error",
+    "unicorn/prefer-spread": "error",
+    "unicorn/prefer-string-slice": "error",
+    "unicorn/prefer-type-error": "error",
+    "unicorn/relative-url-style": "error",
+    "unicorn/require-number-to-fixed-digits-argument": "error",
+    // throw "message" → throw new Error("message").
+    "unicorn/throw-new-error": "error",
+    // Removes pointless trailing undefined args: f(x, undefined) → f(x).
+    // checkArguments: false avoids false positives on intentional arity padding.
+    "unicorn/no-useless-undefined": ["error", { "checkArguments": false }],
+    // Reduces if/else assignment blocks to a single ternary where appropriate.
+    "unicorn/prefer-ternary": "error",
+    // x ? a : !a → logical operator form.
+    "unicorn/prefer-logical-operator-over-ternary": "error",
+    // new Array(3) is ambiguous (sparse array vs. [3]) - use Array.from or literals.
+    "unicorn/no-new-array": "error",
+    // process.exit() without an explicit exit code path.
+    "unicorn/no-process-exit": "error",
+
+    // Correctness bugs (promoted from oxlint's default warn to error)
+    // `await` inside Promise.all([...]) / Promise.allSettled([...]) defeats concurrency.
+    "unicorn/no-await-in-promise-methods": "error",
+    // Promise.all([singlePromise]) - the wrapper is pointless.
+    "unicorn/no-single-promise-in-promise-methods": "error",
+    // fetch(url, { body }) with a GET/HEAD method - the body is silently ignored.
+    "unicorn/no-invalid-fetch-options": "error",
+    // removeEventListener with an inline function never removes the listener.
+    "unicorn/no-invalid-remove-event-listener": "error",
+    // An object with a `then` method is treated as a thenable by await - footgun.
+    "unicorn/no-thenable": "error",
+    "unicorn/no-unnecessary-await": "error",
+    "unicorn/no-useless-fallback-in-spread": "error",
+    "unicorn/no-useless-length-check": "error",
+    "unicorn/no-useless-spread": "error",
+    "unicorn/prefer-set-size": "error",
+    // new Array(n).fill(referenceType) - every slot shares one reference.
+    "unicorn/no-array-fill-with-reference-type": "error",
+
+    // Modern APIs
+    // JSON.parse(JSON.stringify(x)) → structuredClone(x).
+    "unicorn/prefer-structured-clone": "error",
+    // catch (e) {} where e is unused → catch {}. Autofix.
+    "unicorn/prefer-optional-catch-binding": "error",
+    // return Promise.resolve(x) in an async function → return x.
+    "unicorn/no-useless-promise-resolve-reject": "warn"
+  },
+
+  "overrides": [
+    {
+      // Dependency direction (docs/ARCHITECTURE_BOUNDARIES.md): UI-layer packages
+      // (editor, ui, theme) must never import the data layer. The editor consumes
+      // app-installed providers instead (packages/editor/src/providers.ts).
+      "files": ["packages/editor/**", "packages/ui/**", "packages/theme/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@anasa/services", "@anasa/services/*"],
+                "message": "UI-layer packages must not depend on @anasa/services — define a provider interface (see packages/editor/src/providers.ts) and let the app wire the implementation."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      // Landing/billing web app (apps/landing): the browser console and Vercel
+      // function logs are the legitimate logging channel for this web app, unlike
+      // the packaged Tauri desktop client, which routes through Logger.
+      "files": ["apps/landing/**"],
+      "rules": { "no-console": "off" }
+    },
+    {
+      // CLI maintenance scripts may exit with a status code.
+      "files": ["apps/landing/scripts/**"],
+      "rules": { "unicorn/no-process-exit": "off" }
+    },
+    {
+      // Next.js route files - anonymous default exports required by the framework
+      "files": [
+        "**/app/**/{page,layout,loading,error,not-found,default,template,route}.{js,jsx,ts,tsx}",
+        "**/pages/**/*.{js,jsx,ts,tsx}",
+        "**/pages/api/**/*.{js,ts}",
+        "**/middleware.{js,ts}",
+        "**/instrumentation.{js,ts}"
+      ],
+      "rules": { "unicorn/no-anonymous-default-export": "off" }
+    },
+    {
+      // Config files
+      "files": [
+        "*.config.{js,ts,mjs,cjs}",
+        "**/next.config.{js,ts,mjs}",
+        "**/tailwind.config.{js,ts}",
+        "**/postcss.config.{js,ts}",
+        "**/drizzle.config.{js,ts}",
+        "**/playwright.config.{js,ts}",
+        "**/vitest.config.{js,ts}"
+      ],
+      "rules": {
+        "no-console": "off",
+        "unicorn/no-anonymous-default-export": "off",
+        // Type-aware rules that are noisy or irrelevant in config files
+        "typescript/no-floating-promises": "off",
+        "typescript/no-unsafe-assignment": "off",
+        "typescript/no-unsafe-member-access": "off"
+      }
+    },
+    {
+      // Test files
+      "files": ["**/*.{test,spec}.{js,jsx,ts,tsx}", "**/__tests__/**", "**/__mocks__/**", "**/test/**", "**/tests/**"],
+      "rules": {
+        "typescript/no-explicit-any": "off",
+        "no-unused-vars": "off",
+        "promise/always-return": "off",
+        // Type-aware rules commonly violated in test utilities/mocks
+        "typescript/no-unsafe-assignment": "off",
+        "typescript/no-unsafe-member-access": "off",
+        "typescript/no-unsafe-argument": "off",
+        "typescript/no-unsafe-call": "off",
+        // Mock factories legitimately return `Promise.resolve(...)` without async
+        // (and forcing `async () => x` then trips the stricter require-await error).
+        "typescript/promise-function-async": "off",
+        // Tests assert against plain string row fields using enum values as the
+        // expected literals (e.g. row.feature === AIFeature.X) - benign here.
+        "typescript/no-unsafe-enum-comparison": "off"
+      }
+    },
+    {
+      // Type declaration files
+      "files": ["**/*.d.ts", "**/types/**/*.ts"],
+      "rules": {
+        "typescript/no-explicit-any": "warn",
+        "no-unused-vars": "off",
+        // Declaration files commonly use patterns flagged by these rules
+        "typescript/no-unnecessary-type-parameters": "off",
+        "typescript/consistent-type-definitions": "off"
+      }
+    },
+    {
+      // Enforce Temporal utility usage - ban legacy date libraries in source
+      "files": ["src/**/*.{js,jsx,ts,tsx}"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          { "patterns": ["date-fns", "date-fns/*", "dayjs", "dayjs/*", "moment", "moment/*"] }
+        ]
+      }
+    },
+    {
+      // Supabase generated schema types - auto-generated, non-standard patterns expected
+      "files": ["src/types/database.types.ts"],
+      "rules": {
+        "typescript/array-type": "off",
+        "typescript/consistent-indexed-object-style": "off",
+        "typescript/consistent-type-definitions": "off"
+      }
+    },
+    {
+      // Generated files - skip entirely
+      "files": ["**/migrations/**", "**/__generated__/**", "**/generated/**"],
+      "rules": {}
+    }
+  ]
+}

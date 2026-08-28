@@ -1,0 +1,111 @@
+[package]
+name = "yapper"
+version = "0.1.0"
+description = "Yapper - compose, schedule and publish to Bluesky, Mastodon, Reddit, X and LinkedIn"
+authors = ["entro314-labs"]
+license = "MIT"
+edition = "2024"
+rust-version = "1.98.0"
+default-run = "yapper"
+
+
+[lib]
+name = "yapper_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+# Second launch focuses the running window instead of starting a rival scheduler.
+tauri-plugin-single-instance = "2"
+# Launch at login, started hidden: a scheduler that only runs while you happen to
+# have the app open is not a scheduler.
+tauri-plugin-autostart = "2"
+tauri-plugin-window-state = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# The whole store: accounts, posts, targets, media, attempt log.
+rusqlite = { version = "0.40", features = ["bundled"] }
+# OS credential store for tokens and the user's own platform app credentials.
+keyring = "4"
+
+# All platform HTTP happens in Rust: no CORS, and the webview CSP stays tight.
+# `blocking` because the scheduler is a plain worker thread and every adapter
+# call is a short request/response - an async runtime would buy nothing here.
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "blocking",
+  "json",
+  "gzip",
+  "multipart",
+] }
+
+# Scheduling is civil-time arithmetic: a post set for 09:00 local must fire at
+# 09:00 local across a DST boundary, which needs real date maths.
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.23"
+sha2 = "0.11"
+rand = "0.10"
+url = "2"
+# Bluesky counts its 300-character limit in grapheme clusters, not scalars: a
+# family emoji is one character there and seven to `chars().count()`. The
+# counter in the composer has to agree with the server or the app lies.
+unicode-segmentation = "1"
+# Opens the system browser for the OAuth handoff. Rust-side, so it works from
+# the scheduler thread as well as from a command.
+opener = "0.8"
+dirs = "6"
+log = "0.4"
+env_logger = "0.11"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Vibrancy behind the transparent window. Taken direct rather than through
+# tauri's `set_effects`: tauri 2.11 links window-vibrancy 0.6, which predates
+# the newer materials and lacks the `clear_*` half a live toggle needs.
+window-vibrancy = "0.8"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+window-vibrancy = "0.8"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+[profile.release.build-override]
+opt-level = 0
+codegen-units = 256
+strip = false
+
+[lints.rust]
+unsafe_code = "warn"
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+# Tauri command/macro noise:
+needless_pass_by_value = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

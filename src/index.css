@@ -1,0 +1,271 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/space-grotesk';
+@import '@fontsource-variable/jetbrains-mono';
+@import './styles/themes.css';
+
+@custom-variant dark (&:is(.dark *));
+
+/* ─── Yapper design tokens ────────────────────────────────────────────
+   Identity: "Signal". Cool slate-ink surfaces, ONE electric cyan accent
+   (the carrier), Space Grotesk for display and Inter for the reading UI.
+   Radius is moderate (0.625rem) — softer than a terminal, sharper than a
+   consumer social app, because the thing on screen is a queue of work.
+
+   The accent is deliberately at hue ~205: the app talks to five platforms
+   that each own a brand colour (Bluesky blue, Reddit orange, LinkedIn navy,
+   Mastodon purple, X black), and those appear as per-platform dots in the
+   queue. A cyan carrier sits clear of all five while staying legible on the
+   dark surfaces the app is designed for.
+   ─────────────────────────────────────────────────────────────────── */
+
+@theme inline {
+  /* Indirected through `--app-*` so a theme can swap them at runtime. `@theme inline`
+     inlines a literal into the generated utility, so `--font-sans: 'Inter Variable'`
+     would bake that face into `font-sans` and no `[data-theme]` block could change it. */
+  --font-sans: var(--app-font-sans);
+  --font-display: var(--app-font-display);
+  --font-mono: var(--app-font-mono);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+
+  --shadow-elevated: var(--app-shadow-elevated);
+
+  --animate-shimmer: shimmer 2.4s linear infinite;
+  --animate-fade-up: fade-up 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-pop: pop 0.18s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  --animate-carrier: carrier 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  html {
+    color-scheme: light dark;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    overscroll-behavior: none;
+    /* Two ambient washes: the carrier cyan from the top-left (where the sidebar
+       and the compose action live) and a cooler counter-tone from the right, so
+       the desk has a direction instead of reading as one flat field. */
+    background:
+      radial-gradient(
+        1100px 560px at 4% -12%,
+        oklch(from var(--primary) l c h / 0.09) 0%,
+        transparent 62%
+      ),
+      radial-gradient(
+        900px 460px at 108% 4%,
+        oklch(from var(--tone-drift) l c h / 0.07) 0%,
+        transparent 58%
+      ),
+      var(--background);
+    background-attachment: fixed;
+  }
+
+  ::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: color-mix(in oklab, var(--muted-foreground) 28%, transparent);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in oklab, var(--muted-foreground) 48%, transparent);
+    background-clip: content-box;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
+  .tabular-nums,
+  [data-tabular] {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /* Glassy translucent surface: command palette, sheets, popovers over content. */
+  .surface-glass {
+    background: color-mix(in oklab, var(--popover) 88%, transparent);
+    backdrop-filter: saturate(160%) blur(14px);
+    -webkit-backdrop-filter: saturate(160%) blur(14px);
+  }
+
+  .skeleton {
+    @apply bg-muted/60 rounded-md relative overflow-hidden;
+  }
+  .skeleton::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in oklab, var(--foreground) 8%, transparent),
+      transparent
+    );
+    background-size: 200% 100%;
+    animation: var(--animate-shimmer);
+  }
+
+  /* Tauri window-drag region. Tauri reads `data-tauri-drag-region`; this class
+     carries the CSS half and makes the surface obvious during dev. */
+  .drag-region {
+    -webkit-app-region: drag;
+    app-region: drag;
+  }
+  .drag-region * {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+  }
+
+  /* The desk: the window's base surface and the only translucent one. The sidebar
+     sits directly on it with no background of its own; the content island floats
+     above it. That gives the shell three strata rather than two flat greys.
+
+     It must be PAINTED rather than left bare: a webview region with nothing drawn
+     in it does not show an OS effect behind a transparent window, it renders black. */
+  .app-desk {
+    background: color-mix(in oklab, var(--sidebar) calc(var(--chrome-alpha) * 100%), transparent);
+  }
+
+  /* Minimise / maximise / close, drawn by the app on platforms whose system frame
+     we removed. They carry the desktop's own three colours rather than the Yapper
+     palette: close is red everywhere, whatever the app's accent is. */
+  .window-control {
+    color: var(--muted-foreground);
+    transition:
+      color var(--motion-micro) var(--ease-butter),
+      background-color var(--motion-micro) var(--ease-butter);
+  }
+  .window-control:hover,
+  .window-control:focus-visible {
+    color: oklch(1 0 0);
+  }
+  .window-control-min:hover,
+  .window-control-min:focus-visible {
+    background: oklch(0.72 0.16 85);
+  }
+  .window-control-max:hover,
+  .window-control-max:focus-visible {
+    background: oklch(0.68 0.16 150);
+  }
+  .window-control-close:hover,
+  .window-control-close:focus-visible {
+    background: oklch(0.6 0.21 27);
+  }
+  .window-control-divider {
+    width: 1px;
+    height: 1rem;
+    background: var(--border);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+@keyframes fade-up {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+/* The carrier pulse: the "a post is in flight" tell, used on the sending dot in
+   the queue and the status bar. Opacity only — a scaling dot in a dense list
+   reads as jitter. */
+@keyframes carrier {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

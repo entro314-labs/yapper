@@ -1,0 +1,577 @@
+//! The IPC surface. Every command returns [`AppError`], which serializes as
+//! `"[CODE] message"` — the renderer's query client reads that code to decide
+//! what is worth retrying (see `src/lib/query/client.ts`).
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+use crate::db::{self, Account, Attempt, Db, MediaInput, PostDetail};
+use crate::error::{AppError, Result};
+use crate::platforms::{self, AppCredentials, ConnectInput, PlatformId, PlatformInfo};
+use crate::scheduler::{
+    self, EVENT_ACCOUNTS_CHANGED, EVENT_QUEUE_CHANGED, META_GRACE_MINUTES, META_MISSED_POLICY,
+    MissedPolicy, Scheduler,
+};
+use crate::{media, secrets};
+
+pub const EVENT_AUTH: &str = "yapper://auth";
+
+pub struct AppState {
+    pub db: Arc<Db>,
+    pub scheduler: Scheduler,
+    /// One browser handoff at a time: the loopback listener binds a fixed port,
+    /// so a second flow would fail on the port rather than on anything the user
+    /// could act on.
+    pub connecting: AtomicBool,
+}
+
+// ─── Platforms and accounts ─────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn list_platforms() -> Vec<PlatformInfo> {
+    platforms::all_info()
+}
+
+#[tauri::command]
+pub fn list_accounts(state: State<'_, AppState>) -> Result<Vec<Account>> {
+    state.db.list_accounts()
+}
+
+/// The outcome of a browser handoff, delivered on [`EVENT_AUTH`] because the
+/// flow outlives the command that started it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthOutcome {
+    pub ok: bool,
+    pub platform: PlatformId,
+    pub message: String,
+    pub account: Option<Account>,
+}
+
+/// Starts a connection. Returns as soon as the flow is under way; the result
+/// arrives on [`EVENT_AUTH`]. Credential-based platforms (Bluesky) finish in
+/// well under a second, OAuth ones wait on a human in a browser — both take the
+/// same path so the renderer has one thing to listen for.
+#[tauri::command]
+pub fn connect_account(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    platform: String,
+    fields: HashMap<String, String>,
+) -> Result<()> {
+    let platform = PlatformId::parse(&platform)?;
+
+    if state.connecting.swap(true, Ordering::SeqCst) {
+        return Err(AppError::Conflict(
+            "A sign-in is already running. Finish it in the browser, or wait for it to \
+             time out, before starting another."
+                .into(),
+        ));
+    }
+
+    let database = Arc::clone(&state.db);
+    let spawned = std::thread::Builder::new()
+        .name("yapper-connect".into())
+        .spawn(move || {
+            let outcome = run_connect(&database, platform, fields);
+            let payload = match outcome {
+                Ok(account) => AuthOutcome {
+                    ok: true,
+                    platform,
+                    message: format!("Connected {}", account.handle),
+                    account: Some(account),
+                },
+                Err(err) => {
+                    log::warn!("connecting {platform} failed: {err}");
+                    AuthOutcome {
+                        ok: false,
+                        platform,
+                        message: err.to_string(),
+                        account: None,
+                    }
+                }
+            };
+            if let Some(state) = app.try_state::<AppState>() {
+                state.connecting.store(false, Ordering::SeqCst);
+            }
+            let _ = app.emit(EVENT_AUTH, &payload);
+            let _ = app.emit(EVENT_ACCOUNTS_CHANGED, ());
+        });
+
+    if spawned.is_err() {
+        state.connecting.store(false, Ordering::SeqCst);
+        return Err(AppError::Internal("Could not start the sign-in.".into()));
+    }
+    Ok(())
+}
+
+fn run_connect(
+    database: &Arc<Db>,
+    platform: PlatformId,
+    fields: HashMap<String, String>,
+) -> Result<Account> {
+    let adapter = platforms::adapter(platform);
+    let info = adapter.info();
+
+    // Mastodon scopes its app registration to the instance, so the credential
+    // lookup has to know which one before the flow starts.
+    let instance = fields
+        .get("instance")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_instance_key);
+
+    let app_credentials = secrets::load_app_credentials(platform, instance.as_deref())?;
+    if !info.app_fields.is_empty() && app_credentials.is_none() {
+        return Err(AppError::InvalidInput(format!(
+            "{} needs your own developer app. Add its client id in Settings → Platform apps.",
+            info.name
+        )));
+    }
+
+    let connected = adapter.connect(&ConnectInput {
+        fields,
+        app: app_credentials,
+    })?;
+    secrets::store_account_secret(platform, &connected.remote_id, &connected.secret)?;
+    let id = database.upsert_account(platform, &connected)?;
+    database.get_account(id)
+}
+
+#[tauri::command]
+pub fn disconnect_account(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<()> {
+    // The credential-store entry goes first: deleting the row first would leave a
+    // secret nothing can name any more.
+    let account = state.db.get_account(id)?;
+    secrets::forget_account_secret(account.platform, &account.remote_id);
+    state.db.delete_account(id)?;
+    let _ = app.emit(EVENT_ACCOUNTS_CHANGED, ());
+    let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+    Ok(())
+}
+
+/// What Settings shows for a stored developer app. The secret is reported as
+/// present or absent and never sent back to the renderer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppCredentialsView {
+    pub client_id: String,
+    pub has_secret: bool,
+    pub extra: HashMap<String, String>,
+}
+
+#[tauri::command]
+pub fn get_app_credentials(
+    platform: String,
+    instance: Option<String>,
+) -> Result<Option<AppCredentialsView>> {
+    let platform = PlatformId::parse(&platform)?;
+    let key = instance.as_deref().map(normalize_instance_key);
+    Ok(
+        secrets::load_app_credentials(platform, key.as_deref())?.map(|credentials| {
+            AppCredentialsView {
+                client_id: credentials.client_id,
+                has_secret: credentials
+                    .client_secret
+                    .is_some_and(|value| !value.is_empty()),
+                extra: credentials.extra,
+            }
+        }),
+    )
+}
+
+#[tauri::command]
+pub fn save_app_credentials(
+    platform: String,
+    instance: Option<String>,
+    client_id: String,
+    client_secret: Option<String>,
+    extra: Option<HashMap<String, String>>,
+) -> Result<()> {
+    let platform = PlatformId::parse(&platform)?;
+    let client_id = client_id.trim().to_string();
+    if client_id.is_empty() {
+        return Err(AppError::InvalidInput(
+            "The client id cannot be empty.".into(),
+        ));
+    }
+    let key = instance.as_deref().map(normalize_instance_key);
+    secrets::store_app_credentials(
+        platform,
+        key.as_deref(),
+        &AppCredentials {
+            client_id,
+            client_secret: client_secret
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            extra: extra.unwrap_or_default(),
+        },
+    )
+}
+
+#[tauri::command]
+pub fn forget_app_credentials(platform: String, instance: Option<String>) -> Result<()> {
+    let platform = PlatformId::parse(&platform)?;
+    let key = instance.as_deref().map(normalize_instance_key);
+    secrets::forget_app_credentials(platform, key.as_deref())
+}
+
+/// Instance keys are lowercased and stripped of scheme and trailing slash so the
+/// credential-store item for `Mastodon.Social` and `https://mastodon.social/` is
+/// the same item.
+fn normalize_instance_key(value: &str) -> String {
+    value
+        .trim()
+        .trim_end_matches('/')
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .to_ascii_lowercase()
+}
+
+// ─── Posts ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetInput {
+    pub account_id: i64,
+    #[serde(default)]
+    pub options: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaFieldInput {
+    pub path: String,
+    #[serde(default)]
+    pub alt_text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePostInput {
+    /// `None` creates; `Some` updates in place.
+    pub id: Option<i64>,
+    pub body: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub link: Option<String>,
+    /// RFC 3339 UTC. `None` saves a draft.
+    #[serde(default)]
+    pub scheduled_at: Option<String>,
+    #[serde(default)]
+    pub targets: Vec<TargetInput>,
+    #[serde(default)]
+    pub media: Vec<MediaFieldInput>,
+}
+
+#[tauri::command]
+pub fn list_posts(state: State<'_, AppState>) -> Result<Vec<PostDetail>> {
+    state.db.list_posts()
+}
+
+#[tauri::command]
+pub fn list_attempts(state: State<'_, AppState>, post_id: i64) -> Result<Vec<Attempt>> {
+    state.db.list_attempts(post_id)
+}
+
+#[tauri::command]
+pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInput) -> Result<i64> {
+    let scheduled_at = input
+        .scheduled_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    // Parsed rather than trusted: a value the store cannot read back would make
+    // the post invisible to the due query and it would simply never fire.
+    if let Some(value) = scheduled_at {
+        db::parse_rfc3339(value)?;
+    }
+
+    let status = if scheduled_at.is_some() {
+        db::POST_SCHEDULED
+    } else {
+        db::POST_DRAFT
+    };
+    let title = input
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let link = input
+        .link
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+    let post_id = match input.id {
+        Some(id) => {
+            let existing = state.db.get_post(id)?;
+            if existing.status == db::POST_PUBLISHED {
+                return Err(AppError::Conflict(
+                    "This post has already gone out and cannot be edited.".into(),
+                ));
+            }
+            state
+                .db
+                .update_post(id, &input.body, title, link, scheduled_at, status)?;
+            id
+        }
+        None => state
+            .db
+            .create_post(&input.body, title, link, scheduled_at, status)?,
+    };
+
+    let media = input
+        .media
+        .iter()
+        .map(|item| {
+            let resolved = media::resolve(&item.path)?;
+            Ok(MediaInput {
+                path: resolved.path,
+                mime: resolved.mime,
+                bytes: resolved.bytes,
+                alt_text: item
+                    .alt_text
+                    .clone()
+                    .filter(|value| !value.trim().is_empty()),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    state.db.set_media(post_id, &media)?;
+
+    let targets: Vec<(i64, serde_json::Value)> = input
+        .targets
+        .iter()
+        .map(|target| (target.account_id, target.options.clone()))
+        .collect();
+    state.db.set_targets(post_id, &targets)?;
+
+    // Everything a destination will be judged on is known now, so refuse here
+    // rather than at 09:00 tomorrow when nobody is watching.
+    for target in &input.targets {
+        let account = state.db.get_account(target.account_id)?;
+        let adapter = platforms::adapter(account.platform);
+        platforms::validate(
+            account.platform,
+            &input.body,
+            title,
+            media.len(),
+            scheduler::effective_char_limit(&account, adapter),
+        )?;
+    }
+
+    let _ = app.emit(EVENT_QUEUE_CHANGED, post_id);
+    state.scheduler.nudge();
+    Ok(post_id)
+}
+
+#[tauri::command]
+pub fn delete_post(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<()> {
+    state.db.delete_post(id)?;
+    let _ = app.emit(EVENT_QUEUE_CHANGED, id);
+    Ok(())
+}
+
+/// Moves a post to "now" and wakes the worker. Deliberately the same code path
+/// as a scheduled post rather than a second publish route — one publisher means
+/// one set of retry and validation rules.
+#[tauri::command]
+pub fn publish_now(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<()> {
+    if state.db.list_targets(id)?.is_empty() {
+        return Err(AppError::InvalidInput(
+            "This post has no destinations. Pick at least one account.".into(),
+        ));
+    }
+    scheduler::requeue(&state.db, id, &db::now_rfc3339())?;
+    let _ = app.emit(EVENT_QUEUE_CHANGED, id);
+    state.scheduler.nudge();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reschedule_post(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    scheduled_at: String,
+) -> Result<()> {
+    db::parse_rfc3339(&scheduled_at)?;
+    scheduler::requeue(&state.db, id, &scheduled_at)?;
+    let _ = app.emit(EVENT_QUEUE_CHANGED, id);
+    state.scheduler.nudge();
+    Ok(())
+}
+
+/// Clears one destination's error and backoff so the next pass tries it again.
+#[tauri::command]
+pub fn retry_target(app: AppHandle, state: State<'_, AppState>, target_id: i64) -> Result<()> {
+    state.db.requeue_target(target_id)?;
+    let post_id = state
+        .db
+        .list_posts()?
+        .into_iter()
+        .find(|detail| detail.targets.iter().any(|t| t.id == target_id))
+        .map(|detail| detail.post.id)
+        .ok_or_else(|| AppError::NotFound(format!("No destination with id {target_id}.")))?;
+    state.db.reconcile_post_status(post_id)?;
+    let _ = app.emit(EVENT_QUEUE_CHANGED, post_id);
+    state.scheduler.nudge();
+    Ok(())
+}
+
+// ─── Composer support ───────────────────────────────────────────────────────
+
+/// One destination's verdict on the current draft, for the live counters in the
+/// composer. The same [`platforms::validate`] the scheduler runs, so what the
+/// composer says is what will actually happen.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetCheck {
+    pub account_id: i64,
+    pub platform: PlatformId,
+    pub handle: String,
+    pub used: usize,
+    pub limit: usize,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub fn check_post(
+    state: State<'_, AppState>,
+    body: String,
+    title: Option<String>,
+    media_count: usize,
+    account_ids: Vec<i64>,
+) -> Result<Vec<TargetCheck>> {
+    let title = title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    account_ids
+        .into_iter()
+        .map(|account_id| {
+            let account = state.db.get_account(account_id)?;
+            let adapter = platforms::adapter(account.platform);
+            let limit = scheduler::effective_char_limit(&account, adapter);
+            let error = platforms::validate(account.platform, &body, title, media_count, limit)
+                .err()
+                .map(|err| err.to_string());
+            Ok(TargetCheck {
+                account_id,
+                platform: account.platform,
+                handle: account.handle,
+                used: adapter.count_body(&body),
+                limit,
+                error,
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedMedia {
+    pub path: String,
+    pub mime: String,
+    pub bytes: i64,
+}
+
+#[tauri::command]
+pub fn resolve_media(paths: Vec<String>) -> Result<Vec<ResolvedMedia>> {
+    paths
+        .iter()
+        .map(|path| {
+            let resolved = media::resolve(path)?;
+            Ok(ResolvedMedia {
+                path: resolved.path,
+                mime: resolved.mime,
+                bytes: resolved.bytes,
+            })
+        })
+        .collect()
+}
+
+// ─── Settings ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    /// `system` | `light` | `dark`
+    pub theme: String,
+    /// `off` | `standard` | `strong`
+    pub window_material: String,
+    /// `skip` | `post_late` — see [`MissedPolicy`].
+    pub missed_policy: String,
+    pub grace_minutes: i64,
+    pub launch_at_login: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: "system".into(),
+            window_material: "standard".into(),
+            missed_policy: MissedPolicy::Skip.as_str().into(),
+            grace_minutes: 15,
+            launch_at_login: false,
+        }
+    }
+}
+
+#[tauri::command]
+pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
+    let defaults = Settings::default();
+    Ok(Settings {
+        theme: state.db.get_meta("theme")?.unwrap_or(defaults.theme),
+        window_material: state
+            .db
+            .get_meta("window_material")?
+            .unwrap_or(defaults.window_material),
+        missed_policy: MissedPolicy::parse(state.db.get_meta(META_MISSED_POLICY)?.as_deref())
+            .as_str()
+            .into(),
+        grace_minutes: state
+            .db
+            .get_meta(META_GRACE_MINUTES)?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(defaults.grace_minutes),
+        launch_at_login: state
+            .db
+            .get_meta("launch_at_login")?
+            .is_some_and(|value| value == "true"),
+    })
+}
+
+#[tauri::command]
+pub fn update_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings> {
+    state.db.set_meta("theme", &settings.theme)?;
+    state
+        .db
+        .set_meta("window_material", &settings.window_material)?;
+    state.db.set_meta(
+        META_MISSED_POLICY,
+        MissedPolicy::parse(Some(&settings.missed_policy)).as_str(),
+    )?;
+    state.db.set_meta(
+        META_GRACE_MINUTES,
+        &settings.grace_minutes.max(0).to_string(),
+    )?;
+    state
+        .db
+        .set_meta("launch_at_login", &settings.launch_at_login.to_string())?;
+    get_settings(state)
+}
+
+/// The loopback URI every OAuth app must register. Shown in Settings so it can
+/// be copied rather than retyped — a single wrong character there fails the
+/// exchange with a message that names nothing useful.
+#[tauri::command]
+pub fn oauth_redirect_uri() -> &'static str {
+    crate::oauth::REDIRECT_URI
+}

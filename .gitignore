@@ -1,0 +1,17 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Rust
+src-tauri/target
+src-tauri/gen
+
+# Editors
+.idea
+*.swp
+*.tsbuildinfo

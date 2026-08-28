@@ -1,0 +1,9 @@
+packages: []
+
+allowBuilds:
+  esbuild: true
+
+# Matches meltemi and the other Tauri apps in this workspace. The global default
+# quarantines packages published in the last 24h; with a fresh lockfile that
+# rejects whatever shipped yesterday, which is most of the toolchain here.
+minimumReleaseAge: 0

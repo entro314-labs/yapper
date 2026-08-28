@@ -1,0 +1,5 @@
+# Pins mirror CI. rust-toolchain.toml owns the Rust pin; packageManager owns pnpm.
+[tools]
+node = "26"
+rust = "1.98.0"
+pnpm = "latest"

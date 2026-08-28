@@ -1,0 +1,202 @@
+/*
+ * Yapper palette — "Signal".
+ *
+ * Light and dark are one theme, not two: the same carrier cyan, the same
+ * relationships, re-measured against the opposite ground. Dark is the design
+ * target (a composer you leave open next to your work), light is a first-class
+ * port rather than an inversion.
+ *
+ * Every colour is oklch so the two modes can be tuned by lightness alone and a
+ * `color-mix` between any two of them stays in gamut.
+ */
+
+:root {
+  --background: oklch(0.98 0.004 230);
+  --foreground: oklch(0.19 0.014 250);
+
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.19 0.014 250);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.19 0.014 250);
+
+  /* The carrier. Dark enough on paper to be read as text, which is why the
+     light half is 0.62 rather than matching the dark mode's 0.78. */
+  --primary: oklch(0.62 0.13 216);
+  --primary-foreground: oklch(0.99 0.01 216);
+
+  --secondary: oklch(0.955 0.006 250);
+  --secondary-foreground: oklch(0.27 0.02 250);
+
+  --muted: oklch(0.955 0.006 250);
+  --muted-foreground: oklch(0.5 0.016 250);
+
+  --accent: oklch(0.94 0.025 216);
+  --accent-foreground: oklch(0.3 0.06 216);
+
+  --destructive: oklch(0.58 0.21 27);
+  --destructive-foreground: oklch(0.99 0.02 27);
+  --success: oklch(0.62 0.15 152);
+  --success-foreground: oklch(0.99 0.02 152);
+  --warning: oklch(0.72 0.15 75);
+  --warning-foreground: oklch(0.2 0.05 75);
+
+  /* Alpha rather than solid, matching dark: a solid border cannot composite over
+     the translucent sidebar the way an alpha one does, so the two modes would
+     otherwise draw a visibly different line on the same surface under vibrancy. */
+  --border: oklch(0.19 0.014 250 / 0.12);
+  --input: oklch(0.19 0.014 250 / 0.16);
+  --ring: oklch(0.62 0.13 216 / 0.55);
+  --radius: 0.625rem;
+
+  --sidebar: oklch(0.965 0.006 250);
+  --sidebar-foreground: oklch(0.27 0.02 250);
+  --sidebar-accent: oklch(0.925 0.01 250);
+  --sidebar-accent-foreground: oklch(0.19 0.02 250);
+  --sidebar-border: oklch(0.19 0.014 250 / 0.1);
+
+  /* The counter-tone in the body's ambient wash. A cooled indigo, not a second
+     accent: nothing in the UI is ever painted with it. */
+  --tone-drift: oklch(0.6 0.13 285);
+
+  /* ── Window chrome ───────────────────────────────────────────────────── */
+  /* The content island's wash. Translucent on purpose: the body's ambient
+     gradient keeps running underneath it. The SAME ratio in both modes — using
+     different ones puts one surface at two different depths depending on theme. */
+  --pane-surface: color-mix(in oklab, var(--card) 62%, transparent);
+  --pane-sidebar-default: 236px;
+
+  /* Alpha applied to chrome surfaces when the OS draws its own translucency
+     behind the window. 1 = opaque, which is what an `off` material — or a
+     platform that refused the effect — must keep. */
+  --chrome-alpha: 1;
+
+  --motion-micro: 120ms;
+  --ease-butter: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* ── Theme identity ──────────────────────────────────────────────────── */
+  /* A theme is not only colour: typeface and elevation are as much of its
+     character, and one that recolours alone reads as a filter over someone
+     else's design. */
+  --app-font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --app-font-display: 'Space Grotesk Variable', var(--app-font-sans);
+  --app-font-mono:
+    'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --app-shadow-elevated:
+    0 1px 0 0 oklch(0 0 0 / 0.04), 0 4px 12px -2px oklch(0 0 0 / 0.1),
+    0 24px 64px -16px oklch(0 0 0 / 0.28);
+}
+
+.dark {
+  --background: oklch(0.17 0.014 255);
+  --foreground: oklch(0.97 0.005 250);
+
+  --card: oklch(0.215 0.016 255);
+  --card-foreground: oklch(0.97 0.005 250);
+  --popover: oklch(0.225 0.016 255);
+  --popover-foreground: oklch(0.97 0.005 250);
+
+  --primary: oklch(0.78 0.13 210);
+  --primary-foreground: oklch(0.18 0.05 230);
+
+  --secondary: oklch(0.275 0.015 255);
+  --secondary-foreground: oklch(0.93 0.005 250);
+
+  --muted: oklch(0.255 0.014 255);
+  --muted-foreground: oklch(0.69 0.012 250);
+
+  --accent: oklch(0.31 0.045 215);
+  --accent-foreground: oklch(0.95 0.04 210);
+
+  --destructive: oklch(0.7 0.2 27);
+  --destructive-foreground: oklch(0.16 0.04 27);
+  --success: oklch(0.74 0.15 152);
+  --success-foreground: oklch(0.16 0.04 152);
+  --warning: oklch(0.79 0.15 82);
+  --warning-foreground: oklch(0.18 0.05 82);
+
+  --border: oklch(1 0 0 / 0.08);
+  --input: oklch(1 0 0 / 0.12);
+  --ring: oklch(0.78 0.13 210 / 0.5);
+
+  --sidebar: oklch(0.19 0.015 255);
+  --sidebar-foreground: oklch(0.92 0.005 250);
+  --sidebar-accent: oklch(0.25 0.016 255);
+  --sidebar-accent-foreground: oklch(0.97 0.005 250);
+  --sidebar-border: oklch(1 0 0 / 0.06);
+
+  --tone-drift: oklch(0.66 0.14 288);
+
+  --app-shadow-elevated:
+    0 1px 0 0 oklch(0 0 0 / 0.3), 0 8px 24px -4px oklch(0 0 0 / 0.5),
+    0 32px 80px -20px oklch(0 0 0 / 0.6);
+}
+
+/*
+ * Per-platform brand tones.
+ *
+ * These are the ONLY colours in the app that are not from the palette above,
+ * and they exist because a queue mixing five destinations has to be scannable
+ * without reading a single label. They are used as small dots, avatar rings and
+ * chip tints — never as a fill behind text, which is why each also carries an
+ * `-ink` for the rare case a label must sit in the brand's own colour.
+ *
+ * Tuned per mode: Bluesky's blue and LinkedIn's navy are both too dark to read
+ * on the dark surfaces, and X's black is invisible there by definition.
+ */
+:root {
+  --brand-bluesky: oklch(0.6 0.19 256);
+  --brand-mastodon: oklch(0.55 0.21 290);
+  --brand-reddit: oklch(0.65 0.21 38);
+  --brand-x: oklch(0.24 0.008 250);
+  --brand-linkedin: oklch(0.5 0.14 245);
+}
+
+.dark {
+  --brand-bluesky: oklch(0.72 0.16 250);
+  --brand-mastodon: oklch(0.7 0.17 292);
+  --brand-reddit: oklch(0.72 0.18 40);
+  /* X ships black. On a near-black desk that is not a colour, it is an absence —
+     so the dark half is the near-white the mark itself is drawn in there. */
+  --brand-x: oklch(0.93 0.003 250);
+  --brand-linkedin: oklch(0.68 0.13 245);
+}
+
+/* ─── Window materials ──────────────────────────────────────────────────────
+   With an OS effect active behind a transparent window, the chrome surfaces thin
+   out and the effect shows through. `data-material` is stamped from what the OS
+   ACTUALLY did (see lib/window-material.ts), never from the preference — macOS
+   and Windows always accept, Linux routinely does not, and a see-through sidebar
+   with nothing frosting behind it shows the desktop wallpaper through the queue.
+
+   DELIBERATELY UNLAYERED, next to the `:root` block these tokens come from.
+   Unlayered rules beat layered ones, so the same overrides inside
+   `@layer components` would lose to `:root` and do nothing at all.  */
+[data-material='standard'] {
+  --chrome-alpha: 0.78;
+}
+[data-material='strong'] {
+  --chrome-alpha: 0.6;
+}
+/* The CONTENT island goes opaque. Its normal wash is translucent so the body's
+   ambient gradient shows through — but with a material the body IS the desktop,
+   and a see-through island means reading your queue through whatever window is
+   behind the app. Chrome frosts; content does not. */
+[data-material='standard'],
+[data-material='strong'] {
+  --pane-surface: var(--card);
+}
+[data-material='standard'] body,
+[data-material='strong'] body {
+  background: transparent;
+}
+@media (prefers-reduced-transparency: reduce) {
+  [data-material='standard'],
+  [data-material='strong'] {
+    --chrome-alpha: 1;
+    --pane-surface: var(--card);
+  }
+  [data-material='standard'] body,
+  [data-material='strong'] body {
+    background: var(--background);
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities for Yapper's main window.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-show",
+    "core:window:allow-is-maximized",
+    "core:app:allow-version",
+    "core:event:default",
+    "dialog:allow-open",
+    "opener:allow-open-url",
+    "autostart:default"
+  ]
+}
