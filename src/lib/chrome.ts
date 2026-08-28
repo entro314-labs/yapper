@@ -6,8 +6,12 @@
 export const APP_NAME = 'Yapper'
 
 export const TITLEBAR_H = 44
-/** Clears the macOS traffic lights, whose position is set in tauri.conf.json. */
-export const TITLEBAR_INSET_LEFT = 78
+/**
+ * Clears the macOS traffic lights, whose position is set in tauri.conf.json
+ * (x: 18). The three buttons end around 77px; this leaves a real gap after them
+ * rather than butting the wordmark against the green one.
+ */
+export const TITLEBAR_INSET_LEFT = 94
 
 export const SIDEBAR_DEFAULT_W = 236
 export const SIDEBAR_MIN_W = 190
