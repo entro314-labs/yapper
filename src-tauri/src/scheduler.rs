@@ -128,6 +128,16 @@ fn run(app: &AppHandle, database: &Arc<Db>, wakeups: &Receiver<()>) {
 
 /// One sweep. Returns how many destinations were settled, either way.
 fn pass(app: &AppHandle, database: &Arc<Db>) -> Result<usize> {
+    // Catch-up runs on EVERY pass, not only at launch. A machine that sleeps
+    // overnight with Yapper open wakes to hours of overdue posts, and firing
+    // them all at once is exactly what the missed-post policy exists to
+    // prevent — a policy that only holds at boot is not the policy Settings
+    // describes. It is idempotent, costs one indexed query, and returns
+    // immediately under `PostLate`.
+    if let Err(err) = catch_up(database) {
+        log::error!("catch-up inside the scheduler pass failed: {err}");
+    }
+
     let due = database.due_targets(Utc::now(), BATCH)?;
     if due.is_empty() {
         return Ok(0);
@@ -188,6 +198,7 @@ fn publish_one(database: &Arc<Db>, item: &DueTarget) -> Result<Published> {
     )?;
 
     adapter.publish(&PublishRequest {
+        target_id: item.target.id,
         account,
         secret: &secret,
         body: &item.post.body,
@@ -319,7 +330,10 @@ pub fn requeue(database: &Arc<Db>, post_id: i64, scheduled_at: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{POST_FAILED, POST_PUBLISHED, TARGET_FAILED, TARGET_PENDING, TARGET_PUBLISHED};
+    use crate::db::{
+        POST_FAILED, POST_PUBLISHED, POST_PUBLISHING, TARGET_FAILED, TARGET_PENDING,
+        TARGET_PUBLISHED,
+    };
     use crate::platforms::{AccountSecret, Connected, PlatformId};
 
     fn store() -> (Arc<Db>, i64, i64, i64) {
@@ -517,6 +531,24 @@ mod tests {
 
         assert_eq!(catch_up(&database).expect("catch up"), 1);
         assert_eq!(database.get_post(post).expect("post").status, POST_MISSED);
+    }
+
+    #[test]
+    fn catch_up_never_touches_a_target_already_in_flight() {
+        // Running catch-up on every pass must not reach into a post the
+        // scheduler is mid-way through: only `scheduled` posts are candidates,
+        // and a claimed one has moved to `publishing`.
+        let (database, _, post, target) = store();
+        database
+            .set_post_status(post, POST_PUBLISHING)
+            .expect("in flight");
+        assert!(database.claim_target(target).expect("claim"));
+
+        assert_eq!(catch_up(&database).expect("catch up"), 0);
+        assert_eq!(
+            database.get_post(post).expect("post").status,
+            POST_PUBLISHING
+        );
     }
 
     #[test]

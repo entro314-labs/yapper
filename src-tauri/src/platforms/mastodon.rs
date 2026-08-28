@@ -128,11 +128,14 @@ impl Platform for Mastodon {
                 .post(format!("{instance}/api/v1/statuses"))
                 .bearer_auth(&request.secret.access_token)
                 // A retry after a timeout must not produce a second post. Mastodon
-                // honours this header for 6 hours, and keying it on the target row
-                // makes every retry of THAT destination the same request.
+                // honours this header for ~6 hours and answers a REUSED key with
+                // the original status — so it has to name this destination and no
+                // other. Keyed on the account, two different posts to the same
+                // account inside that window would collapse into one, and the
+                // second would report the first one's id as its own.
                 .header(
                     "Idempotency-Key",
-                    format!("yapper-target-{}", request.account.id),
+                    format!("yapper-target-{}", request.target_id),
                 )
                 .json(&payload)
                 .send()?,
@@ -153,8 +156,6 @@ impl Platform for Mastodon {
     }
 }
 
-/// Mastodon's OAuth endpoints live on the instance, so they are derived per
-/// connect rather than being constants like every other adapter's.
 #[derive(Debug, Deserialize)]
 struct Registered {
     client_id: String,
@@ -172,6 +173,8 @@ struct Status {
     url: Option<String>,
 }
 
+/// Mastodon's OAuth endpoints live on the instance, so they are derived per
+/// connect rather than being constants like every other adapter's.
 fn config_for<'a>(instance: &str, app: &'a AppCredentials) -> OAuthConfig<'a> {
     OAuthConfig {
         platform: PlatformId::Mastodon,

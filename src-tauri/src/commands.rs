@@ -549,7 +549,17 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
 }
 
 #[tauri::command]
-pub fn update_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings> {
+pub fn update_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: Settings,
+) -> Result<Settings> {
+    // Autostart goes FIRST and its failure fails the whole save. The scheduler
+    // only runs while Yapper runs, so this switch is the difference between a
+    // scheduler and a wish — recording `true` for a registration that did not
+    // happen would be the app lying about the one thing it promises.
+    apply_autostart(&app, settings.launch_at_login)?;
+
     state.db.set_meta("theme", &settings.theme)?;
     state
         .db
@@ -566,6 +576,26 @@ pub fn update_settings(state: State<'_, AppState>, settings: Settings) -> Result
         .db
         .set_meta("launch_at_login", &settings.launch_at_login.to_string())?;
     get_settings(state)
+}
+
+/// Registers or clears the login item. Registering the plugin in the builder
+/// only makes this callable — it enables nothing by itself, which is how a
+/// switch like this ends up looking wired while doing nothing at all.
+pub fn apply_autostart(app: &AppHandle, enabled: bool) -> Result<()> {
+    use tauri_plugin_autostart::ManagerExt;
+
+    let manager = app.autolaunch();
+    let outcome = if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
+    outcome.map_err(|err| {
+        AppError::Internal(format!(
+            "Could not {} launch at login: {err}",
+            if enabled { "turn on" } else { "turn off" }
+        ))
+    })
 }
 
 /// The loopback URI every OAuth app must register. Shown in Settings so it can

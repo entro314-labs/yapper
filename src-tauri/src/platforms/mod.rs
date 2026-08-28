@@ -295,6 +295,10 @@ pub struct MediaItem {
 }
 
 pub struct PublishRequest<'a> {
+    /// The `post_targets` row being sent. Identifies THIS post to THIS account,
+    /// which is what an idempotency key has to be built from — an account id
+    /// would make every post to that account the same request.
+    pub target_id: i64,
     pub account: &'a crate::db::Account,
     pub secret: &'a AccountSecret,
     pub body: &'a str,

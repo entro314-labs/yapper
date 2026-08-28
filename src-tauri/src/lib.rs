@@ -53,6 +53,18 @@ pub fn run() {
             let database = Arc::new(db::Db::open_at(&path)?);
             log::info!("store at {}", path.display());
 
+            // The stored preference is the authority: an OS update or a moved
+            // .app can drop a login item, and without this the switch would keep
+            // reading "on" for a registration that no longer exists.
+            let wants_autostart = database
+                .get_meta("launch_at_login")
+                .ok()
+                .flatten()
+                .is_some_and(|value| value == "true");
+            if let Err(err) = commands::apply_autostart(app.handle(), wants_autostart) {
+                log::warn!("could not reconcile the login item: {err}");
+            }
+
             let scheduler = Scheduler::start(app.handle().clone(), Arc::clone(&database));
             app.manage(AppState {
                 db: database,
@@ -102,6 +114,18 @@ pub fn run() {
             commands::oauth_redirect_uri,
             windowing::set_window_material,
         ])
-        .run(tauri::generate_context!())
-        .expect("Yapper failed to start");
+        .build(tauri::generate_context!())
+        .expect("Yapper failed to start")
+        .run(|app, event| {
+            // macOS: clicking the Dock icon does not start a second process, so
+            // the single-instance handler never fires and a window hidden by the
+            // close button would be unreachable — quit-and-relaunch would be the
+            // only way back. This is the one event that offers it.
+            if let tauri::RunEvent::Reopen { .. } = event
+                && let Some(window) = app.get_webview_window("main")
+            {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        });
 }

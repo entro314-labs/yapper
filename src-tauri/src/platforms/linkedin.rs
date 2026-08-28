@@ -309,9 +309,14 @@ fn upload_image(token: &str, version: &str, owner: &str, item: &MediaItem) -> Re
 /// `>`, `@`, `|`, `~`, `_` and `*` are markup and must be escaped with a
 /// backslash, or the post is rejected or renders wrong. `\` itself goes first,
 /// otherwise it would double-escape everything after it.
+///
+/// `#` is deliberately NOT in the set. `LinkedIn`'s own examples post
+/// `"Follow best practices #coding"` raw and it renders as a hashtag; escaping
+/// it would turn every tag in every post into literal text, which for a social
+/// scheduler is a broken feature rather than a rendering nit.
 fn escape_commentary(text: &str) -> String {
     const SPECIAL: &[char] = &[
-        '\\', '(', ')', '[', ']', '{', '}', '<', '>', '@', '|', '~', '_', '*', '#',
+        '\\', '(', ')', '[', ']', '{', '}', '<', '>', '@', '|', '~', '_', '*',
     ];
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -359,6 +364,14 @@ mod tests {
     #[test]
     fn plain_text_passes_through_untouched() {
         assert_eq!(escape_commentary("hello world"), "hello world");
+    }
+
+    #[test]
+    fn hashtags_survive_so_they_render_as_hashtags() {
+        assert_eq!(
+            escape_commentary("shipping today #rust"),
+            "shipping today #rust"
+        );
     }
 
     fn app(version: Option<&str>) -> AppCredentials {
