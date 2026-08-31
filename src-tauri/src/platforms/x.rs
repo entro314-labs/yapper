@@ -7,11 +7,19 @@
 //!
 //! MEDIA is the chunked v2 flow — `/2/media/upload/initialize`, then one
 //! `/append` per segment, then `/finalize`. There is no documented single-shot
-//! upload in v2, and the free tier allows only 17 initialize calls per 24 hours,
-//! so an image post is a genuinely scarce operation on that plan.
+//! upload in v2.
 //!
-//! The 280-character default is the free/basic tier's. Premium accounts get far
-//! more, which is what the per-account `char_limit` override is for.
+//! BILLING, verified 2026-08-28 against `docs.x.com`: X retired its tiered plans
+//! in February 2026 and the API is now pay-per-use against purchased credits.
+//! There is no free tier, and creating a post costs money on the app the token
+//! belongs to. That is the strongest reason the client id must be the USER's own
+//! developer app and could never be one Yapper ships — a shared id would bill
+//! every user's posts to one account. Errors here therefore separate "out of
+//! credit" from "bad credentials": the first is not something reconnecting fixes,
+//! and not something retrying fixes either.
+//!
+//! The 280-character default is the standard one. Premium accounts get far more,
+//! which is what the per-account `char_limit` override is for.
 
 use serde::Deserialize;
 use serde_json::json;
@@ -64,8 +72,8 @@ impl Platform for X {
                 )
                 .optional(),
             ],
-            notes: "Needs your own developer app with Write access. \
-                    The free tier allows a small number of posts per month.",
+            notes: "Needs your own developer app with Write access. X bills the \
+                    app per post — there is no free tier.",
         }
     }
 
@@ -343,10 +351,18 @@ fn map_error(status: u16, body: &str) -> AppError {
             "X refused this as a duplicate of something already posted from this account.".into(),
         );
     }
-    if status == 403 && (lowered.contains("usage") || lowered.contains("cap")) {
-        return AppError::Platform(
-            "X says this app has hit its monthly post cap. The free tier is small; \
-             the post stays queued for retry."
+    // Out of credit is neither a credential problem nor something a retry fixes:
+    // it clears when the app's owner buys more. Terminal, with the fix named,
+    // beats five silent retries into a dead end.
+    if (status == 403 || status == 402)
+        && (lowered.contains("usage")
+            || lowered.contains("cap")
+            || lowered.contains("credit")
+            || lowered.contains("payment"))
+    {
+        return AppError::InvalidInput(
+            "X refused this because the developer app is out of API credit. Posting is \
+             pay-per-use; top the app up in the X developer portal, then retry."
                 .into(),
         );
     }
@@ -371,12 +387,21 @@ mod tests {
     }
 
     #[test]
-    fn a_usage_cap_stays_retryable() {
-        let err = map_error(
-            403,
-            r#"{"title":"UsageCapExceeded","detail":"Monthly product cap"}"#,
-        );
-        assert!(err.is_retryable(), "a monthly cap clears on its own");
+    fn running_out_of_credit_is_terminal_and_says_how_to_fix_it() {
+        for (status, body) in [
+            (
+                403,
+                r#"{"title":"UsageCapExceeded","detail":"Product cap"}"#,
+            ),
+            (402, r#"{"detail":"Insufficient credit for this request"}"#),
+        ] {
+            let err = map_error(status, body);
+            assert!(
+                !err.is_retryable(),
+                "retrying does nothing to refill an empty balance: {err}"
+            );
+            assert!(err.to_string().contains("credit"), "{err}");
+        }
     }
 
     #[test]

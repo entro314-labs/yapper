@@ -41,20 +41,36 @@ to *Post it late*.
 
 ## Accounts
 
-| Platform | What you need | Notes |
-| --- | --- | --- |
-| **Bluesky** | An app password | Nothing to register. Start here. |
-| **Mastodon** | Your instance host | Yapper registers itself with the server. |
-| **Reddit** | Your own "installed app" | Free, no review, no client secret. |
-| **X** | Your own developer app | Needs Write access; the free tier is small. |
-| **LinkedIn** | Your own developer app | Needs the "Share on LinkedIn" product. |
+| Platform | What you need | Effort | Notes |
+| --- | --- | --- | --- |
+| **Bluesky** | An app password | ~1 min | Nothing to register. Start here. |
+| **Mastodon** | Your instance host | ~1 min | Yapper registers itself with the server. |
+| **Reddit** | Your own "installed app" | ~5 min | Free for non-commercial use, no secret. |
+| **LinkedIn** | Your own developer app | ~10 min | "Share on LinkedIn" is self-serve, approved instantly. |
+| **X** | Your own developer app | ~10 min + cost | Pay-per-use. See below. |
 
-X, Reddit and LinkedIn all gate posting behind a developer app that has to be
-registered to a person, and a client secret shipped inside a distributed binary
-is not a secret — so you register your own and paste the client id into
-**Settings → Platform apps**. It is stored in the OS credential store, never in
-the app's database. Every OAuth app registers the same redirect URI, which
-Settings shows for copying: `http://127.0.0.1:8917/callback`.
+### Why you register your own app
+
+Every platform here supports authentication, and Yapper implements all of it —
+OAuth 2.0 + PKCE for four of them, an app password for Bluesky. What Yapper
+cannot do is hand you an app *identity*, and the reason differs per platform:
+
+- **X** bills per API call against credits on the app the token belongs to
+  (tiered plans were retired in February 2026; there is no free tier). A client
+  id shipped in Yapper would bill every user's posts to one account.
+- **Reddit** rate-limits per OAuth client id, so a shared id would put every
+  Yapper user in one bucket — and its Responsible Builder Policy grants access
+  per developer, not per app.
+- **LinkedIn** ties an app to a person or page, though "Share on LinkedIn" is
+  auto-approved with no review queue.
+
+So you register your own and paste the client id into **Settings → Platform
+apps**. It is stored in the OS credential store, never in the app's database.
+Every OAuth app registers the same redirect URI, which Settings shows for
+copying: `http://127.0.0.1:8917/callback`.
+
+Bluesky and Mastodon need none of this — start with either to see the whole
+pipeline work in about a minute.
 
 ## The assistant
 

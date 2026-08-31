@@ -86,7 +86,8 @@ impl Platform for Linkedin {
                 )
                 .optional(),
             ],
-            notes: "Needs your own developer app with the \"Share on LinkedIn\" product.",
+            notes: "Needs your own developer app. Adding its \"Share on LinkedIn\" \
+                    product is self-serve and approved instantly.",
         }
     }
 

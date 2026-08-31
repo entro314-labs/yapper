@@ -2,7 +2,7 @@
   "name": "yapper",
   "private": true,
   "version": "0.2.0",
-  "description": "A fast, keyboard-first desktop composer and scheduler for social platforms with an open API \u2014 Bluesky, Mastodon, Reddit, X and LinkedIn.",
+  "description": "A fast, keyboard-first desktop composer and scheduler for social platforms with an open API — Bluesky, Mastodon, Reddit, X and LinkedIn.",
   "type": "module",
   "license": "MIT",
   "author": "entro314-labs",
@@ -54,7 +54,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
     "@vitejs/plugin-react": "^6.1.1",
-    "knip": "^6.32.3",
+    "knip": "^6.33.0",
     "oxfmt": "^0.65.0",
     "oxlint": "^1.80.0",
     "tailwindcss": "^4.3.3",
@@ -65,5 +65,5 @@
   "engines": {
     "node": ">=24"
   },
-  "packageManager": "pnpm@12.0.0"
+  "packageManager": "pnpm@12.1.0"
 }

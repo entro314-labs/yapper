@@ -36,6 +36,12 @@ All notable changes to Yapper are documented here. The format follows
 - A failed destination has no publish time, so any date filter on the stats
   screen dropped every failure — "why things failed" was empty exactly when it
   mattered. Destinations now fall back to the post's own time.
+- X's free tier no longer exists: tiered plans were retired in February 2026 in
+  favour of pay-per-use credits. The connect screen said otherwise, and an
+  out-of-credit rejection was treated as a rate limit and retried five times.
+  It is now terminal and names the fix.
+- LinkedIn's "Share on LinkedIn" product is self-serve and approved instantly;
+  the copy implied a review queue that only applies to organization posting.
 
 ## [0.1.0] — 2026-08-28
 
@@ -79,7 +85,7 @@ First working version.
   separate upload-lease flow that is not implemented.
 - LinkedIn takes one image per post. Several needs the MultiImage API, which is
   a different content shape.
-- X's media upload uses the chunked v2 endpoints; the free API tier allows only
-  17 upload initialisations per 24 hours.
+- X's media upload uses the chunked v2 endpoints. X's API is pay-per-use, so
+  every post and upload costs credit on your own developer app.
 - LinkedIn's API version is pinned to `202606` and is overridable per install,
   because LinkedIn sunsets versions on a rolling schedule.
