@@ -1,8 +1,10 @@
 //! Yapper — a desktop composer and scheduler for social platforms with an open API.
 
 mod ai;
+mod atproto;
 mod commands;
 pub mod db;
+mod dpop;
 mod error;
 mod http;
 pub mod mcp;
@@ -36,12 +38,24 @@ pub fn run() {
     tauri::Builder::default()
         // A second launch focuses the running window rather than starting a rival
         // scheduler against the same store.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // A second launch is how Windows and Linux deliver a deep link: the
+            // OS starts the app again with the URL as an argument. Forward it
+            // before focusing, so a sign-in completes even if the window was
+            // hidden.
+            for arg in args.iter().skip(1) {
+                if arg.starts_with(atproto::CALLBACK_SCHEME) {
+                    atproto::deliver_callback(arg);
+                }
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
         }))
+        // AT Protocol OAuth hands its code back on a custom URI scheme; a
+        // loopback redirect is invalid there for a native client.
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         // Apple's on-device model. Registered unconditionally: the plugin ships
         // its own non-Apple-silicon stub, so one builder covers every platform
@@ -55,41 +69,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
         ))
-        .setup(|app| {
-            let path = db::data_dir()?.join("yapper.sqlite3");
-            let database = Arc::new(db::Db::open_at(&path)?);
-            log::info!("store at {}", path.display());
-
-            // The stored preference is the authority: an OS update or a moved
-            // .app can drop a login item, and without this the switch would keep
-            // reading "on" for a registration that no longer exists.
-            let wants_autostart = database
-                .get_meta("launch_at_login")
-                .ok()
-                .flatten()
-                .is_some_and(|value| value == "true");
-            if let Err(err) = commands::apply_autostart(app.handle(), wants_autostart) {
-                log::warn!("could not reconcile the login item: {err}");
-            }
-
-            let scheduler = Scheduler::start(app.handle().clone(), Arc::clone(&database));
-            app.manage(AppState {
-                db: database,
-                scheduler,
-                connecting: AtomicBool::new(false),
-            });
-
-            if let Some(window) = app.get_webview_window("main") {
-                windowing::apply_material(&window, "standard");
-                // Shown only once the renderer has painted, so the first frame is
-                // never an unthemed white flash against a transparent window.
-                let launched_hidden = std::env::args().any(|arg| arg == "--hidden");
-                if !launched_hidden {
-                    let _ = window.show();
-                }
-            }
-            Ok(())
-        })
+        .setup(setup)
         .on_window_event(|window, event| {
             // Closing the window hides it instead of quitting: the scheduler has
             // to keep running, and on macOS closing a window has never meant
@@ -142,4 +122,57 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         });
+}
+
+/// Everything the app needs standing up before the first frame: the store, the
+/// login item reconciled against the stored preference, the deep-link route the
+/// Bluesky sign-in comes back on, the scheduler thread, and the window.
+///
+/// Lifted out of the builder chain because it is the only part of `run` with any
+/// logic in it — the rest is plugin registration, which reads as a list.
+fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let path = db::data_dir()?.join("yapper.sqlite3");
+    let database = Arc::new(db::Db::open_at(&path)?);
+    log::info!("store at {}", path.display());
+
+    // The stored preference is the authority: an OS update or a moved
+    // .app can drop a login item, and without this the switch would keep
+    // reading "on" for a registration that no longer exists.
+    let wants_autostart = database
+        .get_meta("launch_at_login")
+        .ok()
+        .flatten()
+        .is_some_and(|value| value == "true");
+    if let Err(err) = commands::apply_autostart(app.handle(), wants_autostart) {
+        log::warn!("could not reconcile the login item: {err}");
+    }
+
+    // macOS delivers deep links to the RUNNING process through this
+    // event rather than by relaunching, so both routes are wired.
+    {
+        use tauri_plugin_deep_link::DeepLinkExt;
+        app.deep_link().on_open_url(|event| {
+            for url in event.urls() {
+                atproto::deliver_callback(url.as_str());
+            }
+        });
+    }
+
+    let scheduler = Scheduler::start(app.handle().clone(), Arc::clone(&database));
+    app.manage(AppState {
+        db: database,
+        scheduler,
+        connecting: AtomicBool::new(false),
+    });
+
+    if let Some(window) = app.get_webview_window("main") {
+        windowing::apply_material(&window, "standard");
+        // Shown only once the renderer has painted, so the first frame is
+        // never an unthemed white flash against a transparent window.
+        let launched_hidden = std::env::args().any(|arg| arg == "--hidden");
+        if !launched_hidden {
+            let _ = window.show();
+        }
+    }
+    Ok(())
 }

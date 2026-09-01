@@ -20,6 +20,8 @@ export interface FieldSpec {
   help: string
   secret: boolean
   required: boolean
+  /** A closed set of allowed values, drawn as a picker. Empty means free text. */
+  choices: string[]
 }
 
 /** `platforms::Limits` */

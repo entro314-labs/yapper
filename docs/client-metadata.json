@@ -1,0 +1,19 @@
+{
+  "client_id": "https://entro314-labs.github.io/yapper/client-metadata.json",
+  "client_name": "Yapper",
+  "client_uri": "https://github.com/entro314-labs/yapper",
+  "application_type": "native",
+  "dpop_bound_access_tokens": true,
+  "grant_types": [
+    "authorization_code",
+    "refresh_token"
+  ],
+  "response_types": [
+    "code"
+  ],
+  "scope": "atproto transition:generic",
+  "redirect_uris": [
+    "io.github.entro314-labs:/callback"
+  ],
+  "token_endpoint_auth_method": "none"
+}

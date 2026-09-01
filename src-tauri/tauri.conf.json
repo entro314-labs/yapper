@@ -52,5 +52,14 @@
     "resources": [
       "resources/*"
     ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "io.github.entro314-labs"
+        ]
+      }
+    }
   }
 }

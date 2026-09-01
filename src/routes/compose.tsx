@@ -543,16 +543,16 @@ function Destinations({
                   {field.label}
                   {field.required ? <span className="text-destructive"> *</span> : null}
                 </span>
-                {field.key === 'visibility' || field.key === 'reply_settings' ? (
+                {field.choices.length > 0 ? (
                   <Select
                     value={options[accountId]?.[field.key] ?? field.placeholder}
                     onChange={(event) => {
                       onOption(accountId, field.key, event.target.value)
                     }}
                   >
-                    {optionsFor(field.help).map((value) => (
-                      <option key={value} value={value}>
-                        {value}
+                    {field.choices.map((choice) => (
+                      <option key={choice} value={choice}>
+                        {choice}
                       </option>
                     ))}
                   </Select>
@@ -574,17 +574,4 @@ function Destinations({
       })}
     </div>
   )
-}
-
-/**
- * The allowed values for an enumerated target field, read out of the help text the adapter already
- * writes ("public, unlisted, private or direct."). Keeping one list in Rust beats a second copy
- * here that can drift from it.
- */
-function optionsFor(help: string): string[] {
-  return help
-    .replace(/\.$/, '')
-    .split(/,| or /)
-    .map((value) => value.trim())
-    .filter((value) => /^[a-zA-Z_]+$/.test(value))
 }

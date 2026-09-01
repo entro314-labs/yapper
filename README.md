@@ -43,7 +43,7 @@ to *Post it late*.
 
 | Platform | What you need | Effort | Notes |
 | --- | --- | --- | --- |
-| **Bluesky** | An app password | ~1 min | Nothing to register. Start here. |
+| **Bluesky** | A handle | ~1 min | Sign in with Bluesky (OAuth), or an app password. |
 | **Mastodon** | Your instance host | ~1 min | Yapper registers itself with the server. |
 | **Reddit** | Your own "installed app" | ~5 min | Free for non-commercial use, no secret. |
 | **LinkedIn** | Your own developer app | ~10 min | "Share on LinkedIn" is self-serve, approved instantly. |
@@ -71,6 +71,40 @@ copying: `http://127.0.0.1:8917/callback`.
 
 Bluesky and Mastodon need none of this — start with either to see the whole
 pipeline work in about a minute.
+
+### Sign in with Bluesky
+
+Bluesky is the one platform with two ways in, and the connect dialog picks
+between them:
+
+- **OAuth** (default) — real AT Protocol OAuth. Scoped to `atproto
+  transition:generic`, revocable from Bluesky's own settings, and never hands
+  Yapper a reusable password. Its tokens are DPoP-bound: every request they
+  authorize is signed by a P-256 key held next to them, so a stolen token alone
+  is useless.
+- **App password** — one field, works everywhere, no setup at all.
+
+Both land on the same DID, so switching upgrades the account in place and
+scheduled posts survive.
+
+**OAuth needs two things activated before it can run**, because the protocol
+has no registration step — a client's identity IS a document published on the
+web, which the authorization server fetches during sign-in:
+
+1. **Publish `docs/client-metadata.json`.** Create the GitHub repo, push, and
+   enable Pages from `main` / `/docs`, so
+   `https://entro314-labs.github.io/yapper/client-metadata.json` resolves.
+   Hosting it anywhere else works too — set the URL in
+   **Settings → Platform apps → Bluesky**, and the redirect scheme is derived
+   from that hostname automatically.
+2. **Run a bundled build** (`pnpm tauri:build`). The callback comes back on a
+   custom URI scheme (`io.github.entro314-labs:/callback`), which macOS routes
+   through the bundle's `Info.plist` — so it cannot work under `tauri dev`.
+
+Until both are done, Yapper says so before opening a browser rather than
+failing halfway through. If a callback ever fails to route, the browser shows a
+link it could not open: paste it into the dialog's **Callback URL** field and
+the same sign-in finishes.
 
 ## The assistant
 
@@ -146,6 +180,8 @@ src-tauri/src/
   secrets.rs            OS credential store
   oauth.rs              one OAuth 2.0 + PKCE loopback flow for every provider
   scheduler.rs          the worker: due posts, backoff, missed-post policy
+  atproto.rs            AT Protocol OAuth: identity, discovery, PAR, tokens
+  dpop.rs               proof-of-possession signing for that flow
   ai.rs                 three assistant backends behind one verb
   stats.rs              delivery figures, and engagement where it is free
   mcp.rs + bin/mcp.rs   the agent door

@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import { brandOf } from '@/lib/platform-brand'
 import { useAccounts, useConnectAccount, useDisconnectAccount, usePlatforms } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
@@ -184,11 +185,22 @@ function ConnectDialog({ info, onClose }: { info: PlatformInfo; onClose: () => v
 
   const missing = info.connectFields.filter((field) => field.required && !fields[field.key]?.trim())
 
+  // Bluesky offers both a browser handoff and a typed credential, so what the
+  // button promises follows the PICKED method rather than the platform's
+  // nominal auth kind.
+  const method = fields.method ?? info.connectFields.find((f) => f.key === 'method')?.placeholder
+  const opensBrowser = info.auth === 'oAuth2' || method === 'oauth'
+
+  // Only a REQUIRED app field is a precondition — the same rule the backend
+  // applies. Bluesky's optional client-metadata override must not make it look
+  // like it needs a developer app when it does not.
+  const needsDeveloperApp = info.appFields.some((field) => field.required)
+
   const submit = React.useCallback(async () => {
     setBusy(true)
     try {
       await connect.mutateAsync({ platform: info.id, fields })
-      if (info.auth === 'oAuth2') {
+      if (opensBrowser) {
         toast.info(`Finish signing in to ${info.name} in your browser`)
       }
       onClose()
@@ -212,7 +224,7 @@ function ConnectDialog({ info, onClose }: { info: PlatformInfo; onClose: () => v
           <DialogDescription>{info.notes}</DialogDescription>
         </DialogHeader>
 
-        {info.appFields.length > 0 ? (
+        {needsDeveloperApp ? (
           <p className="rounded-md bg-muted/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
             This needs your own developer app. Add its details in{' '}
             <Link to="/settings" className="text-primary underline-offset-2 hover:underline">
@@ -229,15 +241,30 @@ function ConnectDialog({ info, onClose }: { info: PlatformInfo; onClose: () => v
                 {field.label}
                 {field.required ? <span className="text-destructive"> *</span> : null}
               </span>
-              <Input
-                type={field.secret ? 'password' : 'text'}
-                value={fields[field.key] ?? ''}
-                placeholder={field.placeholder}
-                autoComplete="off"
-                onChange={(event) => {
-                  setFields((current) => ({ ...current, [field.key]: event.target.value }))
-                }}
-              />
+              {field.choices.length > 0 ? (
+                <Select
+                  value={fields[field.key] ?? field.placeholder}
+                  onChange={(event) => {
+                    setFields((current) => ({ ...current, [field.key]: event.target.value }))
+                  }}
+                >
+                  {field.choices.map((choice) => (
+                    <option key={choice} value={choice}>
+                      {choice}
+                    </option>
+                  ))}
+                </Select>
+              ) : (
+                <Input
+                  type={field.secret ? 'password' : 'text'}
+                  value={fields[field.key] ?? ''}
+                  placeholder={field.placeholder}
+                  autoComplete="off"
+                  onChange={(event) => {
+                    setFields((current) => ({ ...current, [field.key]: event.target.value }))
+                  }}
+                />
+              )}
               <span className="leading-relaxed text-muted-foreground">{field.help}</span>
             </label>
           ))}
@@ -263,7 +290,7 @@ function ConnectDialog({ info, onClose }: { info: PlatformInfo; onClose: () => v
               void submit()
             }}
           >
-            {info.auth === 'oAuth2' ? 'Continue in browser' : 'Connect'}
+            {opensBrowser ? 'Continue in browser' : 'Connect'}
           </Button>
         </div>
       </DialogContent>

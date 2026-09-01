@@ -82,9 +82,10 @@ impl Platform for Linkedin {
                     "visibility",
                     "Visibility",
                     "PUBLIC",
-                    "PUBLIC or CONNECTIONS.",
+                    "Who the post reaches.",
                 )
-                .optional(),
+                .optional()
+                .choosing(&["PUBLIC", "CONNECTIONS"]),
             ],
             notes: "Needs your own developer app. Adding its \"Share on LinkedIn\" \
                     product is self-serve and approved instantly.",

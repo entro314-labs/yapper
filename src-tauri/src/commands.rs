@@ -130,7 +130,12 @@ fn run_connect(
         .map(normalize_instance_key);
 
     let app_credentials = secrets::load_app_credentials(platform, instance.as_deref())?;
-    if !info.app_fields.is_empty() && app_credentials.is_none() {
+    // Only a REQUIRED app field makes credentials a precondition. Bluesky
+    // exposes an optional one (the OAuth client metadata URL, which has a
+    // working default), and demanding it would block the app-password path that
+    // needs no developer app at all.
+    let needs_app = info.app_fields.iter().any(|field| field.required);
+    if needs_app && app_credentials.is_none() {
         return Err(AppError::InvalidInput(format!(
             "{} needs your own developer app. Add its client id in Settings → Platform apps.",
             info.name

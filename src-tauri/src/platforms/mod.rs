@@ -115,6 +115,10 @@ pub struct FieldSpec {
     pub help: &'static str,
     pub secret: bool,
     pub required: bool,
+    /// A closed set of allowed values, drawn as a picker. Empty means free text.
+    /// Declared here rather than inferred by the renderer from the help string,
+    /// which is what it used to do — a sentence is not a schema.
+    pub choices: &'static [&'static str],
 }
 
 impl FieldSpec {
@@ -131,6 +135,7 @@ impl FieldSpec {
             help,
             secret: false,
             required: true,
+            choices: &[],
         }
     }
 
@@ -147,11 +152,17 @@ impl FieldSpec {
             help,
             secret: true,
             required: true,
+            choices: &[],
         }
     }
 
     const fn optional(mut self) -> Self {
         self.required = false;
+        self
+    }
+
+    const fn choosing(mut self, choices: &'static [&'static str]) -> Self {
+        self.choices = choices;
         self
     }
 }

@@ -50,9 +50,10 @@ impl Platform for Mastodon {
                     "visibility",
                     "Visibility",
                     "public",
-                    "public, unlisted, private or direct.",
+                    "Who sees it on your instance.",
                 )
-                .optional(),
+                .optional()
+                .choosing(&["public", "unlisted", "private", "direct"]),
                 FieldSpec::text(
                     "spoiler_text",
                     "Content warning",

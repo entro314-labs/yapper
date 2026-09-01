@@ -1,25 +1,34 @@
-//! Bluesky, over the AT Protocol XRPC endpoints on the account's own PDS.
+//! Bluesky, over the AT Protocol XRPC endpoints on the account's own `PDS`.
 //!
-//! The only platform here with no developer app anywhere: the user creates an
-//! app password at bsky.app → Settings → App Passwords and types it in. That is
-//! why it is the adapter to test the pipeline with.
+//! TWO WAYS IN, both landing on the same DID and therefore the same account row:
 //!
-//! Sessions are deliberately NOT persisted across a publish. An `accessJwt`
-//! lives about two hours, which is shorter than the gap between most scheduled
-//! posts, so a stored one is expired more often than not. Yapper keeps the app
-//! password instead and mints a session immediately before each publish — one
-//! extra request, and no refresh-token state machine that can drift.
+//! * **App password** — created at bsky.app → Settings → App Passwords and typed
+//!   in. No developer app anywhere, which is why this is the adapter to test the
+//!   whole pipeline with. Sessions are deliberately NOT persisted: an
+//!   `accessJwt` lives about two hours, shorter than the gap between most
+//!   scheduled posts, so a stored one is expired more often than not. Yapper
+//!   keeps the app password and mints a session immediately before each publish
+//!   — one extra request, and no state machine that can drift.
+//!
+//! * **Sign in with Bluesky** — real AT Protocol OAuth (see [`crate::atproto`]):
+//!   scoped, revocable from the account's own settings, and never handing this
+//!   app a reusable password. Its tokens are `DPoP`-bound, so every request they
+//!   authorize is signed by a key stored beside them.
+//!
+//! Which one an account uses is recorded in its stored secret, and `publish`
+//! branches on it. Reconnecting an app-password account over OAuth upgrades it
+//! in place — same DID, same row, same scheduled posts.
 
 use serde::Deserialize;
 use serde_json::json;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
-    AccountSecret, AuthKind, ConnectInput, Connected, FieldSpec, Limits, Platform, PlatformId,
-    PlatformInfo, PublishRequest, Published,
+    AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, Platform,
+    PlatformId, PlatformInfo, PublishRequest, Published,
 };
 use crate::error::{AppError, Result, from_status};
-use crate::http;
+use crate::{atproto, dpop, http};
 
 pub struct Bluesky;
 
@@ -40,6 +49,14 @@ impl Platform for Bluesky {
             },
             connect_fields: vec![
                 FieldSpec::text(
+                    "method",
+                    "Sign in with",
+                    METHOD_OAUTH,
+                    "OAuth is scoped and revocable from Bluesky itself; an app password is \
+                     one field and works everywhere.",
+                )
+                .choosing(&[METHOD_OAUTH, METHOD_APP_PASSWORD]),
+                FieldSpec::text(
                     "handle",
                     "Handle",
                     "you.bsky.social",
@@ -49,9 +66,18 @@ impl Platform for Bluesky {
                     "app_password",
                     "App password",
                     "xxxx-xxxx-xxxx-xxxx",
-                    "Create one at Settings → Privacy and security → App passwords. \
-                     Never your account password.",
-                ),
+                    "App-password method only. Create one at Settings → Privacy and security \
+                     → App passwords — never your account password.",
+                )
+                .optional(),
+                FieldSpec::text(
+                    "callback_url",
+                    "Callback URL",
+                    "",
+                    "Only if your browser could not hand the sign-in back automatically: \
+                     paste the whole URL it failed to open.",
+                )
+                .optional(),
                 FieldSpec::text(
                     "pds",
                     "Server",
@@ -60,11 +86,20 @@ impl Platform for Bluesky {
                 )
                 .optional(),
             ],
-            app_fields: Vec::new(),
+            app_fields: vec![
+                FieldSpec::text(
+                    "client_id",
+                    "OAuth client metadata URL",
+                    atproto::DEFAULT_CLIENT_ID,
+                    "Where Yapper's OAuth client document is published. Change it only if you \
+                     host your own copy.",
+                )
+                .optional(),
+            ],
             setup_url: Some("https://bsky.app/settings/app-passwords"),
             redirect_uri: None,
             target_fields: Vec::new(),
-            notes: "No developer app needed — just an app password.",
+            notes: "No developer app needed. Sign in with Bluesky, or paste an app password.",
         }
     }
 
@@ -76,6 +111,10 @@ impl Platform for Bluesky {
     }
 
     fn connect(&self, input: &ConnectInput) -> Result<Connected> {
+        if input.optional_field("method").unwrap_or(METHOD_OAUTH) == METHOD_OAUTH {
+            return connect_oauth(input);
+        }
+
         let handle = input.field("handle")?.trim_start_matches('@').to_string();
         let app_password = input.field("app_password")?.to_string();
         let pds = normalize_pds(input.optional_field("pds"));
@@ -97,12 +136,35 @@ impl Platform for Bluesky {
                 // Deliberately no expiry: the session is re-minted per publish,
                 // so nothing should ever try to refresh this one on a clock.
                 expires_at: None,
-                extra: json!({ "app_password": app_password, "pds": pds, "handle": handle }),
+                extra: json!({
+                    "auth": METHOD_APP_PASSWORD,
+                    "app_password": app_password,
+                    "pds": pds,
+                    "handle": handle,
+                }),
             },
         })
     }
 
+    fn refresh(
+        &self,
+        _account: &crate::db::Account,
+        secret: &AccountSecret,
+        _app: Option<&AppCredentials>,
+    ) -> Result<Option<AccountSecret>> {
+        // App-password accounts mint a session per publish and have nothing to
+        // refresh on a clock; only OAuth ones carry an expiring token.
+        if !is_oauth(secret) || !crate::oauth::needs_refresh(secret.expires_at.as_deref()) {
+            return Ok(None);
+        }
+        refresh_oauth(secret).map(Some)
+    }
+
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published> {
+        if is_oauth(request.secret) {
+            return publish_oauth(request);
+        }
+
         let pds = request.secret.extra_str("pds").map_or_else(
             || normalize_pds(request.account.instance.as_deref()),
             str::to_string,
@@ -115,18 +177,7 @@ impl Platform for Bluesky {
 
         let session = create_session(&pds, &request.account.remote_id, app_password)?;
 
-        let mut record = json!({
-            "$type": COLLECTION,
-            "text": request.body,
-            // Bluesky orders timelines by this, not by receipt, so it must be the
-            // moment the post actually goes out rather than when it was composed.
-            "createdAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        });
-
-        let facets = link_facets(request.body);
-        if !facets.is_empty() {
-            record["facets"] = json!(facets);
-        }
+        let mut record = post_record(request.body);
 
         if !request.media.is_empty() {
             let images = request
@@ -169,6 +220,223 @@ impl Platform for Bluesky {
             remote_id: created.uri,
         })
     }
+}
+
+pub const METHOD_OAUTH: &str = "oauth";
+pub const METHOD_APP_PASSWORD: &str = "app-password";
+
+fn is_oauth(secret: &AccountSecret) -> bool {
+    secret.extra_str("auth") == Some(METHOD_OAUTH)
+}
+
+/// One post record, with link facets attached.
+///
+/// Bluesky stores no markup: a URL in the text is inert unless the record also
+/// carries a facet pointing at its byte range. Both auth paths build the record
+/// through here rather than each remembering to add them.
+fn post_record(body: &str) -> serde_json::Value {
+    let mut record = json!({
+        "$type": COLLECTION,
+        "text": body,
+        // Bluesky orders timelines by this, not by receipt, so it must be the
+        // moment the post actually goes out rather than when it was composed.
+        "createdAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    });
+    let facets = link_facets(body);
+    if !facets.is_empty() {
+        record["facets"] = json!(facets);
+    }
+    record
+}
+
+// ─── OAuth ──────────────────────────────────────────────────────────────────
+
+fn connect_oauth(input: &ConnectInput) -> Result<Connected> {
+    let handle = input.field("handle")?;
+    let client_id = input
+        .app
+        .as_ref()
+        .and_then(|app| app.extra("client_id"))
+        .unwrap_or(atproto::DEFAULT_CLIENT_ID)
+        .to_string();
+
+    // The escape hatch. A custom URI scheme only routes from a BUNDLED app — in
+    // a dev build, and anywhere scheme registration misbehaves, the browser
+    // shows a link it cannot open. Pasting it here finishes the same flow.
+    if let Some(pasted) = input.optional_field("callback_url") {
+        if !atproto::deliver_callback(pasted) {
+            return Err(AppError::InvalidInput(
+                "There is no sign-in waiting for that URL. Start the sign-in first, then paste \
+                 the callback here if your browser could not hand it back."
+                    .into(),
+            ));
+        }
+        return Err(AppError::InvalidInput(
+            "Callback delivered to the sign-in already in progress.".into(),
+        ));
+    }
+
+    let session = atproto::authorize(&client_id, handle)?;
+    // Best effort: a profile that will not load is no reason to refuse a
+    // connection that otherwise worked.
+    let profile = oauth_profile(&session).ok();
+
+    Ok(Connected {
+        remote_id: session.did.clone(),
+        handle: handle.trim_start_matches('@').to_string(),
+        display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
+        avatar_url: profile.and_then(|p| p.avatar),
+        instance: Some(session.pds.clone()),
+        scopes: session.scopes.clone(),
+        char_limit: None,
+        secret: AccountSecret {
+            access_token: session.access_token,
+            refresh_token: Some(session.refresh_token),
+            expires_at: session.expires_at,
+            extra: json!({
+                "auth": METHOD_OAUTH,
+                // The tokens are BOUND to this key. A refresh signed by any other
+                // one is refused, so losing it means reconnecting the account.
+                "dpop_key": session.dpop_key,
+                "issuer": session.issuer,
+                "pds": session.pds,
+                "client_id": client_id,
+            }),
+        },
+    })
+}
+
+/// The pieces an authenticated OAuth request needs, unpacked and checked once.
+struct OAuthContext {
+    key: dpop::Key,
+    pds: String,
+    token: String,
+}
+
+fn oauth_context(secret: &AccountSecret) -> Result<OAuthContext> {
+    let missing = |what: &str| {
+        AppError::Unauthorized(format!(
+            "This Bluesky connection is missing its {what}. Reconnect the account."
+        ))
+    };
+    Ok(OAuthContext {
+        key: dpop::Key::from_base64(secret.extra_str("dpop_key").ok_or_else(|| missing("key"))?)?,
+        pds: secret
+            .extra_str("pds")
+            .ok_or_else(|| missing("server"))?
+            .to_string(),
+        token: secret.access_token.clone(),
+    })
+}
+
+fn refresh_oauth(secret: &AccountSecret) -> Result<AccountSecret> {
+    let key = dpop::Key::from_base64(secret.extra_str("dpop_key").ok_or_else(|| {
+        AppError::Unauthorized("This Bluesky connection lost its key. Reconnect it.".into())
+    })?)?;
+    let pds = secret.extra_str("pds").ok_or_else(|| {
+        AppError::Unauthorized("This Bluesky connection names no server. Reconnect it.".into())
+    })?;
+    let client_id = secret
+        .extra_str("client_id")
+        .unwrap_or(atproto::DEFAULT_CLIENT_ID);
+    let refresh_token = secret.refresh_token.as_deref().ok_or_else(|| {
+        AppError::Unauthorized("This Bluesky connection has no refresh token.".into())
+    })?;
+
+    // Rediscovered rather than stored: a `PDS` can move its authorization server,
+    // and a stale token endpoint would fail every refresh with nothing to
+    // explain it.
+    let server = atproto::discover_auth_server(pds)?;
+    let tokens = atproto::refresh(&key, &server.token_endpoint, client_id, refresh_token)?;
+
+    let expires_at = tokens.expires_at();
+    Ok(AccountSecret {
+        access_token: tokens.access_token,
+        // AT Protocol rotates refresh tokens; dropping a new one in favour of
+        // the old un-authorizes the account at the NEXT refresh, a day later.
+        refresh_token: tokens
+            .refresh_token
+            .or_else(|| secret.refresh_token.clone()),
+        expires_at,
+        extra: secret.extra.clone(),
+    })
+}
+
+fn publish_oauth(request: &PublishRequest<'_>) -> Result<Published> {
+    let context = oauth_context(request.secret)?;
+
+    let mut record = post_record(request.body);
+    if !request.media.is_empty() {
+        let images = request
+            .media
+            .iter()
+            .map(|item| {
+                let blob = oauth_upload_blob(&context, &item.bytes, &item.mime)?;
+                Ok(json!({
+                    "alt": item.alt_text.clone().unwrap_or_default(),
+                    "image": blob,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        record["embed"] = json!({ "$type": "app.bsky.embed.images", "images": images });
+    }
+
+    let url = format!("{}/xrpc/com.atproto.repo.createRecord", context.pds);
+    let payload = json!({
+        "repo": request.account.remote_id,
+        "collection": COLLECTION,
+        "record": record,
+    });
+    let (status, body) = dpop::send(&context.key, "POST", &url, Some(&context.token), || {
+        http::client().post(&url).json(&payload)
+    })?;
+    if !(200..300).contains(&status) {
+        return Err(from_status(status, &body, "Bluesky"));
+    }
+
+    let created: CreateRecord = serde_json::from_str(&body).map_err(|e| {
+        AppError::Platform(format!(
+            "Bluesky accepted the post but the reply was unreadable: {e}"
+        ))
+    })?;
+    Ok(Published {
+        remote_url: Some(permalink(&request.account.handle, &created.uri)),
+        remote_id: created.uri,
+    })
+}
+
+fn oauth_upload_blob(
+    context: &OAuthContext,
+    bytes: &[u8],
+    mime: &str,
+) -> Result<serde_json::Value> {
+    let url = format!("{}/xrpc/com.atproto.repo.uploadBlob", context.pds);
+    let (status, body) = dpop::send(&context.key, "POST", &url, Some(&context.token), || {
+        http::client()
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, mime)
+            .body(bytes.to_vec())
+    })?;
+    if !(200..300).contains(&status) {
+        return Err(from_status(status, &body, "Bluesky"));
+    }
+    serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| value.get("blob").cloned())
+        .ok_or_else(|| AppError::Platform("Bluesky's upload response carried no blob.".into()))
+}
+
+fn oauth_profile(session: &atproto::Session) -> Result<Profile> {
+    let key = dpop::Key::from_base64(&session.dpop_key)?;
+    let url = format!("{}/xrpc/app.bsky.actor.getProfile", session.pds);
+    let (status, body) = dpop::send(&key, "GET", &url, Some(&session.access_token), || {
+        http::client().get(&url).query(&[("actor", &session.did)])
+    })?;
+    if !(200..300).contains(&status) {
+        return Err(from_status(status, &body, "Bluesky"));
+    }
+    serde_json::from_str(&body)
+        .map_err(|e| AppError::Platform(format!("Bluesky returned an unreadable profile: {e}")))
 }
 
 // ─── Wire calls ─────────────────────────────────────────────────────────────

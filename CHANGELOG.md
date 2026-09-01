@@ -4,6 +4,34 @@ All notable changes to Yapper are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Sign in with Bluesky** — real AT Protocol OAuth alongside the app password,
+  and the default for new Bluesky accounts. Scoped, revocable from Bluesky's own
+  settings, and DPoP-bound: every authorized request is signed by a P-256 key
+  stored beside the tokens. Includes the whole profile — handle → DID resolution
+  with the mandatory bidirectional check, PDS and authorization-server
+  discovery, pushed authorization requests, `iss` verification on the callback,
+  and refresh-token rotation. Both methods land on the same DID, so switching
+  upgrades an account in place.
+- A **preflight** on the client metadata URL, so an unpublished document is
+  reported as a checklist before the browser opens rather than as an opaque
+  `invalid_client_metadata` halfway through.
+- A **Callback URL** field in the connect dialog, for when the OS cannot route
+  the custom scheme back — paste the link the browser could not open.
+
+### Changed
+
+- `FieldSpec` now declares its allowed values, which the renderer draws as a
+  picker. It previously parsed them out of the help sentence.
+
+### Activation
+
+OAuth needs `docs/client-metadata.json` published on the web and a bundled
+build; see the README. App passwords keep working with neither.
+
 ## [0.2.0] — 2026-08-28
 
 ### Added

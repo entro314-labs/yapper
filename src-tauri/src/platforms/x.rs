@@ -68,9 +68,16 @@ impl Platform for X {
                     "reply_settings",
                     "Who can reply",
                     "everyone",
-                    "everyone, following, mentionedUsers, subscribers or verified.",
+                    "Restricts who may reply to the post.",
                 )
-                .optional(),
+                .optional()
+                .choosing(&[
+                    "everyone",
+                    "following",
+                    "mentionedUsers",
+                    "subscribers",
+                    "verified",
+                ]),
             ],
             notes: "Needs your own developer app with Write access. X bills the \
                     app per post — there is no free tier.",

@@ -32,11 +32,15 @@ tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-pn
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 # Second launch focuses the running window instead of starting a rival scheduler.
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 # Launch at login, started hidden: a scheduler that only runs while you happen to
 # have the app open is not a scheduler.
 tauri-plugin-autostart = "2"
 tauri-plugin-window-state = "2"
+# AT Protocol OAuth hands the authorization code back on a custom URI scheme —
+# a loopback redirect is invalid for a production native client there — so the
+# OS has to route `io.github.…:/callback` into the running app.
+tauri-plugin-deep-link = "2"
 # Apple's on-device Foundation model: the free, offline, keyless assistant tier.
 # Deliberately NOT platform-gated — the plugin carries its own non-Apple-silicon
 # stub whose every command rejects with `UnsupportedPlatform`, so registering it
@@ -68,6 +72,11 @@ reqwest = { version = "0.12", default-features = false, features = [
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.23"
 sha2 = "0.11"
+# ES256 for DPoP (AT Protocol OAuth). `default-features = false` drops the
+# precomputed base-point tables and the parts of the curve this never touches;
+# `ecdsa` brings the signer and, with it, the arithmetic `VerifyingKey` needs to
+# emit the public point that goes into every proof's JWK header.
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 rand = "0.10"
 url = "2"
 # Bluesky counts its 300-character limit in grapheme clusters, not scalars: a
