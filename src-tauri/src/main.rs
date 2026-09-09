@@ -3,5 +3,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    yapper_lib::run();
+    windbag_lib::run();
 }

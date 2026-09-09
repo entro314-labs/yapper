@@ -1,10 +1,13 @@
-import { IconRefresh, IconSparkles, IconX } from '@tabler/icons-react'
+import { IconX } from '@tabler/icons-react'
 import { Link } from '@tanstack/react-router'
 import * as React from 'react'
 import { toast } from 'sonner'
 
+import { RefreshCwIcon } from '@/components/icons/refresh-cw'
+import { SparklesIcon } from '@/components/icons/sparkles'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
+import { useAnimatedIcon } from '@/lib/animated-icon'
 import { useNotes, useSettings, useSuggestPosts } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
 import type { Suggestion } from '@/lib/tauri/types'
@@ -35,6 +38,7 @@ export function SuggestPanel({
   const settings = useSettings()
   const notes = useNotes()
   const suggest = useSuggestPosts()
+  const [draftRef, draftHover] = useAnimatedIcon()
 
   const [selectedNotes, setSelectedNotes] = React.useState<number[]>(
     initialNoteId ? [initialNoteId] : [],
@@ -66,7 +70,7 @@ export function SuggestPanel({
       <aside className="rounded-lg border border-border/60 bg-card/50 p-3.5">
         <p className="text-sm">No assistant is switched on.</p>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-          Yapper can borrow one you already have — Apple&apos;s on-device model, or the Claude Code
+          Windbag can borrow one you already have — Apple&apos;s on-device model, or the Claude Code
           or Codex CLI. It never ships a key of its own.
         </p>
         <Button className="mt-3" size="sm" variant="outline" render={<Link to="/settings" />}>
@@ -79,7 +83,7 @@ export function SuggestPanel({
   return (
     <aside className="flex flex-col gap-3 rounded-lg border border-primary/30 bg-primary/[0.04] p-3.5">
       <header className="flex items-center gap-2">
-        <IconSparkles className="size-4 text-primary" />
+        <SparklesIcon size={16} className="text-primary" />
         <h2 className="font-display text-xs font-semibold tracking-wide uppercase">
           Draft with {settings.data?.aiBackend === 'apple' ? 'Apple Intelligence' : backend}
         </h2>
@@ -167,15 +171,16 @@ export function SuggestPanel({
           onClick={() => {
             void run()
           }}
+          {...draftHover}
         >
           {suggest.isPending ? (
             <>
-              <IconRefresh data-icon="inline-start" className="animate-spin" />
+              <RefreshCwIcon data-icon="inline-start" className="animate-spin" />
               Drafting…
             </>
           ) : (
             <>
-              <IconSparkles data-icon="inline-start" />
+              <SparklesIcon ref={draftRef} data-icon="inline-start" />
               {drafts.length > 0 ? 'Again' : 'Draft'}
             </>
           )}

@@ -1,11 +1,14 @@
-import { IconCalendarClock, IconChevronLeft, IconChevronRight } from '@tabler/icons-react'
+import { IconCalendarClock } from '@tabler/icons-react'
 import { Link, createFileRoute } from '@tanstack/react-router'
 import * as React from 'react'
 import { toast } from 'sonner'
 
+import { ChevronLeftIcon } from '@/components/icons/chevron-left'
+import { ChevronRightIcon } from '@/components/icons/chevron-right'
 import { EmptyState } from '@/components/shell/empty-state'
 import { Button } from '@/components/ui/button'
 import { STATUS_LABEL, StatusDot } from '@/components/ui/status-dot'
+import { useAnimatedIcon } from '@/lib/animated-icon'
 import { brandOf } from '@/lib/platform-brand'
 import { useAccounts, usePosts, useReschedulePost } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
@@ -35,6 +38,8 @@ function CalendarScreen() {
   const posts = usePosts()
   const accounts = useAccounts()
   const reschedule = useReschedulePost()
+  const [previousRef, previousHover] = useAnimatedIcon()
+  const [nextRef, nextHover] = useAnimatedIcon()
   const [monthStart, setMonthStart] = React.useState(() => {
     const now = new Date()
     return new Date(now.getFullYear(), now.getMonth(), 1)
@@ -77,8 +82,9 @@ function CalendarScreen() {
             onClick={() => {
               setMonthStart(shiftMonth(monthStart, -1))
             }}
+            {...previousHover}
           >
-            <IconChevronLeft />
+            <ChevronLeftIcon ref={previousRef} />
           </Button>
           <Button
             size="sm"
@@ -97,8 +103,9 @@ function CalendarScreen() {
             onClick={() => {
               setMonthStart(shiftMonth(monthStart, 1))
             }}
+            {...nextHover}
           >
-            <IconChevronRight />
+            <ChevronRightIcon ref={nextRef} />
           </Button>
         </div>
       </header>
@@ -124,8 +131,8 @@ function CalendarScreen() {
             }}
             onDrop={(event) => {
               event.preventDefault()
-              const postId = Number(event.dataTransfer.getData('text/yapper-post'))
-              const from = event.dataTransfer.getData('text/yapper-at')
+              const postId = Number(event.dataTransfer.getData('text/windbag-post'))
+              const from = event.dataTransfer.getData('text/windbag-at')
               if (!Number.isInteger(postId) || !from) return
               const source = new Date(from)
               const moved = new Date(day.date)
@@ -164,8 +171,8 @@ function CalendarScreen() {
                   type="button"
                   draggable
                   onDragStart={(event) => {
-                    event.dataTransfer.setData('text/yapper-post', String(post.id))
-                    event.dataTransfer.setData('text/yapper-at', post.scheduledAt ?? '')
+                    event.dataTransfer.setData('text/windbag-post', String(post.id))
+                    event.dataTransfer.setData('text/windbag-at', post.scheduledAt ?? '')
                     event.dataTransfer.effectAllowed = 'move'
                   }}
                   title={`${STATUS_LABEL[post.status]} · ${post.body.slice(0, 120)}`}

@@ -35,10 +35,11 @@ impl Platform for Reddit {
             limits: Limits {
                 max_chars: 40_000,
                 // Image submissions go through a separate upload-lease flow that
-                // Yapper does not implement yet; a link post covers the case.
+                // Windbag does not implement yet; a link post covers the case.
                 max_media: 0,
                 supports_alt_text: false,
                 requires_title: true,
+                requires_media: false,
             },
             connect_fields: Vec::new(),
             app_fields: vec![FieldSpec::text(

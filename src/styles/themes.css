@@ -1,5 +1,5 @@
 /*
- * Yapper palette — "Signal".
+ * Windbag palette — "Signal".
  *
  * Light and dark are one theme, not two: the same carrier cyan, the same
  * relationships, re-measured against the opposite ground. Dark is the design
@@ -135,13 +135,18 @@
  * Per-platform brand tones.
  *
  * These are the ONLY colours in the app that are not from the palette above,
- * and they exist because a queue mixing five destinations has to be scannable
+ * and they exist because a queue mixing eight destinations has to be scannable
  * without reading a single label. They are used as small dots, avatar rings and
  * chip tints — never as a fill behind text, which is why each also carries an
  * `-ink` for the rare case a label must sit in the brand's own colour.
  *
  * Tuned per mode: Bluesky's blue and LinkedIn's navy are both too dark to read
  * on the dark surfaces, and X's black is invisible there by definition.
+ *
+ * The three Meta marks sit deliberately far apart in hue despite belonging to
+ * one family — they are three separate destinations in the queue, and a user
+ * scanning it needs to tell a Threads post from an Instagram one at a glance,
+ * not to be told they share a developer app.
  */
 :root {
   --brand-bluesky: oklch(0.6 0.19 256);
@@ -149,6 +154,11 @@
   --brand-reddit: oklch(0.65 0.21 38);
   --brand-x: oklch(0.24 0.008 250);
   --brand-linkedin: oklch(0.5 0.14 245);
+  /* Threads ships the same black wordmark as X. It is separated here by weight
+     rather than by hue, and by its own mark in the queue. */
+  --brand-threads: oklch(0.34 0.01 280);
+  --brand-instagram: oklch(0.58 0.23 3);
+  --brand-facebook: oklch(0.55 0.19 260);
 }
 
 .dark {
@@ -159,6 +169,11 @@
      so the dark half is the near-white the mark itself is drawn in there. */
   --brand-x: oklch(0.93 0.003 250);
   --brand-linkedin: oklch(0.68 0.13 245);
+  /* Same absence problem as X, and the same answer — but a half-step darker, so
+     the two near-white marks in one queue are still distinguishable. */
+  --brand-threads: oklch(0.86 0.004 280);
+  --brand-instagram: oklch(0.72 0.19 5);
+  --brand-facebook: oklch(0.7 0.15 260);
 }
 
 /* ─── Window materials ──────────────────────────────────────────────────────

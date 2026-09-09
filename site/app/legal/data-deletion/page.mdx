@@ -1,0 +1,74 @@
+export const metadata = {
+  title: 'Data Deletion',
+  description: 'How to remove a connection and everything associated with it.',
+  alternates: { canonical: '/legal/data-deletion' },
+  openGraph: { url: '/legal/data-deletion' },
+}
+
+# Data Deletion
+
+**Last updated: 9 September 2026**
+
+Windbag stores your data on your own computer, so deleting it is something you do locally rather
+than something you request from us. There is no account here to close and no database of users to
+be removed from.
+
+## Disconnect one account
+
+In Windbag, open **Accounts**, find the connection and choose **Disconnect**.
+
+This deletes the stored access token from your operating system's credential store and removes the
+account from the app's local database immediately.
+
+## Revoke Windbag's access at the platform
+
+Disconnecting removes the credential from your machine. To also revoke the authorisation on the
+platform's side:
+
+- **Meta (Threads, Instagram, Facebook)** — Facebook **Settings & Privacy → Settings → Apps and
+  Websites**, then remove the app. For Instagram: **Settings → Website Permissions → Apps and
+  Websites**.
+- **Other platforms** — each has an equivalent "connected apps" or "authorised applications" screen
+  in its account settings.
+
+Because you register your own developer application, you may also delete that application outright
+in the platform's developer dashboard, which revokes every token it ever issued.
+
+## Delete everything
+
+To remove all local data — posts, drafts, notes, statistics and account records — quit Windbag and
+delete its application-data directory:
+
+- **macOS** — `~/Library/Application Support/windbag`
+- **Windows** — `%APPDATA%\windbag`
+- **Linux** — `~/.local/share/windbag`
+
+Then remove any remaining `windbag` entries from your operating system's credential store
+(Keychain Access on macOS, Credential Manager on Windows, your Secret Service keyring on Linux).
+
+## Attachments held by this site
+
+If you posted to Threads or Instagram with an attachment, a copy of that file was briefly stored in
+this deployment's object storage so that Meta could fetch it — see the
+[Privacy Policy](/legal/privacy) for why this is unavoidable.
+
+Those files are deleted automatically by a storage lifecycle rule shortly after upload. They carry
+no filename, caption or account identifier, so there is no user they could be linked back to. No
+action is needed on your part.
+
+## Automated deletion callback
+
+For Meta's app review, this deployment also exposes a data deletion callback at:
+
+```
+POST /api/data-deletion
+```
+
+It verifies Meta's signed request against the app secret and responds in the required format. Since
+no personal data is retained here, the callback confirms that there is nothing associated with the
+user to remove.
+
+## Contact
+
+If you need help removing anything, open an issue at
+[github.com/entro314-labs/yapper](https://github.com/entro314-labs/yapper).

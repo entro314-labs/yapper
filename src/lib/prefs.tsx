@@ -18,7 +18,7 @@ interface PrefsValue {
 
 const PrefsContext = React.createContext<PrefsValue | null>(null)
 
-const STORAGE_KEY = 'yapper.prefs'
+const STORAGE_KEY = 'windbag.prefs'
 
 interface Stored {
   sidebarMode?: SidebarMode

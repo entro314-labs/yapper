@@ -1,6 +1,6 @@
 //! The assistant tier: draft posts from context you already have.
 //!
-//! Three backends, one verb. Yapper does not ship an API key, a gateway or a
+//! Three backends, one verb. Windbag does not ship an API key, a gateway or a
 //! model catalogue — it borrows an assistant the user already has:
 //!
 //!   * **Apple Intelligence** — on-device, keyless, offline, free. Through
@@ -197,7 +197,7 @@ pub fn availability(app: &AppHandle, backend: Backend) -> Availability {
                 None => (
                     false,
                     format!(
-                        "`{}` is not on Yapper's PATH, or it is not signed in.",
+                        "`{}` is not on Windbag's PATH, or it is not signed in.",
                         cli.command
                     ),
                 ),
@@ -299,7 +299,7 @@ pub fn suggest(
     let suggestions = parse_suggestions(&answer);
     if suggestions.is_empty() {
         return Err(AppError::Platform(format!(
-            "{} answered, but not with anything Yapper could read as a draft. \
+            "{} answered, but not with anything Windbag could read as a draft. \
              Try again, or a different assistant.",
             backend.label()
         )));
@@ -425,7 +425,7 @@ fn run_cli(cli: &Cli, prompt: &str, model: Option<&str>, effort: Option<&str>) -
     }
 
     let answer_file = if cli.uses_output_file {
-        let dir = std::env::temp_dir().join(format!("yapper-draft-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("windbag-draft-{}", std::process::id()));
         std::fs::create_dir_all(&dir)
             .map_err(|e| AppError::Internal(format!("Could not make a scratch directory: {e}")))?;
         let path = dir.join("answer.md");

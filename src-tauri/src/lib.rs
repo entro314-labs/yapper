@@ -1,4 +1,4 @@
-//! Yapper — a desktop composer and scheduler for social platforms with an open API.
+//! Windbag — a desktop composer and scheduler for social platforms with an open API.
 
 mod ai;
 mod atproto;
@@ -9,11 +9,13 @@ mod error;
 mod http;
 pub mod mcp;
 mod media;
+pub mod metaads;
 mod oauth;
 mod platforms;
 mod scheduler;
 mod secrets;
 mod stats;
+pub mod webhost;
 mod windowing;
 
 use std::sync::Arc;
@@ -28,9 +30,9 @@ use scheduler::Scheduler;
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
         if cfg!(debug_assertions) {
-            "yapper=debug,warn"
+            "windbag=debug,warn"
         } else {
-            "yapper=info,warn"
+            "windbag=info,warn"
         },
     ))
     .init();
@@ -106,10 +108,15 @@ pub fn run() {
             commands::get_settings,
             commands::update_settings,
             commands::oauth_redirect_uri,
+            commands::get_web_host,
+            commands::save_web_host,
+            commands::forget_web_host,
+            commands::meta_ads_tools,
+            commands::meta_ads_call,
             windowing::set_window_material,
         ])
         .build(tauri::generate_context!())
-        .expect("Yapper failed to start")
+        .expect("Windbag failed to start")
         .run(|app, event| {
             // macOS: clicking the Dock icon does not start a second process, so
             // the single-instance handler never fires and a window hidden by the
@@ -131,7 +138,7 @@ pub fn run() {
 /// Lifted out of the builder chain because it is the only part of `run` with any
 /// logic in it — the rest is plugin registration, which reads as a list.
 fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let path = db::data_dir()?.join("yapper.sqlite3");
+    let path = db::data_dir()?.join("windbag.sqlite3");
     let database = Arc::new(db::Db::open_at(&path)?);
     log::info!("store at {}", path.display());
 

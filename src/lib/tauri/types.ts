@@ -7,7 +7,15 @@
  */
 
 /** `platforms::PlatformId` */
-export type PlatformId = 'bluesky' | 'mastodon' | 'reddit' | 'x' | 'linkedin'
+export type PlatformId =
+  | 'bluesky'
+  | 'mastodon'
+  | 'reddit'
+  | 'x'
+  | 'linkedin'
+  | 'threads'
+  | 'instagram'
+  | 'facebook'
 
 /** `platforms::AuthKind` */
 export type AuthKind = 'credentials' | 'oAuth2'
@@ -30,6 +38,8 @@ export interface Limits {
   maxMedia: number
   supportsAltText: boolean
   requiresTitle: boolean
+  /** Instagram: a caption is never a post by itself, so the composer refuses one with no media. */
+  requiresMedia: boolean
 }
 
 /** `platforms::PlatformInfo` */
@@ -44,6 +54,20 @@ export interface PlatformInfo {
   redirectUri: string | null
   targetFields: FieldSpec[]
   notes: string
+}
+
+/**
+ * `commands::WebHostView` — the companion deployment the three Meta platforms need.
+ *
+ * Meta refuses a loopback redirect and will not accept uploaded bytes, so one deployment supplies
+ * both the HTTPS redirect and the public media URLs. The upload token is never sent back to the
+ * renderer, only whether one is stored.
+ */
+export interface WebHostView {
+  baseUrl: string
+  hasToken: boolean
+  /** Derived from `baseUrl`. This is the exact string to register on the Meta app. */
+  redirectUri: string
 }
 
 /** `db::Account`. `status` is `ok` until a publish gets a 401. */
@@ -162,7 +186,7 @@ export interface Settings {
   aiEffort: string
 }
 
-/** `commands::AuthOutcome`, delivered on `yapper://auth`. */
+/** `commands::AuthOutcome`, delivered on `windbag://auth`. */
 export interface AuthOutcome {
   ok: boolean
   platform: PlatformId
@@ -271,7 +295,7 @@ export interface Stats {
   byDay: Bucket[]
   failures: Bucket[]
   engagement: EngagementTotals
-  /** Platforms in scope whose engagement Yapper cannot read, with the reason. */
+  /** Platforms in scope whose engagement Windbag cannot read, with the reason. */
   engagementGaps: Array<[PlatformId, string]>
 }
 

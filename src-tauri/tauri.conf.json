@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Yapper",
+  "productName": "Windbag",
   "version": "0.2.0",
-  "identifier": "com.entro314.yapper",
+  "identifier": "com.entro314.windbag",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Yapper",
+        "title": "Windbag",
         "width": 1240,
         "height": 820,
         "minWidth": 880,

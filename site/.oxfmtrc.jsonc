@@ -1,0 +1,164 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+
+  // ─── Core formatting ──────────────────────────────────────────────────────
+
+  "printWidth": 100,
+  "tabWidth": 2,
+  "useTabs": false,
+  "semi": false,
+  "singleQuote": true,
+  "jsxSingleQuote": false,
+  "trailingComma": "all",
+  "arrowParens": "always",
+  "bracketSpacing": true,
+  "bracketSameLine": false,
+  "singleAttributePerLine": false,
+  "quoteProps": "as-needed",
+  // "preserve" respects the author's decision to write an object inline vs multiline.
+  // Use "collapse" if you want the formatter to always flatten objects that fit on one line.
+  "objectWrap": "preserve",
+  "endOfLine": "lf",
+  "insertFinalNewline": true,
+  "embeddedLanguageFormatting": "auto",
+  "htmlWhitespaceSensitivity": "css",
+  "proseWrap": "preserve",
+  "vueIndentScriptAndStyle": false,
+
+  // ─── JSDoc ────────────────────────────────────────────────────────────────
+  // Normalizes JSDoc comments: collapses short blocks to single-line,
+  // canonicalizes tag aliases (@returns → @returns), capitalizes descriptions,
+  // and wraps long lines at printWidth.
+  // Disable per-file with: // oxfmt-disable jsdoc
+  "jsdoc": {
+    // Collapse /** @param x */ to single-line when it fits. Set to "multiline"
+    // to always use block format, or "keep" to never reformat.
+    "commentLineStrategy": "singleLine",
+    // Capitalize the first letter of tag descriptions.
+    "capitalizeDescriptions": true,
+    // Appends "Default is `value`" to @param descriptions when a default is present.
+    "addDefaultToDescription": true,
+    // Re-wrap description lines to fit within printWidth.
+    // "balance" preserves your line breaks if all lines already fit.
+    "lineWrappingStyle": "greedy",
+    // Spaces inside JSDoc type braces: false → {string}, true → { string }.
+    // Keep false to stay consistent with TypeScript type syntax conventions.
+    "bracketSpacing": false,
+    // Use ``` fences instead of 4-space indent for @example code blocks.
+    // More consistent with the rest of the codebase and renders correctly in editors.
+    "preferCodeFences": true,
+    // Preserve intentional indentation in @example blocks that can't be parsed
+    // as JS/TS (e.g. pseudocode, shell snippets).
+    "keepUnparsableExampleIndent": true,
+    // Emit @description tag instead of inline description - keep off.
+    "descriptionTag": false,
+    // Add trailing dot to descriptions - keep off.
+    "descriptionWithDot": false,
+    // Add blank lines between different tag groups (@param, @returns, etc.) - keep off.
+    // Tends to add noise in the typical short JSDoc comments in TS codebases.
+    "separateTagGroups": false,
+    // Add blank line between last @param and @returns - keep off.
+    "separateReturnsFromParam": false,
+  },
+
+  // ─── Ignore patterns ─────────────────────────────────────────────────────
+
+  "ignorePatterns": [
+    ".next",
+    "node_modules",
+    "dist",
+    "build",
+    "coverage",
+    "public",
+    "pnpm-lock.yaml",
+    "package-lock.json",
+  ],
+
+  // ─── Import sorting ───────────────────────────────────────────────────────
+  // Algorithm mirrors eslint-plugin-perfectionist/sort-imports.
+
+  "sortImports": {
+    "groups": [
+      // Side-effect imports are order-sensitive (CSS resets, polyfills, instrumentation).
+      // Placed first and kept isolated so they're never re-sorted with regular imports.
+      "side_effect",
+      "side_effect_style",
+      // Node built-ins
+      "builtin",
+      // Third-party packages from node_modules
+      "external",
+      // Internal paths (~/..., @/..., #...) and Node.js subpath imports combined
+      ["internal", "subpath"],
+      // Relative imports: parent directory, same directory, index
+      ["parent", "sibling", "index"],
+      // CSS/style imports
+      "style",
+      // Anything that doesn't match a group above
+      "unknown",
+    ],
+    // Prefixes that identify internal modules. "#" covers Node.js subpath imports.
+    "internalPattern": ["~/", "@/", "#"],
+    // Insert a blank line between each group.
+    "newlinesBetween": true,
+    "order": "asc",
+    "ignoreCase": true,
+    // Side-effect import order is intentional - do not sort.
+    "sortSideEffects": false,
+    // When true, an existing blank line acts as a partition boundary and the
+    // formatter will not move imports across it. Useful if you manually group
+    // some imports for clarity within a section. Disabled here: let the formatter
+    // own all grouping so manual blank lines don't create drift.
+    "partitionByNewline": false,
+    // When true, a comment line acts as a partition boundary.
+    "partitionByComment": false,
+  },
+
+  // ─── Package JSON sorting ─────────────────────────────────────────────────
+
+  "sortPackageJson": {
+    // Sort scripts alphabetically. Makes large script blocks easier to scan.
+    "sortScripts": true,
+  },
+
+  // ─── Tailwind CSS class sorting ───────────────────────────────────────────
+  // Sorts Tailwind utility classes into the canonical order. The arbitrary-value bug
+  // (oxc#20975: -prefix-[calc()/var()] rewritten to prefix-[-calc()/var()]) is fixed
+  // as of oxfmt 0.58.0 and verified idempotent, so this is safe to enable.
+  // "stylesheet" points at the file that defines your Tailwind theme (@theme / @import
+  // "tailwindcss"); "functions" are the class-string helpers whose args get sorted.
+  "sortTailwindcss": { "stylesheet": "./src/app/globals.css", "functions": ["clsx", "cn", "cva", "tw"] },
+
+  // ─── File overrides ───────────────────────────────────────────────────────
+
+  "overrides": [
+    {
+      // Markdown / MDX - never reflow prose, give more room for tables and code fences.
+      "files": ["**/*.md", "**/*.mdx"],
+      "options": {
+        "proseWrap": "preserve",
+        "printWidth": 120,
+        // JSDoc formatting makes no sense in prose files.
+        "jsdoc": false,
+      },
+    },
+    {
+      // JSON and JSONC data files - wider print width since JSON structures
+      // are often deeply nested, and object wrap collapse is more appropriate
+      // for data files than for source code.
+      "files": ["**/*.json", "**/*.jsonc"],
+      "options": {
+        "printWidth": 120,
+        // Collapse objects that fit on one line - data files benefit from
+        // denser layout vs. source code where "preserve" respects author intent.
+        "objectWrap": "collapse",
+      },
+    },
+    {
+      // TypeScript declaration files and generated types - skip JSDoc reformatting.
+      // These are often auto-generated (Supabase, tRPC, Drizzle introspection, etc.)
+      // and may contain non-standard comment patterns that shouldn't be normalized.
+      "files": ["**/*.d.ts", "**/types/database.types.ts", "**/__generated__/**"],
+      "options": { "jsdoc": false },
+    },
+  ],
+}

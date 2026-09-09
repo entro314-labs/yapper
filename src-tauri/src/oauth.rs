@@ -5,9 +5,15 @@
 //! browser at the provider's authorize URL → catch the redirect → exchange the
 //! code at the token endpoint.
 //!
-//! ONE redirect URI for every provider — `http://127.0.0.1:8917/callback` — so a
+//! ONE redirect URI for most providers — `http://127.0.0.1:8917/callback` — so a
 //! user registering their own developer app pastes the same string every time.
 //! It must be registered VERBATIM on the provider's side, including the port.
+//!
+//! META IS THE EXCEPTION. Threads, Instagram and Facebook reject a plain-HTTP
+//! redirect outright, so those apps register an HTTPS bounce that answers with a
+//! 302 back to the loopback. [`handoff`] therefore takes the URI to ADVERTISE
+//! separately from where it listens: the listener below catches the code either
+//! way, because the bounce lands the browser on the same loopback URL in the end.
 //!
 //! The listener binds BEFORE the browser opens, so a port conflict fails
 //! immediately instead of after the user has already signed in and been
@@ -82,12 +88,34 @@ impl TokenResponse {
     }
 }
 
-/// Runs the whole flow and blocks until it resolves. Call it from a worker
-/// thread — it opens a browser and waits on a human.
+/// What one browser handoff produced.
+pub struct Handoff {
+    pub code: String,
+    /// The PKCE verifier that has to travel with the code exchange. `None` when
+    /// the flow ran without PKCE — Meta's providers do not offer it and reject
+    /// an exchange carrying one.
+    pub verifier: Option<String>,
+}
+
+/// One browser leg of an authorization-code flow: bind the loopback listener,
+/// open the provider's consent screen, and hand back the code it redirects with.
 ///
-/// Returns the tokens and the scope string the provider actually granted, which
-/// can be narrower than what was asked for.
-pub fn authorize(config: &OAuthConfig<'_>) -> Result<(AccountSecret, Option<String>)> {
+/// `advertised_redirect` is what the PROVIDER is told, and must match the app
+/// registration exactly. It is NOT necessarily where this listens — a Meta app
+/// registers an HTTPS bounce, which 302s the browser to the loopback below.
+///
+/// Split out of [`authorize`] because Meta's token endpoints are not a standard
+/// exchange (a GET with query parameters, a response carrying `user_id` and no
+/// `expires_in`), so those adapters need the code without the exchange.
+pub fn handoff(
+    platform: PlatformId,
+    authorize_url: &str,
+    client_id: &str,
+    advertised_redirect: &str,
+    scopes: &str,
+    extra_params: &[(&str, &str)],
+    pkce: bool,
+) -> Result<Handoff> {
     let listener = TcpListener::bind(("127.0.0.1", REDIRECT_PORT)).map_err(|e| {
         AppError::Conflict(format!(
             "Port {REDIRECT_PORT} is unavailable ({e}). Another sign-in may still be open — \
@@ -95,36 +123,58 @@ pub fn authorize(config: &OAuthConfig<'_>) -> Result<(AccountSecret, Option<Stri
         ))
     })?;
 
-    let verifier = b64url(&rand::random::<[u8; 32]>());
-    let challenge = b64url(Sha256::digest(verifier.as_bytes()).as_slice());
+    let verifier = pkce.then(|| b64url(&rand::random::<[u8; 32]>()));
     let state = b64url(&rand::random::<[u8; 16]>());
 
-    let mut authorize_url = url::Url::parse(&config.authorize_url)
+    let mut url = url::Url::parse(authorize_url)
         .map_err(|e| internal("The authorize URL is malformed", e))?;
     {
-        let mut query = authorize_url.query_pairs_mut();
+        let mut query = url.query_pairs_mut();
         query
             .append_pair("response_type", "code")
-            .append_pair("client_id", config.client_id)
-            .append_pair("redirect_uri", REDIRECT_URI)
-            .append_pair("scope", config.scopes)
-            .append_pair("state", &state)
-            .append_pair("code_challenge", &challenge)
-            .append_pair("code_challenge_method", "S256");
-        for (key, value) in config.extra_authorize_params {
+            .append_pair("client_id", client_id)
+            .append_pair("redirect_uri", advertised_redirect)
+            .append_pair("scope", scopes)
+            .append_pair("state", &state);
+        if let Some(verifier) = &verifier {
+            let challenge = b64url(Sha256::digest(verifier.as_bytes()).as_slice());
+            query
+                .append_pair("code_challenge", &challenge)
+                .append_pair("code_challenge_method", "S256");
+        }
+        for (key, value) in extra_params {
             query.append_pair(key, value);
         }
     }
 
-    opener::open_browser(authorize_url.as_str())
+    opener::open_browser(url.as_str())
         .map_err(|e| AppError::Internal(format!("Could not open the browser: {e}")))?;
 
-    let code = wait_for_code(&listener, &state, config.platform)?;
+    let code = wait_for_code(&listener, &state, platform)?;
+    Ok(Handoff { code, verifier })
+}
+
+/// Runs the whole flow and blocks until it resolves. Call it from a worker
+/// thread — it opens a browser and waits on a human.
+///
+/// Returns the tokens and the scope string the provider actually granted, which
+/// can be narrower than what was asked for.
+pub fn authorize(config: &OAuthConfig<'_>) -> Result<(AccountSecret, Option<String>)> {
+    let handoff = handoff(
+        config.platform,
+        &config.authorize_url,
+        config.client_id,
+        REDIRECT_URI,
+        config.scopes,
+        config.extra_authorize_params,
+        true,
+    )?;
+    let verifier = handoff.verifier.unwrap_or_default();
     exchange(
         config,
         &[
             ("grant_type", "authorization_code"),
-            ("code", &code),
+            ("code", &handoff.code),
             ("redirect_uri", REDIRECT_URI),
             ("code_verifier", &verifier),
         ],
@@ -177,7 +227,7 @@ fn exchange(
 
     let token: TokenResponse = serde_json::from_str(&body).map_err(|e| {
         AppError::Platform(format!(
-            "{} returned a token response Yapper could not read: {e}",
+            "{} returned a token response Windbag could not read: {e}",
             config.platform.label()
         ))
     })?;
@@ -240,7 +290,7 @@ fn wait_for_code(
                 if param("state").as_deref() != Some(expected_state) {
                     respond(&mut stream, "State mismatch — sign-in aborted.");
                     return Err(AppError::Unauthorized(
-                        "The sign-in callback did not match the request Yapper started. \
+                        "The sign-in callback did not match the request Windbag started. \
                          Nothing was connected; try again."
                             .into(),
                     ));
@@ -253,7 +303,7 @@ fn wait_for_code(
                 };
                 respond(
                     &mut stream,
-                    "You're connected. Close this tab and return to Yapper.",
+                    "You're connected. Close this tab and return to Windbag.",
                 );
                 return Ok(code);
             }
@@ -286,7 +336,7 @@ fn request_target(stream: &mut TcpStream) -> Option<String> {
 
 fn respond(stream: &mut TcpStream, message: &str) {
     let body = format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>Yapper</title>\
+        "<!doctype html><meta charset=\"utf-8\"><title>Windbag</title>\
          <body style=\"font-family:system-ui;display:grid;place-items:center;height:100vh;\
          margin:0;background:#131820;color:#eef2f6\">\
          <p style=\"font-size:17px\">{message}</p></body>"

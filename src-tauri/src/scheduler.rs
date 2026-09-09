@@ -5,7 +5,7 @@
 //! platforms with five different rate limits are not worth parallelising, and a
 //! single worker means the claim/settle cycle has exactly one writer.
 //!
-//! THE HONEST CONSTRAINT: a desktop app only runs when it is running. Yapper can
+//! THE HONEST CONSTRAINT: a desktop app only runs when it is running. Windbag can
 //! launch at login and sit in the background, but a machine that is asleep at
 //! 09:00 does not post at 09:00. [`catch_up`] is what makes that visible instead
 //! of surprising — see [`MissedPolicy`].
@@ -37,11 +37,11 @@ const MAX_ATTEMPTS: i64 = 5;
 /// the worker in a single tick for minutes on end.
 const BATCH: usize = 8;
 
-pub const EVENT_QUEUE_CHANGED: &str = "yapper://queue-changed";
-pub const EVENT_ACCOUNTS_CHANGED: &str = "yapper://accounts-changed";
-pub const EVENT_PUBLISHING: &str = "yapper://publishing";
+pub const EVENT_QUEUE_CHANGED: &str = "windbag://queue-changed";
+pub const EVENT_ACCOUNTS_CHANGED: &str = "windbag://accounts-changed";
+pub const EVENT_PUBLISHING: &str = "windbag://publishing";
 
-/// What to do with a post whose time passed while Yapper was not running.
+/// What to do with a post whose time passed while Windbag was not running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissedPolicy {
     /// Post it anyway, late. Right for an evergreen link, wrong for anything
@@ -92,7 +92,7 @@ impl Scheduler {
 
         let worker_db = Arc::clone(&database);
         std::thread::Builder::new()
-            .name("yapper-scheduler".into())
+            .name("windbag-scheduler".into())
             .spawn(move || run(&app, &worker_db, &wakeups))
             .map_err(|e| log::error!("could not start the scheduler thread: {e}"))
             .ok();
@@ -129,7 +129,7 @@ fn run(app: &AppHandle, database: &Arc<Db>, wakeups: &Receiver<()>) {
 /// One sweep. Returns how many destinations were settled, either way.
 fn pass(app: &AppHandle, database: &Arc<Db>) -> Result<usize> {
     // Catch-up runs on EVERY pass, not only at launch. A machine that sleeps
-    // overnight with Yapper open wakes to hours of overdue posts, and firing
+    // overnight with Windbag open wakes to hours of overdue posts, and firing
     // them all at once is exactly what the missed-post policy exists to
     // prevent — a policy that only holds at boot is not the policy Settings
     // describes. It is idempotent, costs one indexed query, and returns
@@ -298,7 +298,7 @@ pub fn catch_up(database: &Arc<Db>) -> Result<usize> {
     for post in &overdue {
         database.set_post_status(post.id, POST_MISSED)?;
         log::warn!(
-            "post {} was due at {} and is marked missed — Yapper was not running",
+            "post {} was due at {} and is marked missed — Windbag was not running",
             post.id,
             post.scheduled_at.as_deref().unwrap_or("?")
         );

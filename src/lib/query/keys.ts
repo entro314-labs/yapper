@@ -12,6 +12,9 @@ export const queryKeys = {
     redirectUri: () => [...queryKeys.platforms.root, 'redirectUri'] as const,
     appCredentials: (platform: string, instance?: string | null) =>
       [...queryKeys.platforms.root, 'appCredentials', platform, instance ?? null] as const,
+    // Under the platforms root because saving it changes what `list_platforms`
+    // reports: the Meta adapters derive their redirect URI from this.
+    webHost: () => [...queryKeys.platforms.root, 'webHost'] as const,
   },
   accounts: {
     root: ['accounts'] as const,

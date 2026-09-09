@@ -6,7 +6,7 @@
 //!   in. No developer app anywhere, which is why this is the adapter to test the
 //!   whole pipeline with. Sessions are deliberately NOT persisted: an
 //!   `accessJwt` lives about two hours, shorter than the gap between most
-//!   scheduled posts, so a stored one is expired more often than not. Yapper
+//!   scheduled posts, so a stored one is expired more often than not. Windbag
 //!   keeps the app password and mints a session immediately before each publish
 //!   — one extra request, and no state machine that can drift.
 //!
@@ -46,6 +46,7 @@ impl Platform for Bluesky {
                 max_media: 4,
                 supports_alt_text: true,
                 requires_title: false,
+                requires_media: false,
             },
             connect_fields: vec![
                 FieldSpec::text(
@@ -91,7 +92,7 @@ impl Platform for Bluesky {
                     "client_id",
                     "OAuth client metadata URL",
                     atproto::DEFAULT_CLIENT_ID,
-                    "Where Yapper's OAuth client document is published. Change it only if you \
+                    "Where Windbag's OAuth client document is published. Change it only if you \
                      host your own copy.",
                 )
                 .optional(),
@@ -545,7 +546,7 @@ fn permalink(handle: &str, uri: &str) -> String {
 }
 
 /// Bluesky stores no markup: a URL in the text is inert unless the record also
-/// carries a facet pointing at its BYTE range. Without this, every link Yapper
+/// carries a facet pointing at its BYTE range. Without this, every link Windbag
 /// posts is plain grey text — the post looks broken in a way the API never
 /// complains about.
 ///

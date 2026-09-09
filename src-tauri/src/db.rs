@@ -166,7 +166,7 @@ pub struct DueTarget {
 pub fn data_dir() -> Result<PathBuf> {
     let dir = dirs::data_dir()
         .ok_or_else(|| AppError::Internal("No OS data directory.".into()))?
-        .join("yapper");
+        .join("windbag");
     std::fs::create_dir_all(&dir).map_err(|e| internal("Creating the data directory", e))?;
     Ok(dir)
 }

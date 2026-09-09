@@ -1,23 +1,23 @@
 [package]
-name = "yapper"
+name = "windbag"
 version = "0.2.0"
-description = "Yapper - compose, schedule and publish to Bluesky, Mastodon, Reddit, X and LinkedIn"
+description = "Windbag - compose, schedule and publish to Bluesky, Mastodon, Reddit, X and LinkedIn"
 authors = ["entro314-labs"]
 license = "MIT"
 edition = "2024"
-rust-version = "1.98.0"
-default-run = "yapper"
+rust-version = "1.98.1"
+default-run = "windbag"
 
 
 [lib]
-name = "yapper_lib"
+name = "windbag_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 # The agent door: an MCP stdio server over the same store, spawnable by any
-# agent host (`claude mcp add yapper -- .../yapper-mcp`). A separate binary so it
+# agent host (`claude mcp add windbag -- .../windbag-mcp`). A separate binary so it
 # runs whether or not the app is open.
 [[bin]]
-name = "yapper-mcp"
+name = "windbag-mcp"
 path = "src/bin/mcp.rs"
 
 [build-dependencies]

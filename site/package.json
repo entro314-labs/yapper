@@ -1,0 +1,41 @@
+{
+  "name": "windbag-site",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windbag's companion deployment: the legal pages Meta app review requires, the HTTPS OAuth redirect the desktop app cannot serve, and the public media host Meta fetches attachments from.",
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "dev": "next dev",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "pnpm run lint:check",
+    "lint:check": "oxlint -c .oxlintrc.json --type-aware --type-check -f stylish src/",
+    "lint:fix": "oxlint -c .oxlintrc.json --type-aware --type-check -f stylish --fix src/ && oxfmt --write src/",
+    "lint:github": "oxlint -c .oxlintrc.json --type-aware --type-check -f github src/ > lint.md 2>&1",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1129.0",
+    "@mdx-js/loader": "^3.1.1",
+    "@mdx-js/react": "^3.1.1",
+    "@next/mdx": "^16.3.4",
+    "next": "16.3.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/mdx": "^2.0.14",
+    "@types/node": "^26.5.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "next"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@12.4.0"
+}

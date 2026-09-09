@@ -3,7 +3,7 @@
 //!
 //! Two different things live here, and keeping them apart is the point:
 //!
-//!   * **Delivery** — computed from Yapper's own store. Always available,
+//!   * **Delivery** — computed from Windbag's own store. Always available,
 //!     always current, costs nothing: how many posts published, how many failed
 //!     and why, which platform is flaky, what hour of the day you actually post
 //!     at. This is the half that works the moment you have used the app.
@@ -114,7 +114,7 @@ pub struct Stats {
     /// platform is flaky or the posts are wrong.
     pub failures: Vec<Bucket>,
     pub engagement: EngagementTotals,
-    /// Platforms in scope whose engagement Yapper cannot read, with the reason.
+    /// Platforms in scope whose engagement Windbag cannot read, with the reason.
     pub engagement_gaps: Vec<(PlatformId, &'static str)>,
 }
 
@@ -295,10 +295,19 @@ fn engagement_gap(platform: PlatformId) -> Option<&'static str> {
     match platform {
         PlatformId::Bluesky | PlatformId::Mastodon => None,
         PlatformId::X => Some("X's post metrics need a paid API tier."),
-        PlatformId::Reddit => Some("Reddit's score needs a read scope Yapper does not request."),
+        PlatformId::Reddit => Some("Reddit's score needs a read scope Windbag does not request."),
         PlatformId::Linkedin => {
             Some("LinkedIn's analytics need approved read permissions on your app.")
         }
+        // All three read insights under a separate `*_manage_insights`
+        // permission Windbag does not request: asking for it at connect time
+        // would widen the consent screen for every user to serve a panel most
+        // never open.
+        PlatformId::Threads => Some("Threads insights need the threads_manage_insights scope."),
+        PlatformId::Instagram => {
+            Some("Instagram insights need the instagram_business_manage_insights scope.")
+        }
+        PlatformId::Facebook => Some("Page insights need the read_insights permission."),
     }
 }
 
@@ -320,7 +329,7 @@ fn failure_label(code: &str) -> &str {
         "NETWORK" => "Network",
         "CONFLICT" => "Duplicate or conflict",
         "NOT_FOUND" => "Not found",
-        "INTERNAL" => "Yapper",
+        "INTERNAL" => "Windbag",
         other => other,
     }
 }
@@ -389,7 +398,7 @@ pub struct RefreshReport {
     pub problems: Vec<String>,
 }
 
-/// Fetches engagement for every published destination Yapper can read.
+/// Fetches engagement for every published destination Windbag can read.
 ///
 /// Bluesky is batched (its `getPosts` takes up to 25 URIs per call); Mastodon is
 /// one call per status, which is fine at the volumes a personal queue reaches.

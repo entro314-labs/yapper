@@ -2,7 +2,7 @@
 //!
 //! The only OAuth platform here that needs nothing from the user beyond the
 //! instance host: Mastodon lets a client register itself at `POST /api/v1/apps`,
-//! so Yapper mints its own client id per instance on first connect and stores it
+//! so Windbag mints its own client id per instance on first connect and stores it
 //! in the OS credential store keyed by that host. An app registration is only
 //! valid on the server that issued it, which is why the key carries the host.
 //!
@@ -35,12 +35,13 @@ impl Platform for Mastodon {
                 max_media: 4,
                 supports_alt_text: true,
                 requires_title: false,
+                requires_media: false,
             },
             connect_fields: vec![FieldSpec::text(
                 "instance",
                 "Instance",
                 "mastodon.social",
-                "The server your account is on. Yapper registers itself there automatically.",
+                "The server your account is on. Windbag registers itself there automatically.",
             )],
             app_fields: Vec::new(),
             setup_url: None,
@@ -62,7 +63,7 @@ impl Platform for Mastodon {
                 )
                 .optional(),
             ],
-            notes: "No developer app needed — Yapper registers itself with your instance.",
+            notes: "No developer app needed — Windbag registers itself with your instance.",
         }
     }
 
@@ -136,7 +137,7 @@ impl Platform for Mastodon {
                 // second would report the first one's id as its own.
                 .header(
                     "Idempotency-Key",
-                    format!("yapper-target-{}", request.target_id),
+                    format!("windbag-target-{}", request.target_id),
                 )
                 .json(&payload)
                 .send()?,
@@ -194,7 +195,7 @@ fn register_app(instance: &str) -> Result<AppCredentials> {
         http::client()
             .post(format!("{instance}/api/v1/apps"))
             .json(&json!({
-                "client_name": "Yapper",
+                "client_name": "Windbag",
                 "redirect_uris": REDIRECT_URI,
                 "scopes": SCOPES,
                 "website": "https://github.com/entro314-labs/yapper",

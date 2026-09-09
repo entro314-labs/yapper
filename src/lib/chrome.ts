@@ -3,7 +3,7 @@
  * traffic lights all have to agree on one band height — a mismatch of a couple of pixels is
  * instantly visible as a stepped seam.
  */
-export const APP_NAME = 'Yapper'
+export const APP_NAME = 'Windbag'
 
 export const TITLEBAR_H = 44
 /**

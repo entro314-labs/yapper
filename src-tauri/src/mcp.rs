@@ -1,14 +1,14 @@
 //! The agent door: an MCP server over the same store the app uses.
 //!
-//! Run as `yapper-mcp`, a stdio JSON-RPC 2.0 server any agent host can spawn:
+//! Run as `windbag-mcp`, a stdio JSON-RPC 2.0 server any agent host can spawn:
 //!
 //! ```text
-//! claude mcp add yapper -- /path/to/yapper-mcp
-//! codex mcp add yapper -- /path/to/yapper-mcp
+//! claude mcp add windbag -- /path/to/windbag-mcp
+//! codex mcp add windbag -- /path/to/windbag-mcp
 //! ```
 //!
 //! This is where "give it context and let it schedule things" actually lives.
-//! Inside Yapper the assistant only ever hands drafts to the composer, because
+//! Inside Windbag the assistant only ever hands drafts to the composer, because
 //! nothing there shows you what it is about to do. An agent host does: every
 //! tool call is visible and approvable in the conversation, which is the trust
 //! boundary that makes write access reasonable.
@@ -109,12 +109,14 @@ impl Session {
         json!({
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": { "tools": { "listChanged": false } },
-            "serverInfo": { "name": "yapper", "version": env!("CARGO_PKG_VERSION") },
+            "serverInfo": { "name": "windbag", "version": env!("CARGO_PKG_VERSION") },
             "instructions":
-                "Yapper is a desktop social scheduler. Posts you create here are queued in \
-                 the user's local store; they go out only while the Yapper app is running. \
+                "Windbag is a desktop social scheduler. Posts you create here are queued in \
+                 the user's local store; they go out only while the Windbag app is running. \
                  Always call list_accounts first — every destination is an account id, and \
-                 each platform has its own character limit."
+                 each platform has its own character limit and media rules. The meta_ads_* \
+                 tools are a passthrough to Meta's own hosted ads MCP server and reach live \
+                 ad accounts, so treat any write there as spending money."
         })
     }
 
@@ -129,6 +131,8 @@ impl Session {
             "create_note" => self.create_note(&args)?,
             "create_post" => self.create_post(&args)?,
             "get_stats" => self.get_stats(&args)?,
+            "meta_ads_tools" => self.meta_ads_tools()?,
+            "meta_ads_call" => self.meta_ads_call(&args)?,
             other => {
                 return Err(crate::error::AppError::NotFound(format!(
                     "No tool named `{other}`."
@@ -144,7 +148,7 @@ impl Session {
         let accounts = self.db.list_accounts()?;
         if accounts.is_empty() {
             return Ok(
-                "No accounts are connected. The user connects them in Yapper → \
+                "No accounts are connected. The user connects them in Windbag → \
                        Accounts."
                     .into(),
             );
@@ -153,12 +157,17 @@ impl Session {
             .iter()
             .map(|account| {
                 let adapter = platforms::adapter(account.platform);
+                let limits = adapter.info().limits;
                 json!({
                     "id": account.id,
                     "platform": account.platform.as_str(),
                     "handle": account.handle,
                     "charLimit": scheduler::effective_char_limit(account, adapter),
-                    "requiresTitle": adapter.info().limits.requires_title,
+                    "requiresTitle": limits.requires_title,
+                    // Instagram has no text-only post. An agent that does not
+                    // know this queues a caption and finds out at publish time.
+                    "requiresMedia": limits.requires_media,
+                    "maxMedia": limits.max_media,
                     "status": account.status,
                 })
             })
@@ -299,8 +308,8 @@ impl Session {
         Ok(match scheduled_at {
             Some(at) => format!(
                 "Scheduled post {post_id} for {at} to {} destination(s). It will go out only \
-                 while the Yapper app is running — if the machine is asleep at that time, \
-                 Yapper marks it missed rather than posting it late.",
+                 while the Windbag app is running — if the machine is asleep at that time, \
+                 Windbag marks it missed rather than posting it late.",
                 account_ids.len()
             ),
             None => format!(
@@ -309,6 +318,30 @@ impl Session {
                 account_ids.len()
             ),
         })
+    }
+
+    // ─── Meta ads, forwarded to Meta's own MCP server ───────────────────────
+
+    fn meta_ads_tools(&self) -> Result<String> {
+        let result = crate::metaads::AdsClient::from_store(&self.db)?.list_tools()?;
+        Ok(serde_json::to_string_pretty(&result)?)
+    }
+
+    fn meta_ads_call(&self, args: &Value) -> Result<String> {
+        let name = args
+            .get("tool")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                crate::error::AppError::InvalidInput(
+                    "`tool` must name one of the tools from meta_ads_tools.".into(),
+                )
+            })?;
+        let arguments = args.get("arguments").cloned().unwrap_or(json!({}));
+        let result =
+            crate::metaads::AdsClient::from_store(&self.db)?.call_tool(name, &arguments)?;
+        Ok(serde_json::to_string_pretty(&result)?)
     }
 
     fn get_stats(&self, args: &Value) -> Result<String> {
@@ -366,13 +399,24 @@ impl Session {
 /// The tool catalogue. Descriptions are written for a model deciding whether to
 /// call something, so each says what it is FOR and what it costs, not just what
 /// it does.
+///
+/// Split in two because the halves answer to different owners: [`store_tools`]
+/// is this store, [`ads_tools`] is a passthrough to a server somebody else runs
+/// against live ad accounts.
 fn tool_definitions() -> Vec<Value> {
+    let mut tools = store_tools();
+    tools.extend(ads_tools());
+    tools
+}
+
+/// Everything backed by the local store.
+fn store_tools() -> Vec<Value> {
     vec![
         tool(
             "list_accounts",
-            "List the connected social accounts, each with its id, platform, handle and \
-             character limit. Call this before create_post — destinations are account ids, \
-             and the limits differ per platform.",
+            "List the connected social accounts, each with its id, platform, handle, \
+             character limit and media rules. Call this before create_post — destinations \
+             are account ids, and the limits differ per platform.",
             json!({ "type": "object", "properties": {} }),
         ),
         tool(
@@ -403,7 +447,9 @@ fn tool_definitions() -> Vec<Value> {
             "create_post",
             "Queue a post. With `scheduledAt` it is scheduled; without one it is saved as a \
              draft. The post is validated against every destination's limits first and \
-             refused if it does not fit. It is sent only while the Yapper app is running.",
+             refused if it does not fit. It is sent only while the Windbag app is running. \
+             Attachments cannot be added here, so an Instagram destination is always \
+             refused — Instagram has no text-only post.",
             json!({
                 "type": "object",
                 "properties": {
@@ -414,7 +460,9 @@ fn tool_definitions() -> Vec<Value> {
                     },
                     "link": {
                         "type": "string",
-                        "description": "Optional URL. Becomes a card on LinkedIn, a link post on Reddit."
+                        "description":
+                            "Optional URL. Becomes a card on LinkedIn, a link post on Reddit, \
+                             a link attachment on a text-only Threads post."
                     },
                     "scheduledAt": {
                         "type": "string",
@@ -429,7 +477,8 @@ fn tool_definitions() -> Vec<Value> {
                         "type": "object",
                         "description":
                             "Per-destination options keyed by account id as a string, e.g. \
-                             {\"3\": {\"subreddit\": \"rust\"}}. Reddit needs a subreddit."
+                             {\"3\": {\"subreddit\": \"rust\"}}. Reddit needs a subreddit; \
+                             Threads takes topic_tag and reply_control."
                     }
                 },
                 "required": ["body", "accountIds"]
@@ -437,7 +486,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "get_stats",
-            "Publishing statistics from Yapper's own records: how much published, what \
+            "Publishing statistics from Windbag's own records: how much published, what \
              failed and why, which hours the user posts at, plus engagement counts where \
              the platform provides them free (Bluesky and Mastodon only).",
             json!({
@@ -448,9 +497,51 @@ fn tool_definitions() -> Vec<Value> {
                     "platforms": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "bluesky | mastodon | reddit | x | linkedin"
+                        "description":
+                            "bluesky | mastodon | reddit | x | linkedin | threads | \
+                             instagram | facebook"
                     }
                 }
+            }),
+        ),
+    ]
+}
+
+/// The passthrough to Meta's hosted ads MCP server.
+///
+/// Advertised unconditionally rather than only when a Facebook Page is
+/// connected: `tools/list` is answered before any credential is read, and a
+/// catalogue that changes shape depending on stored state is harder for a model
+/// to reason about than one whose tools state their own preconditions.
+fn ads_tools() -> Vec<Value> {
+    vec![
+        tool(
+            "meta_ads_tools",
+            "List the tools Meta's hosted ads MCP server currently offers — reporting, \
+             campaign and ad-set management, catalogues, A/B tests. Windbag forwards to Meta \
+             rather than mirroring it, so this is always Meta's live catalogue. Needs a \
+             connected Facebook Page whose Meta app was granted ads access.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "meta_ads_call",
+            "Run one of the tools from meta_ads_tools against the user's Meta ad accounts \
+             and return Meta's answer unchanged. Call meta_ads_tools first for the exact \
+             name and argument schema — they are Meta's, not Windbag's. Anything that \
+             changes a campaign spends real money, so confirm with the user first.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "tool": {
+                        "type": "string",
+                        "description": "A tool name from meta_ads_tools."
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "That tool's own arguments, per its schema."
+                    }
+                },
+                "required": ["tool"]
             }),
         ),
     ]
@@ -601,7 +692,7 @@ mod tests {
         let text = text_of(&frame);
         assert!(text.contains("Scheduled post"), "{text}");
         assert!(
-            text.contains("while the Yapper app is running"),
+            text.contains("while the Windbag app is running"),
             "an agent must not believe this already went out: {text}"
         );
     }

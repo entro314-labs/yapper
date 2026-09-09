@@ -16,7 +16,7 @@ pub fn user_agent() -> &'static str {
     static UA: OnceLock<String> = OnceLock::new();
     UA.get_or_init(|| {
         format!(
-            "Yapper/{} (desktop; +https://github.com/entro314-labs/yapper)",
+            "Windbag/{} (desktop; +https://github.com/entro314-labs/yapper)",
             env!("CARGO_PKG_VERSION")
         )
     })

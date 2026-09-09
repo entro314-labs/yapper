@@ -50,7 +50,7 @@ async function connectEventBridge() {
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
     toast.error('Live updates unavailable', {
-      description: `Yapper could not subscribe to the scheduler (${detail}). The queue still loads, but posts going out will not appear until you navigate. Restart to retry.`,
+      description: `Windbag could not subscribe to the scheduler (${detail}). The queue still loads, but posts going out will not appear until you navigate. Restart to retry.`,
       duration: Number.POSITIVE_INFINITY,
     })
   }

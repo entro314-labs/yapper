@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 /**
  * A native `<select>`, styled to match the rest of the chrome.
  *
- * Deliberately not the Base UI listbox: every select in Yapper is a short, closed enumeration (a
+ * Deliberately not the Base UI listbox: every select in Windbag is a short, closed enumeration (a
  * visibility, a policy, a theme) where the OS's own popup is faster to use and gets keyboard and
  * accessibility behaviour right for free.
  */

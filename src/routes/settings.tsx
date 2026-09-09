@@ -1,29 +1,30 @@
-import {
-  IconAlertTriangle,
-  IconCheck,
-  IconCircleCheck,
-  IconCopy,
-  IconExternalLink,
-} from '@tabler/icons-react'
+import { IconAlertTriangle, IconCircleCheck } from '@tabler/icons-react'
 import { createFileRoute } from '@tanstack/react-router'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import * as React from 'react'
 import { toast } from 'sonner'
 
+import { CheckIcon } from '@/components/icons/check'
+import { CopyIcon } from '@/components/icons/copy'
+import { ExternalLinkIcon } from '@/components/icons/external-link'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { useAnimatedIcon } from '@/lib/animated-icon'
 import { brandOf } from '@/lib/platform-brand'
 import {
   useAiAvailability,
   useAppCredentials,
   useForgetAppCredentials,
+  useForgetWebHost,
   usePlatforms,
   useRedirectUri,
   useSaveAppCredentials,
+  useSaveWebHost,
   useSettings,
   useUpdateSettings,
+  useWebHost,
 } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
 import type { AiBackend, PlatformInfo, Settings } from '@/lib/tauri/types'
@@ -67,7 +68,7 @@ function SettingsScreen() {
         </Row>
         <Row
           label="Window material"
-          hint="Frosts the window chrome. macOS and Windows only — Linux compositors mostly refuse, and Yapper falls back to solid."
+          hint="Frosts the window chrome. macOS and Windows only — Linux compositors mostly refuse, and Windbag falls back to solid."
         >
           <Select
             value={current.windowMaterial}
@@ -85,7 +86,7 @@ function SettingsScreen() {
 
       <Section
         title="Scheduling"
-        note="Yapper posts from this machine, so it has to be running when a post is due. Launching at login keeps it in the background."
+        note="Windbag posts from this machine, so it has to be running when a post is due. Launching at login keeps it in the background."
       >
         <Row label="Launch at login" hint="Starts hidden, with the scheduler running.">
           <Switch
@@ -97,7 +98,7 @@ function SettingsScreen() {
         </Row>
         <Row
           label="If a post was missed"
-          hint="What to do with a post whose time passed while Yapper was closed."
+          hint="What to do with a post whose time passed while Windbag was closed."
         >
           <Select
             value={current.missedPolicy}
@@ -129,7 +130,7 @@ function SettingsScreen() {
 
       <Section
         title="Assistant"
-        note="Yapper ships no API key and no model of its own — it borrows an assistant you already have. It only ever hands you drafts: they land in the composer, where the same limits and the same click still apply before anything goes out."
+        note="Windbag ships no API key and no model of its own — it borrows an assistant you already have. It only ever hands you drafts: they land in the composer, where the same limits and the same click still apply before anything goes out."
       >
         <AssistantRow
           value={current.aiBackend}
@@ -172,14 +173,21 @@ function SettingsScreen() {
 
       <Section
         title="Agent door"
-        note="Yapper ships an MCP server so an agent host can read your queue and schedule posts directly — where you see and approve each tool call. Build it with `cargo build --release --bin yapper-mcp`, then register the binary:"
+        note="Windbag ships an MCP server so an agent host can read your queue and schedule posts directly — where you see and approve each tool call. Build it with `cargo build --release --bin windbag-mcp`, then register the binary:"
       >
         <AgentDoorRow />
       </Section>
 
       <Section
+        title="Web deployment"
+        note="Threads, Instagram and Facebook need two things a desktop app cannot provide: an HTTPS redirect to sign in through, and a public URL to serve attachments from — Meta fetches media itself and will not accept uploaded bytes. Deploy the site in this repo's `site/` folder and paste its address here. Nothing else needs it."
+      >
+        <WebDeploymentRow />
+      </Section>
+
+      <Section
         title="Platform apps"
-        note="X, Reddit and LinkedIn all gate posting behind a developer app that has to be registered to a person. Yapper cannot ship one, so you register your own and paste its client id here — it is stored in your OS keychain, never in the app's database."
+        note="X, Reddit, LinkedIn and all three Meta surfaces gate posting behind a developer app that has to be registered to a person. Windbag cannot ship one, so you register your own and paste its client id here — it is stored in your OS keychain, never in the app's database."
       >
         {redirectUri.data ? <RedirectUriRow uri={redirectUri.data} /> : null}
         {(platforms.data ?? [])
@@ -237,37 +245,172 @@ function Row({
 }
 
 /**
- * The one string every OAuth app must have registered verbatim. Copyable rather than retypeable: a
- * single wrong character here fails the token exchange with a message that names nothing useful.
+ * A value that must be transcribed EXACTLY into someone else's dashboard — a redirect URI, a shell
+ * command. Always copyable rather than retypeable: one wrong character in any of them fails later,
+ * somewhere else, with a message that names nothing useful.
  */
-function RedirectUriRow({ uri }: { uri: string }) {
+function CopyChip({ value }: { value: string }) {
   const [copied, setCopied] = React.useState(false)
+  const [iconRef, iconHover] = useAnimatedIcon()
+  // The ref follows whichever glyph is mounted, so once the check replaces the
+  // copy icon it can be asked to draw itself in.
+  React.useEffect(() => {
+    if (copied) iconRef.current?.startAnimation()
+  }, [copied, iconRef])
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void (async () => {
+          await navigator.clipboard.writeText(value)
+          setCopied(true)
+          window.setTimeout(() => {
+            setCopied(false)
+          }, 1600)
+        })()
+      }}
+      {...iconHover}
+      className="flex items-center gap-1.5 self-start rounded-md border border-border/60 bg-background/40 px-2 py-1 font-mono text-xs hover:border-border"
+    >
+      {value}
+      {copied ? (
+        <CheckIcon ref={iconRef} size={14} className="text-success" />
+      ) : (
+        <CopyIcon ref={iconRef} size={14} className="text-muted-foreground" />
+      )}
+    </button>
+  )
+}
+
+function RedirectUriRow({ uri }: { uri: string }) {
   return (
     <Row
       label="Redirect URI"
-      hint="Register this exactly, including the port, on every developer app below."
+      hint="Register this exactly, including the port, on every developer app below — except the Meta ones, which use the HTTPS redirect above."
     >
-      <button
-        type="button"
-        onClick={() => {
-          void (async () => {
-            await navigator.clipboard.writeText(uri)
-            setCopied(true)
-            window.setTimeout(() => {
-              setCopied(false)
-            }, 1600)
-          })()
-        }}
-        className="flex items-center gap-1.5 rounded-md border border-border/60 bg-background/40 px-2 py-1 font-mono text-xs hover:border-border"
-      >
-        {uri}
-        {copied ? (
-          <IconCheck className="size-3.5 text-success" />
-        ) : (
-          <IconCopy className="size-3.5 text-muted-foreground" />
-        )}
-      </button>
+      <CopyChip value={uri} />
     </Row>
+  )
+}
+
+/**
+ * The companion deployment, which exists only because Meta refuses both of the things every other
+ * platform here accepts: a loopback redirect, and uploaded bytes.
+ *
+ * The redirect URI is DERIVED from the base URL and shown to copy rather than asked for, because it
+ * is not a second decision — it is the first one, spelled out.
+ */
+function WebDeploymentRow() {
+  const stored = useWebHost()
+  const save = useSaveWebHost()
+  const forget = useForgetWebHost()
+  const [baseUrl, setBaseUrl] = React.useState<string | null>(null)
+  const [token, setToken] = React.useState('')
+
+  const current = stored.data
+  const value = baseUrl ?? current?.baseUrl ?? ''
+
+  const submit = React.useCallback(() => {
+    void (async () => {
+      try {
+        const saved = await save.mutateAsync({
+          baseUrl: value,
+          // Blank means "keep the stored one", the same as a client secret.
+          uploadToken: token.trim() === '' ? null : token,
+        })
+        toast.success('Saved the web deployment')
+        setBaseUrl(null)
+        setToken('')
+        // Shown rather than announced: this is the string that has to go into
+        // the Meta app, and it only exists once the base URL is known.
+        toast.info(`Register ${saved.redirectUri} on your Meta app`)
+      } catch (err) {
+        toast.error(humanMessage(err))
+      }
+    })()
+  }, [save, token, value])
+
+  return (
+    <div className="flex flex-col gap-3 px-3 py-2.5">
+      <label className="flex flex-col gap-1 text-xs" htmlFor="web-host-base-url">
+        <span className="font-medium">Base URL</span>
+        <Input
+          id="web-host-base-url"
+          type="text"
+          value={value}
+          placeholder="https://windbag.social"
+          autoComplete="off"
+          onChange={(event) => {
+            setBaseUrl(event.target.value)
+          }}
+        />
+        <span className="leading-relaxed text-muted-foreground">
+          Where you deployed <code>site/</code>. Must be HTTPS — Meta refuses a plain-HTTP redirect
+          and will not fetch media over one.
+        </span>
+      </label>
+
+      <label className="flex flex-col gap-1 text-xs" htmlFor="web-host-upload-token">
+        <span className="font-medium">
+          Upload token
+          {current?.hasToken ? (
+            <span className="ml-1.5 font-normal text-muted-foreground">
+              (stored — leave blank to keep it)
+            </span>
+          ) : null}
+        </span>
+        <Input
+          id="web-host-upload-token"
+          type="password"
+          value={token}
+          autoComplete="off"
+          onChange={(event) => {
+            setToken(event.target.value)
+          }}
+        />
+        <span className="leading-relaxed text-muted-foreground">
+          The <code>WINDBAG_UPLOAD_TOKEN</code> you set on the deployment. Stored in your OS
+          keychain.
+        </span>
+      </label>
+
+      {current?.redirectUri ? (
+        <div className="flex flex-col gap-1 text-xs">
+          <span className="font-medium">Redirect URI for Meta apps</span>
+          <CopyChip value={current.redirectUri} />
+          <span className="leading-relaxed text-muted-foreground">
+            Register this on your Threads, Instagram and Facebook apps. It bounces the sign-in back
+            to Windbag.
+          </span>
+        </div>
+      ) : null}
+
+      <div className="flex items-center gap-2">
+        <Button size="sm" onClick={submit}>
+          Save
+        </Button>
+        {current ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              void (async () => {
+                try {
+                  await forget.mutateAsync({})
+                  setBaseUrl(null)
+                  setToken('')
+                  toast.success('Forgot the web deployment')
+                } catch (err) {
+                  toast.error(humanMessage(err))
+                }
+              })()
+            }}
+          >
+            Forget
+          </Button>
+        ) : null}
+      </div>
+    </div>
   )
 }
 
@@ -325,35 +468,15 @@ function AssistantRow({
 
 /** The one command that registers the MCP server, copyable rather than retyped. */
 function AgentDoorRow() {
-  const [copied, setCopied] = React.useState(false)
-  const command = 'claude mcp add yapper -- /path/to/yapper-mcp'
-
   return (
     <div className="flex flex-col gap-2 px-3 py-2.5">
-      <button
-        type="button"
-        onClick={() => {
-          void (async () => {
-            await navigator.clipboard.writeText(command)
-            setCopied(true)
-            window.setTimeout(() => {
-              setCopied(false)
-            }, 1600)
-          })()
-        }}
-        className="flex items-center gap-1.5 self-start rounded-md border border-border/60 bg-background/40 px-2 py-1 font-mono text-xs hover:border-border"
-      >
-        {command}
-        {copied ? (
-          <IconCheck className="size-3.5 text-success" />
-        ) : (
-          <IconCopy className="size-3.5 text-muted-foreground" />
-        )}
-      </button>
+      <CopyChip value="claude mcp add windbag -- /path/to/windbag-mcp" />
       <p className="text-xs leading-relaxed text-muted-foreground">
-        It reads the same store this app uses, so it works whether or not Yapper is open — but a
-        post it schedules still only goes out while Yapper is running. It refuses anything that
-        would not fit its destinations, using each platform&apos;s own message.
+        It reads the same store this app uses, so it works whether or not Windbag is open — but a
+        post it schedules still only goes out while Windbag is running. It refuses anything that
+        would not fit its destinations, using each platform&apos;s own message. It also forwards
+        Meta&apos;s own ads tools, so the session that schedules a post can read what the campaign
+        behind it did.
       </p>
     </div>
   )
@@ -365,6 +488,7 @@ function AppCredentialsRow({ info }: { info: PlatformInfo }) {
   const forget = useForgetAppCredentials()
   const [draft, setDraft] = React.useState<Record<string, string>>({})
   const [open, setOpen] = React.useState(false)
+  const [portalRef, portalHover] = useAnimatedIcon()
 
   const brand = brandOf(info.id)
   const Icon = brand.icon
@@ -433,8 +557,9 @@ function AppCredentialsRow({ info }: { info: PlatformInfo }) {
               onClick={() => {
                 void openUrl(info.setupUrl ?? '')
               }}
+              {...portalHover}
             >
-              <IconExternalLink />
+              <ExternalLinkIcon ref={portalRef} />
             </Button>
           ) : null}
           <Button

@@ -5,7 +5,7 @@ import { usePosts, useAccounts } from '@/lib/query'
 import { formatRelative } from '@/lib/utils'
 
 /**
- * The island's footer: the one line that answers "is Yapper actually going to post my things?".
+ * The island's footer: the one line that answers "is Windbag actually going to post my things?".
  *
  * It leads with the NEXT post rather than a count, because that is the fact a scheduling tool
  * exists to tell you, and it surfaces any account needing reconnection — a dead credential is

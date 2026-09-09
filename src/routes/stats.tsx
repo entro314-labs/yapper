@@ -1,11 +1,13 @@
-import { IconChartBar, IconInfoCircle, IconRefresh } from '@tabler/icons-react'
+import { IconChartBar, IconInfoCircle } from '@tabler/icons-react'
 import { Link, createFileRoute } from '@tanstack/react-router'
 import * as React from 'react'
 import { toast } from 'sonner'
 
+import { RefreshCwIcon } from '@/components/icons/refresh-cw'
 import { EmptyState } from '@/components/shell/empty-state'
 import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
+import { useAnimatedIcon } from '@/lib/animated-icon'
 import { brandOf } from '@/lib/platform-brand'
 import { useAccounts, usePosts, useRefreshEngagement, useStats } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
@@ -24,7 +26,7 @@ const RANGES = [
 /**
  * What actually happened.
  *
- * Two halves, kept visibly apart. DELIVERY is computed from Yapper's own records — always there,
+ * Two halves, kept visibly apart. DELIVERY is computed from Windbag's own records — always there,
  * always current, and the only half that can answer "why did this fail". ENGAGEMENT comes from the
  * platforms, and only two of the five give it away; the rest are named as gaps rather than drawn as
  * zeroes, because a zero is a claim and "we cannot see it" is the truth.
@@ -36,6 +38,7 @@ function StatsScreen() {
   const accounts = useAccounts()
   const posts = usePosts()
   const refresh = useRefreshEngagement()
+  const [refreshRef, refreshHover] = useAnimatedIcon()
 
   const [range, setRange] = React.useState<string>('30')
   // The bound is computed when the range is CHOSEN, not on every render: reading
@@ -176,6 +179,7 @@ function StatsScreen() {
             variant="outline"
             className="ml-auto"
             disabled={refresh.isPending}
+            {...refreshHover}
             onClick={() => {
               void (async () => {
                 try {
@@ -194,7 +198,8 @@ function StatsScreen() {
               })()
             }}
           >
-            <IconRefresh
+            <RefreshCwIcon
+              ref={refreshRef}
               data-icon="inline-start"
               className={cn(refresh.isPending && 'animate-spin')}
             />
@@ -218,7 +223,7 @@ function StatsScreen() {
             </>
           ) : (
             <p className="text-sm text-muted-foreground">
-              Nothing fetched yet. Refresh pulls public counts for the destinations Yapper can read
+              Nothing fetched yet. Refresh pulls public counts for the destinations Windbag can read
               — which is not the same as those destinations having no engagement.
             </p>
           )}

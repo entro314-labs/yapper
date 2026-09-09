@@ -1,6 +1,6 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { Outlet, createRootRouteWithContext, useRouterState } from '@tanstack/react-router'
-import { AnimatePresence, motion } from 'motion/react'
+import { AnimatePresence, MotionConfig, motion } from 'motion/react'
 import * as React from 'react'
 import { Toaster, toast } from 'sonner'
 
@@ -32,9 +32,13 @@ function RootShell() {
     <ThemeProvider settings={settings.data}>
       <PrefsProvider>
         <TooltipProvider delay={250} closeDelay={100}>
-          <AuthListener />
-          <ThemedToaster />
-          <ShellLayout />
+          {/* The CSS reduced-motion rule only reaches CSS animations. Motion drives its own, so
+              it has to be told about the setting separately. */}
+          <MotionConfig reducedMotion="user">
+            <AuthListener />
+            <ThemedToaster />
+            <ShellLayout />
+          </MotionConfig>
         </TooltipProvider>
       </PrefsProvider>
     </ThemeProvider>
@@ -126,7 +130,7 @@ function ThemedToaster() {
         duration: 4500,
         classNames: {
           // The same chrome as every other raised surface, so a toast reads as
-          // part of Yapper rather than as sonner's stock floating bubble.
+          // part of Windbag rather than as sonner's stock floating bubble.
           toast: cn(
             '!bg-popover/95 backdrop-blur-md text-popover-foreground',
             '!border-border/60 ring-1 ring-foreground/5 !shadow-elevated rounded-lg',

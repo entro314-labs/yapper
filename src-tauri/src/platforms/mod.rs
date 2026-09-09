@@ -1,17 +1,22 @@
 //! The platform contract.
 //!
-//! Every destination Yapper can post to implements [`Platform`]. The renderer
+//! Every destination Windbag can post to implements [`Platform`]. The renderer
 //! never learns a platform's shape from hardcoded TypeScript — it renders forms
 //! from [`PlatformInfo`], so adding an adapter here is the whole change.
 //!
-//! Two auth shapes cover all five:
+//! Two auth shapes cover all eight:
 //!   * [`AuthKind::Credentials`] — a handle and an app password typed straight
 //!     into the app (Bluesky). Nothing to register anywhere.
 //!   * [`AuthKind::OAuth2`] — a browser handoff. Where `app_fields` is
 //!     non-empty the user must register THEIR OWN developer app and paste its
-//!     client id: X, Reddit and `LinkedIn` all gate posting behind an approved
-//!     app, and a client secret shipped inside a distributed binary is not a
-//!     secret. Mastodon is the exception — it registers an app on the fly.
+//!     client id: X, Reddit, `LinkedIn` and all three Meta surfaces gate posting
+//!     behind an approved app, and a client secret shipped inside a distributed
+//!     binary is not a secret. Mastodon is the exception — it registers an app
+//!     on the fly.
+//!
+//! The three Meta destinations live under [`meta`] because they share a
+//! developer app, an error envelope and a token lifecycle, and because all three
+//! need an HTTPS redirect the desktop app cannot serve — see [`crate::webhost`].
 
 use std::collections::HashMap;
 
@@ -22,6 +27,7 @@ use crate::error::{AppError, Result};
 pub mod bluesky;
 pub mod linkedin;
 pub mod mastodon;
+pub mod meta;
 pub mod reddit;
 pub mod x;
 
@@ -33,15 +39,21 @@ pub enum PlatformId {
     Reddit,
     X,
     Linkedin,
+    Threads,
+    Instagram,
+    Facebook,
 }
 
 impl PlatformId {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 8] = [
         Self::Bluesky,
         Self::Mastodon,
         Self::Reddit,
         Self::X,
         Self::Linkedin,
+        Self::Threads,
+        Self::Instagram,
+        Self::Facebook,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -51,6 +63,9 @@ impl PlatformId {
             Self::Reddit => "reddit",
             Self::X => "x",
             Self::Linkedin => "linkedin",
+            Self::Threads => "threads",
+            Self::Instagram => "instagram",
+            Self::Facebook => "facebook",
         }
     }
 
@@ -61,6 +76,9 @@ impl PlatformId {
             "reddit" => Ok(Self::Reddit),
             "x" => Ok(Self::X),
             "linkedin" => Ok(Self::Linkedin),
+            "threads" => Ok(Self::Threads),
+            "instagram" => Ok(Self::Instagram),
+            "facebook" => Ok(Self::Facebook),
             other => Err(AppError::InvalidInput(format!(
                 "Unknown platform `{other}`."
             ))),
@@ -74,7 +92,17 @@ impl PlatformId {
             Self::Reddit => "Reddit",
             Self::X => "X",
             Self::Linkedin => "LinkedIn",
+            Self::Threads => "Threads",
+            Self::Instagram => "Instagram",
+            Self::Facebook => "Facebook Page",
         }
+    }
+
+    /// True for the three that share one Meta developer app and one HTTPS
+    /// redirect. Used to decide whether a missing web deployment is worth
+    /// mentioning, and to group them in Settings.
+    pub fn is_meta(self) -> bool {
+        matches!(self, Self::Threads | Self::Instagram | Self::Facebook)
     }
 }
 
@@ -171,13 +199,17 @@ impl FieldSpec {
 #[serde(rename_all = "camelCase")]
 pub struct Limits {
     /// Body length the platform accepts. Counted in Unicode scalar values, which
-    /// is what four of the five actually measure; Bluesky counts graphemes and
-    /// overrides `count_body`.
+    /// is what most of them actually measure; Bluesky counts graphemes and
+    /// Threads bills emoji by UTF-8 byte, so both override `count_body`.
     pub max_chars: usize,
     pub max_media: usize,
     pub supports_alt_text: bool,
     /// Reddit: a submission without a title is not a submission.
     pub requires_title: bool,
+    /// Instagram: a caption is a property of an image or a video, never a post
+    /// by itself. There is no text-only post to fall back to, so this is refused
+    /// at compose time rather than at 3am.
+    pub requires_media: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -194,6 +226,12 @@ pub struct PlatformInfo {
     /// Where the user goes to create the developer app `app_fields` asks for.
     pub setup_url: Option<&'static str>,
     /// The exact redirect URI that must be registered on that app.
+    ///
+    /// `None` for the Meta platforms, whose redirect is the user's OWN
+    /// deployment and therefore not a constant. It is reported by the
+    /// `get_web_host` command instead — deriving it here would mean a
+    /// credential-store read inside `info()`, which the composer calls on every
+    /// keystroke through [`validate`].
     pub redirect_uri: Option<&'static str>,
     /// Per-destination options on a post (subreddit, visibility…).
     pub target_fields: Vec<FieldSpec>,
@@ -368,6 +406,9 @@ pub fn adapter(id: PlatformId) -> &'static dyn Platform {
         PlatformId::Reddit => &reddit::Reddit,
         PlatformId::X => &x::X,
         PlatformId::Linkedin => &linkedin::Linkedin,
+        PlatformId::Threads => &meta::threads::Threads,
+        PlatformId::Instagram => &meta::instagram::Instagram,
+        PlatformId::Facebook => &meta::facebook::Facebook,
     }
 }
 
@@ -408,6 +449,12 @@ pub fn validate(
     if info.limits.requires_title && title.is_none_or(|value| value.trim().is_empty()) {
         return Err(AppError::InvalidInput(format!(
             "{} needs a title.",
+            info.name
+        )));
+    }
+    if info.limits.requires_media && media_count == 0 {
+        return Err(AppError::InvalidInput(format!(
+            "{} has no text-only post — attach an image or a video.",
             info.name
         )));
     }

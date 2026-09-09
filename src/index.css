@@ -7,7 +7,7 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* ─── Yapper design tokens ────────────────────────────────────────────
+/* ─── Windbag design tokens ───────────────────────────────────────────
    Identity: "Signal". Cool slate-ink surfaces, ONE electric cyan accent
    (the carrier), Space Grotesk for display and Inter for the reading UI.
    Radius is moderate (0.625rem) — softer than a terminal, sharper than a
@@ -191,7 +191,7 @@
   }
 
   /* Minimise / maximise / close, drawn by the app on platforms whose system frame
-     we removed. They carry the desktop's own three colours rather than the Yapper
+     we removed. They carry the desktop's own three colours rather than the Windbag
      palette: close is red everywhere, whatever the app's accent is. */
   .window-control {
     color: var(--muted-foreground);

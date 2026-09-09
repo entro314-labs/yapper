@@ -13,7 +13,7 @@
 //! in February 2026 and the API is now pay-per-use against purchased credits.
 //! There is no free tier, and creating a post costs money on the app the token
 //! belongs to. That is the strongest reason the client id must be the USER's own
-//! developer app and could never be one Yapper ships — a shared id would bill
+//! developer app and could never be one Windbag ships — a shared id would bill
 //! every user's posts to one account. Errors here therefore separate "out of
 //! credit" from "bad credentials": the first is not something reconnecting fixes,
 //! and not something retrying fixes either.
@@ -52,6 +52,7 @@ impl Platform for X {
                 max_media: 4,
                 supports_alt_text: true,
                 requires_title: false,
+                requires_media: false,
             },
             connect_fields: Vec::new(),
             app_fields: vec![FieldSpec::text(

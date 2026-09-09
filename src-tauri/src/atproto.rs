@@ -44,7 +44,7 @@ use crate::dpop;
 use crate::error::{AppError, Result, from_status};
 use crate::http;
 
-/// Where Yapper's own client metadata is published. Overridable per install
+/// Where Windbag's own client metadata is published. Overridable per install
 /// (Settings → Platform apps) so a fork, or anyone self-hosting, can point at
 /// their own document without rebuilding.
 pub const DEFAULT_CLIENT_ID: &str = "https://entro314-labs.github.io/yapper/client-metadata.json";
@@ -194,7 +194,7 @@ fn fetch_did_document(did: &str) -> Result<DidDocument> {
         format!("https://plc.directory/{did}")
     } else {
         return Err(AppError::InvalidInput(format!(
-            "`{did}` is not a DID method Yapper can resolve (did:plc and did:web only)."
+            "`{did}` is not a DID method Windbag can resolve (did:plc and did:web only)."
         )));
     };
 
@@ -307,7 +307,7 @@ pub fn redirect_scheme(client_id: &str) -> Result<String> {
 pub fn preflight_client_metadata(client_id: &str) -> Result<()> {
     let (status, body) = http::read_body(http::client().get(client_id).send().map_err(|e| {
         AppError::InvalidInput(format!(
-            "Yapper's client metadata is not reachable at {client_id} ({e}). \
+            "Windbag's client metadata is not reachable at {client_id} ({e}). \
              Bluesky's OAuth needs that file published on the web before sign-in can start; \
              connect with an app password instead, or host the file and set its URL in \
              Settings → Platform apps."
@@ -315,7 +315,7 @@ pub fn preflight_client_metadata(client_id: &str) -> Result<()> {
     })?);
     if !(200..300).contains(&status) {
         return Err(AppError::InvalidInput(format!(
-            "Yapper's client metadata at {client_id} answered {status}. It must be publicly \
+            "Windbag's client metadata at {client_id} answered {status}. It must be publicly \
              readable before Bluesky's OAuth can be used."
         )));
     }
@@ -501,7 +501,7 @@ fn push_authorization_request(
 fn par_error(status: u16, body: &str, client_id: &str) -> AppError {
     if body.contains("invalid_client_metadata") || body.contains("invalid_client") {
         return AppError::InvalidInput(format!(
-            "Bluesky rejected Yapper's client metadata at {client_id}. It must be publicly \
+            "Bluesky rejected Windbag's client metadata at {client_id}. It must be publicly \
              readable, declare its own URL as `client_id`, and list \
              `{}` among its redirect_uris. Details: {}",
             redirect_uri(client_id).unwrap_or_default(),
@@ -642,7 +642,7 @@ pub fn read_callback(url: &str, expected_state: &str, expected_issuer: &str) -> 
     }
     if param("state").as_deref() != Some(expected_state) {
         return Err(AppError::Unauthorized(
-            "The sign-in callback did not match the request Yapper started. Nothing was \
+            "The sign-in callback did not match the request Windbag started. Nothing was \
              connected; try again."
                 .into(),
         ));
@@ -745,10 +745,10 @@ mod tests {
     fn an_unreachable_client_document_names_the_url_and_the_way_out() {
         // `.invalid` is reserved and never resolves (RFC 2606), so this exercises
         // the preflight's unreachable branch without depending on the network.
-        let err = preflight_client_metadata("https://yapper.invalid/client-metadata.json")
+        let err = preflight_client_metadata("https://windbag.invalid/client-metadata.json")
             .expect_err("unreachable");
         let message = err.to_string();
-        assert!(message.contains("yapper.invalid"), "{message}");
+        assert!(message.contains("windbag.invalid"), "{message}");
         assert!(
             message.contains("app password"),
             "the user needs the way forward, not just the failure: {message}"

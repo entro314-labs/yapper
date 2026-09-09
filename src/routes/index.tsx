@@ -1,18 +1,30 @@
-import { IconPencilPlus, IconStack2 } from '@tabler/icons-react'
+import { IconStack2 } from '@tabler/icons-react'
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { motion } from 'motion/react'
 import * as React from 'react'
 
+import { MessageSquarePlusIcon } from '@/components/icons/message-square-plus'
 import { PostCard } from '@/components/queue/post-card'
 import { EmptyState } from '@/components/shell/empty-state'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { useAnimatedIcon } from '@/lib/animated-icon'
 import { listVariants, rowVariants } from '@/lib/motion'
 import { useAccounts, usePosts } from '@/lib/query'
 import type { PostDetail, PostStatus } from '@/lib/tauri/types'
 import { repeatKeys } from '@/lib/utils'
 
 export const Route = createFileRoute('/')({ component: QueueScreen })
+
+function WritePostButton() {
+  const [iconRef, iconHover] = useAnimatedIcon()
+  return (
+    <Button render={<Link to="/compose" />} {...iconHover}>
+      <MessageSquarePlusIcon ref={iconRef} data-icon="inline-start" />
+      Write a post
+    </Button>
+  )
+}
 
 /**
  * The queue, in three bands.
@@ -25,7 +37,7 @@ const BANDS: Array<{ id: string; title: string; hint: string; statuses: PostStat
   {
     id: 'attention',
     title: 'Needs you',
-    hint: 'Failed, partly sent, or missed while Yapper was closed.',
+    hint: 'Failed, partly sent, or missed while Windbag was closed.',
     statuses: ['failed', 'partial', 'missed'],
   },
   {
@@ -84,10 +96,7 @@ function QueueScreen() {
           accounts.data && accounts.data.length === 0 ? (
             <Button render={<Link to="/accounts" />}>Connect an account</Button>
           ) : (
-            <Button render={<Link to="/compose" />}>
-              <IconPencilPlus data-icon="inline-start" />
-              Write a post
-            </Button>
+            <WritePostButton />
           )
         }
       />

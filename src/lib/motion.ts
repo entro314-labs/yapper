@@ -5,8 +5,8 @@ import type { Variants } from 'motion/react'
  * Route transitions. Short and vertical: the shell never moves, so the only thing that should read
  * as changing is the content column.
  *
- * `prefers-reduced-motion` is honoured globally in `index.css`, which flattens every duration —
- * these variants do not need to check it themselves.
+ * `prefers-reduced-motion` is honoured by the `MotionConfig` at the root, which drops the movement
+ * and keeps the fade — these variants do not need to check it themselves.
  */
 export const pageVariants: Variants = {
   initial: { opacity: 0, y: 6 },

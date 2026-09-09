@@ -1,18 +1,17 @@
-import {
-  IconCalendarClock,
-  IconChartBar,
-  IconLayoutSidebarLeftCollapse,
-  IconLayoutSidebarLeftExpand,
-  IconNotebook,
-  IconPencilPlus,
-  IconSettings,
-  IconStack2,
-  IconUsers,
-} from '@tabler/icons-react'
 import { Link, useRouterState } from '@tanstack/react-router'
 import * as React from 'react'
 
+import { BookTextIcon } from '@/components/icons/book-text'
+import { CalendarDaysIcon } from '@/components/icons/calendar-days'
+import { ChartColumnIncreasingIcon } from '@/components/icons/chart-column-increasing'
+import { LayersIcon } from '@/components/icons/layers'
+import { PanelLeftCloseIcon } from '@/components/icons/panel-left-close'
+import { PanelLeftOpenIcon } from '@/components/icons/panel-left-open'
+import { SettingsIcon } from '@/components/icons/settings'
+import { SquarePenIcon } from '@/components/icons/square-pen'
+import { UsersIcon } from '@/components/icons/users'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { useAnimatedIcon } from '@/lib/animated-icon'
 import {
   APP_NAME,
   SIDEBAR_MAX_W,
@@ -31,16 +30,19 @@ interface NavItem {
   icon: React.ElementType
 }
 
+// Animated glyphs: hovering a row plays its icon (see NavLink), which is the
+// one place a little motion earns its keep — it tells you the row is live
+// before you click it.
 const NAV: NavItem[] = [
-  { to: '/', label: 'Queue', icon: IconStack2 },
-  { to: '/compose', label: 'Compose', icon: IconPencilPlus },
-  { to: '/calendar', label: 'Calendar', icon: IconCalendarClock },
-  { to: '/notes', label: 'Notes', icon: IconNotebook },
-  { to: '/stats', label: 'Stats', icon: IconChartBar },
-  { to: '/accounts', label: 'Accounts', icon: IconUsers },
+  { to: '/', label: 'Queue', icon: LayersIcon },
+  { to: '/compose', label: 'Compose', icon: SquarePenIcon },
+  { to: '/calendar', label: 'Calendar', icon: CalendarDaysIcon },
+  { to: '/notes', label: 'Notes', icon: BookTextIcon },
+  { to: '/stats', label: 'Stats', icon: ChartColumnIncreasingIcon },
+  { to: '/accounts', label: 'Accounts', icon: UsersIcon },
 ]
 
-const FOOTER: NavItem[] = [{ to: '/settings', label: 'Settings', icon: IconSettings }]
+const FOOTER: NavItem[] = [{ to: '/settings', label: 'Settings', icon: SettingsIcon }]
 
 /**
  * The navigation column — and, with the system frame gone, the window's leading chrome. It runs the
@@ -153,11 +155,13 @@ function NavLink({ item, rail = false }: { item: NavItem; rail?: boolean }) {
   // `/` would prefix-match everything, so the root is compared exactly.
   const active = item.to === '/' ? pathname === '/' : pathname.startsWith(item.to)
   const Icon = item.icon
+  const [iconRef, iconHover] = useAnimatedIcon()
 
   const link = (
     <Link
       to={item.to}
       aria-current={active ? 'page' : undefined}
+      {...iconHover}
       className={cn(
         'group relative flex items-center rounded-md text-sm transition-colors duration-[var(--motion-micro)]',
         rail ? 'size-9 justify-center' : 'h-8 gap-2.5 px-2.5',
@@ -175,7 +179,7 @@ function NavLink({ item, rail = false }: { item: NavItem; rail?: boolean }) {
           active ? 'opacity-100' : 'opacity-0',
         )}
       />
-      <Icon className="size-4 shrink-0" />
+      <Icon ref={iconRef} size={16} className="shrink-0" />
       {rail ? null : <span className="truncate">{item.label}</span>}
     </Link>
   )
@@ -191,7 +195,8 @@ function NavLink({ item, rail = false }: { item: NavItem; rail?: boolean }) {
 
 function LayoutButton() {
   const { sidebarMode, setSidebarMode } = usePrefs()
-  const Icon = sidebarMode === 'full' ? IconLayoutSidebarLeftCollapse : IconLayoutSidebarLeftExpand
+  const Icon = sidebarMode === 'full' ? PanelLeftCloseIcon : PanelLeftOpenIcon
+  const [iconRef, iconHover] = useAnimatedIcon()
   return (
     <button
       type="button"
@@ -199,9 +204,10 @@ function LayoutButton() {
       onClick={() => {
         setSidebarMode(sidebarMode === 'full' ? 'rail' : 'full')
       }}
+      {...iconHover}
       className="ml-auto mr-2 grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
     >
-      <Icon className="size-4" />
+      <Icon ref={iconRef} size={16} />
     </button>
   )
 }

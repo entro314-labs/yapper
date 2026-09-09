@@ -132,7 +132,7 @@ export function PostCard({ post, accounts }: { post: PostDetail; accounts: Map<n
       {post.status === 'missed' ? (
         <p className="mt-2.5 flex items-start gap-1.5 rounded-md bg-warning/10 px-2 py-1.5 text-xs text-warning-foreground dark:text-warning">
           <IconAlertTriangle className="mt-px size-3.5 shrink-0" />
-          Its time passed while Yapper was not running. Reschedule it, or post it now.
+          Its time passed while Windbag was not running. Reschedule it, or post it now.
         </p>
       ) : null}
 

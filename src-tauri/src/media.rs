@@ -1,4 +1,4 @@
-//! Attachments. Yapper never copies a picked file — the store keeps the PATH and
+//! Attachments. Windbag never copies a picked file — the store keeps the PATH and
 //! the bytes are read at publish time. That keeps the data directory small and
 //! means editing the image on disk edits what goes out, but it also means a file
 //! moved between scheduling and publishing is a real failure the user must see,

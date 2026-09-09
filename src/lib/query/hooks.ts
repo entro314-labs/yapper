@@ -21,6 +21,7 @@ import type {
   StatsFilter,
   Suggestion,
   TargetCheck,
+  WebHostView,
 } from '@/lib/tauri/types'
 
 import { queryKeys } from './keys'
@@ -94,6 +95,13 @@ export function useAppCredentials(platform: PlatformId, instance?: string | null
   })
 }
 
+export function useWebHost() {
+  return useQuery({
+    queryKey: queryKeys.platforms.webHost(),
+    queryFn: async () => invokeCommand<WebHostView | null>(IPC_COMMANDS.getWebHost),
+  })
+}
+
 /**
  * The composer's live verdict per destination. Runs the SAME validation the scheduler will run, so
  * a counter that says a post fits is a promise the backend keeps.
@@ -129,8 +137,8 @@ export function useNotes() {
 }
 
 /**
- * The stats view. Reads nothing remote — every figure is computed from Yapper's own records — so it
- * is cheap enough to recompute on every filter change.
+ * The stats view. Reads nothing remote — every figure is computed from Windbag's own records — so
+ * it is cheap enough to recompute on every filter change.
  */
 export function useStats(filter: StatsFilter) {
   return useQuery({
@@ -177,7 +185,7 @@ function useInvalidating<TArgs, TResult>(
 }
 
 export function useConnectAccount() {
-  // Resolves as soon as the flow STARTS; the outcome arrives on `yapper://auth`,
+  // Resolves as soon as the flow STARTS; the outcome arrives on `windbag://auth`,
   // because an OAuth handoff outlives any command that could return it.
   return useInvalidating<{ platform: PlatformId; fields: Record<string, string> }, Nothing>(
     IPC_COMMANDS.connectAccount,
@@ -211,6 +219,26 @@ export function useSaveAppCredentials() {
     clientSecret: input.clientSecret ?? null,
     extra: input.extra ?? {},
   }))
+}
+
+/**
+ * Saving invalidates the whole platforms root, not just the web host: the three Meta adapters
+ * report their redirect URI from this value, so `list_platforms` is stale the moment it changes.
+ */
+export function useSaveWebHost() {
+  return useInvalidating<{ baseUrl: string; uploadToken?: string | null }, WebHostView>(
+    IPC_COMMANDS.saveWebHost,
+    [queryKeys.platforms.root],
+    (input) => ({ baseUrl: input.baseUrl, uploadToken: input.uploadToken ?? null }),
+  )
+}
+
+export function useForgetWebHost() {
+  return useInvalidating<Record<string, never>, Nothing>(
+    IPC_COMMANDS.forgetWebHost,
+    [queryKeys.platforms.root],
+    () => ({}),
+  )
 }
 
 export function useForgetAppCredentials() {

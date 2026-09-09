@@ -1,0 +1,103 @@
+export const metadata = {
+  title: 'Privacy Policy',
+  description: 'What Windbag stores, where it stores it, and what this site touches.',
+  alternates: { canonical: '/legal/privacy' },
+  openGraph: { url: '/legal/privacy' },
+}
+
+# Privacy Policy
+
+**Last updated: 9 September 2026**
+
+Windbag is a desktop application. It has no user accounts, no analytics, no telemetry, and no
+server that holds your data. Almost everything in this policy is a description of your own
+computer.
+
+There are exactly two exceptions, both required by Meta's APIs, and both are described in full
+below.
+
+## What stays on your machine
+
+Everything you create in Windbag is written to a SQLite database in your operating system's
+application-data directory:
+
+- Posts, drafts, scheduled times and per-destination options
+- Notes
+- The record of what was published, what failed and why
+- References to attachments — **file paths, not copies.** The bytes are read from their original
+  location at publish time.
+
+Your access tokens and any developer-app credentials you enter are **not** in that database. They
+are stored in your operating system's credential store — Keychain on macOS, Credential Manager on
+Windows, Secret Service on Linux.
+
+None of this is transmitted anywhere except to the social platform you are posting to.
+
+## What the platforms receive
+
+When you publish, Windbag sends the post directly from your machine to that platform's API. The
+content, the attachments and your access token go to that platform and to nobody else. Each
+platform's own privacy policy governs what it does next.
+
+Windbag also reads back a small amount of public engagement data (likes, reposts, replies) where a
+platform provides it without a paid tier, to populate the statistics screen. That data is stored
+locally alongside the post.
+
+## The two things this site touches
+
+This website is the "web deployment" referenced in the app's settings. It exists because Meta's
+APIs impose two requirements a desktop application cannot satisfy on its own.
+
+### 1. The sign-in redirect
+
+Threads, Instagram and Facebook refuse to redirect a completed sign-in to a local address. They
+require an HTTPS URL. So this site provides one at `/oauth/meta`.
+
+When you finish signing in at Meta, your browser is sent here with an authorization code in the
+URL, and this site immediately redirects your browser back to the Windbag application running on
+your own machine. **The code is not stored, not logged and not read by this site** — it is passed
+through in a redirect and is only ever exchanged for a token by the app on your computer.
+
+### 2. Attachment hosting
+
+The Threads and Instagram publishing APIs do not accept an uploaded file. They accept a URL, which
+Meta's servers then fetch themselves. There is no alternative endpoint.
+
+So when you publish a post with an attachment to Threads or Instagram, Windbag first uploads that
+attachment from your machine to object storage behind this site, and passes the resulting URL to
+Meta.
+
+You should understand what this means:
+
+- **While it exists, that file is publicly readable by anyone who has the URL.** The URL contains a
+  long random key and is not listed or linked anywhere, but it is not access-controlled — it cannot
+  be, because Meta's servers must be able to fetch it anonymously.
+- The file is stored only to be fetched. It is automatically deleted by a storage lifecycle rule
+  shortly after upload.
+- No filename, caption, account identifier or other metadata is stored with it.
+
+This applies **only** to Threads and Instagram posts with attachments. Posting to a Facebook Page
+uploads the file directly to Meta and never touches this site. Neither does any other platform, and
+neither does a text-only post to any platform.
+
+If you never connect a Meta account, no part of this site is ever contacted by the app.
+
+## What this site does not do
+
+It sets no cookies. It runs no analytics and no third-party scripts. It has no login. It collects
+no personal information, and there is no account to which any stored file could be linked.
+
+Standard web server request logs may briefly record IP addresses, as they do for any website.
+
+## Children
+
+Windbag is not directed at children under 13 and collects no information from anyone.
+
+## Changes
+
+Material changes to this policy will be published on this page with a new date above.
+
+## Contact
+
+Questions about this policy: open an issue at
+[github.com/entro314-labs/yapper](https://github.com/entro314-labs/yapper).

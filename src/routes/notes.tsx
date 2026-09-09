@@ -1,12 +1,14 @@
-import { IconNotebook, IconPin, IconPinFilled, IconSparkles, IconTrash } from '@tabler/icons-react'
+import { IconNotebook, IconPin, IconPinFilled, IconTrash } from '@tabler/icons-react'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import * as React from 'react'
 import { toast } from 'sonner'
 
+import { SparklesIcon } from '@/components/icons/sparkles'
 import { EmptyState } from '@/components/shell/empty-state'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
+import { useAnimatedIcon } from '@/lib/animated-icon'
 import { useDeleteNote, useNotes, useSaveNote, useSettings } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
 import type { Note } from '@/lib/tauri/types'
@@ -19,7 +21,7 @@ export const Route = createFileRoute('/notes')({ component: NotesScreen })
  *
  * Two jobs, and the second is why this is not just a text file. A note is the assistant's CONTEXT —
  * "Draft from this" hands it straight to the composer's suggest panel — and it is the one place in
- * Yapper where writing something carries no obligation to publish it.
+ * Windbag where writing something carries no obligation to publish it.
  *
  * A list beside an editor rather than a modal per note: notes get re-read while writing the next
  * one, and a dialog would make that a round trip each time.
@@ -30,6 +32,7 @@ function NotesScreen() {
   const deleteNote = useDeleteNote()
   const navigate = useNavigate()
   const settings = useSettings()
+  const [draftRef, draftHover] = useAnimatedIcon()
 
   const [selected, setSelected] = React.useState<number | null>(null)
   const [title, setTitle] = React.useState('')
@@ -201,8 +204,9 @@ function NotesScreen() {
                         search: aiOn ? { noteId: selected, suggest: true } : { noteId: selected },
                       })
                     }}
+                    {...draftHover}
                   >
-                    {aiOn ? <IconSparkles data-icon="inline-start" /> : null}
+                    {aiOn ? <SparklesIcon ref={draftRef} data-icon="inline-start" /> : null}
                     {aiOn ? 'Draft from this' : 'Turn into a post'}
                   </Button>
                 ) : null}

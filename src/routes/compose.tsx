@@ -1,14 +1,18 @@
-import { IconPaperclip, IconSend, IconSparkles, IconTrash, IconUsers } from '@tabler/icons-react'
+import { IconTrash, IconUsers } from '@tabler/icons-react'
 import { Link, createFileRoute, useNavigate } from '@tanstack/react-router'
 import { open } from '@tauri-apps/plugin-dialog'
 import * as React from 'react'
 import { toast } from 'sonner'
 
 import { SuggestPanel } from '@/components/compose/suggest-panel'
+import { AttachFileIcon } from '@/components/icons/attach-file'
+import { SendIcon } from '@/components/icons/send'
+import { SparklesIcon } from '@/components/icons/sparkles'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
+import { useAnimatedIcon } from '@/lib/animated-icon'
 import { brandOf } from '@/lib/platform-brand'
 import {
   useAccounts,
@@ -60,6 +64,8 @@ function ComposeScreen() {
   const resolveMedia = useResolveMedia()
   const notes = useNotes()
   const settings = useSettings()
+  const [assistantRef, assistantHover] = useAnimatedIcon()
+  const [sendRef, sendHover] = useAnimatedIcon()
 
   const editing = React.useMemo(
     () => (id ? posts.data?.find((post) => post.id === id) : undefined),
@@ -251,8 +257,9 @@ function ComposeScreen() {
           onClick={() => {
             setSuggesting(true)
           }}
+          {...assistantHover}
         >
-          <IconSparkles data-icon="inline-start" />
+          <SparklesIcon ref={assistantRef} data-icon="inline-start" />
           Draft with the assistant
         </Button>
       ) : null}
@@ -400,8 +407,9 @@ function ComposeScreen() {
             onClick={() => {
               void save(true)
             }}
+            {...sendHover}
           >
-            <IconSend data-icon="inline-start" />
+            <SendIcon ref={sendRef} data-icon="inline-start" />
             Post now
           </Button>
         </div>
@@ -421,11 +429,12 @@ function AttachmentList({
   onRemove: (path: string) => void
   onAlt: (path: string, value: string) => void
 }) {
+  const [attachRef, attachHover] = useAnimatedIcon()
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2">
-        <Button size="sm" variant="outline" onClick={onAdd}>
-          <IconPaperclip data-icon="inline-start" />
+        <Button size="sm" variant="outline" onClick={onAdd} {...attachHover}>
+          <AttachFileIcon ref={attachRef} data-icon="inline-start" />
           Attach
         </Button>
         {media.length > 0 ? (

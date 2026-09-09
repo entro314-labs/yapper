@@ -1,11 +1,11 @@
-//! `yapper-mcp` — the agent door as a standalone stdio MCP server.
+//! `windbag-mcp` — the agent door as a standalone stdio MCP server.
 //!
-//! Opens the same SQLite store the app uses, so it works whether or not Yapper
+//! Opens the same SQLite store the app uses, so it works whether or not Windbag
 //! is running. WAL makes the concurrent access safe; what it cannot do is
 //! publish, because publishing is the running app's scheduler thread. Tools that
 //! queue something say so themselves.
 //!
-//!   claude mcp add yapper -- /path/to/yapper-mcp
+//!   claude mcp add windbag -- /path/to/windbag-mcp
 //!
 //! stdout carries protocol frames only — anything else on it corrupts the
 //! stream — so every diagnostic goes to stderr.
@@ -13,13 +13,13 @@
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 
-use yapper_lib::{db, mcp};
+use windbag_lib::{db, mcp};
 
 fn main() {
     let path = match db::data_dir() {
-        Ok(dir) => dir.join("yapper.sqlite3"),
+        Ok(dir) => dir.join("windbag.sqlite3"),
         Err(err) => {
-            eprintln!("yapper-mcp: no data directory: {err}");
+            eprintln!("windbag-mcp: no data directory: {err}");
             std::process::exit(1);
         }
     };
@@ -27,7 +27,8 @@ fn main() {
         Ok(database) => Arc::new(database),
         Err(err) => {
             eprintln!(
-                "yapper-mcp: cannot open the store at {} ({err}) — run the Yapper app once first.",
+                "windbag-mcp: cannot open the store at {} ({err}) — run the Windbag app \
+                 once first.",
                 path.display()
             );
             std::process::exit(1);

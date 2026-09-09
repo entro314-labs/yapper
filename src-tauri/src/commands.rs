@@ -21,7 +21,7 @@ use crate::scheduler::{
 use crate::stats::{self, RefreshReport, Stats, StatsFilter};
 use crate::{media, secrets};
 
-pub const EVENT_AUTH: &str = "yapper://auth";
+pub const EVENT_AUTH: &str = "windbag://auth";
 
 pub struct AppState {
     pub db: Arc<Db>,
@@ -78,7 +78,7 @@ pub fn connect_account(
 
     let database = Arc::clone(&state.db);
     let spawned = std::thread::Builder::new()
-        .name("yapper-connect".into())
+        .name("windbag-connect".into())
         .spawn(move || {
             let outcome = run_connect(&database, platform, fields);
             let payload = match outcome {
@@ -507,7 +507,7 @@ pub fn resolve_media(paths: Vec<String>) -> Result<Vec<ResolvedMedia>> {
 
 // ─── Notes ──────────────────────────────────────────────────────────────────
 
-pub const EVENT_NOTES_CHANGED: &str = "yapper://notes-changed";
+pub const EVENT_NOTES_CHANGED: &str = "windbag://notes-changed";
 
 #[tauri::command]
 pub fn list_notes(state: State<'_, AppState>) -> Result<Vec<Note>> {
@@ -631,7 +631,7 @@ pub fn get_stats(state: State<'_, AppState>, filter: StatsFilter) -> Result<Stat
     stats::compute(&state.db, &filter)
 }
 
-/// Fetches engagement for every published destination Yapper can read. Manual
+/// Fetches engagement for every published destination Windbag can read. Manual
 /// on purpose: a background poller against five APIs spends a rate-limit budget
 /// on numbers nobody is looking at.
 #[tauri::command]
@@ -716,7 +716,7 @@ pub fn update_settings(
     settings: Settings,
 ) -> Result<Settings> {
     // Autostart goes FIRST and its failure fails the whole save. The scheduler
-    // only runs while Yapper runs, so this switch is the difference between a
+    // only runs while Windbag runs, so this switch is the difference between a
     // scheduler and a wish — recording `true` for a registration that did not
     // happen would be the app lying about the one thing it promises.
     apply_autostart(&app, settings.launch_at_login)?;
@@ -775,4 +775,91 @@ pub fn apply_autostart(app: &AppHandle, enabled: bool) -> Result<()> {
 #[tauri::command]
 pub fn oauth_redirect_uri() -> &'static str {
     crate::oauth::REDIRECT_URI
+}
+
+// ─── The web deployment ─────────────────────────────────────────────────────
+
+/// What Settings shows for the companion deployment. The upload token is
+/// reported as present or absent and never sent back to the renderer, the same
+/// way a client secret is not.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebHostView {
+    pub base_url: String,
+    pub has_token: bool,
+    /// The HTTPS redirect this deployment provides, derived rather than typed.
+    /// It is the string that must be registered on the Meta app, so it is shown
+    /// to be copied.
+    pub redirect_uri: String,
+}
+
+#[tauri::command]
+pub fn get_web_host() -> Result<Option<WebHostView>> {
+    Ok(secrets::load_web_host()?.map(|host| WebHostView {
+        redirect_uri: host.redirect_uri(),
+        has_token: !host.upload_token.is_empty(),
+        base_url: host.base_url,
+    }))
+}
+
+#[tauri::command]
+pub fn save_web_host(base_url: String, upload_token: Option<String>) -> Result<WebHostView> {
+    let base_url = base_url.trim().trim_end_matches('/').to_string();
+    if base_url.is_empty() {
+        return Err(AppError::InvalidInput(
+            "The web deployment needs its base URL.".into(),
+        ));
+    }
+    // Meta will not redirect to, or fetch media over, plain HTTP. Catching it
+    // here beats catching it as an opaque authorize-step rejection later.
+    if !base_url.starts_with("https://") {
+        return Err(AppError::InvalidInput(
+            "The web deployment must be served over HTTPS — Meta refuses a plain-HTTP              redirect and will not fetch media from one."
+                .into(),
+        ));
+    }
+
+    // An omitted token keeps the stored one, so re-saving the URL alone does not
+    // silently wipe the credential the upload route checks.
+    let existing = secrets::load_web_host()?;
+    let upload_token = upload_token
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| existing.map(|host| host.upload_token))
+        .unwrap_or_default();
+
+    let host = crate::webhost::WebHost {
+        base_url,
+        upload_token,
+    };
+    secrets::store_web_host(&host)?;
+    Ok(WebHostView {
+        redirect_uri: host.redirect_uri(),
+        has_token: !host.upload_token.is_empty(),
+        base_url: host.base_url,
+    })
+}
+
+#[tauri::command]
+pub fn forget_web_host() -> Result<()> {
+    secrets::forget_web_host()
+}
+
+// ─── Meta ads, through Meta's own MCP server ────────────────────────────────
+
+/// Meta's current ads tool catalogue, fetched live rather than mirrored — see
+/// [`crate::metaads`] for why Windbag forwards instead of reimplementing.
+#[tauri::command]
+pub fn meta_ads_tools(state: State<'_, AppState>) -> Result<serde_json::Value> {
+    crate::metaads::AdsClient::from_store(&state.db)?.list_tools()
+}
+
+#[tauri::command]
+pub fn meta_ads_call(
+    state: State<'_, AppState>,
+    name: String,
+    arguments: Option<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let arguments = arguments.unwrap_or_else(|| serde_json::json!({}));
+    crate::metaads::AdsClient::from_store(&state.db)?.call_tool(&name, &arguments)
 }

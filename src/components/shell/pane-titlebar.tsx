@@ -1,9 +1,10 @@
-import { IconPencilPlus } from '@tabler/icons-react'
 import { Link, useRouterState } from '@tanstack/react-router'
 import * as React from 'react'
 
+import { MessageSquarePlusIcon } from '@/components/icons/message-square-plus'
 import { WindowControls } from '@/components/shell/window-controls'
 import { Button } from '@/components/ui/button'
+import { useAnimatedIcon } from '@/lib/animated-icon'
 import { TITLEBAR_H } from '@/lib/chrome'
 
 const TITLES: Record<string, string> = {
@@ -23,7 +24,8 @@ const TITLES: Record<string, string> = {
  */
 export function PaneTitlebar() {
   const pathname = useRouterState({ select: (state) => state.location.pathname })
-  const title = React.useMemo(() => TITLES[pathname] ?? 'Yapper', [pathname])
+  const title = React.useMemo(() => TITLES[pathname] ?? 'Windbag', [pathname])
+  const [newPostRef, newPostHover] = useAnimatedIcon()
 
   return (
     <header
@@ -34,8 +36,8 @@ export function PaneTitlebar() {
       <h1 className="font-display truncate text-sm font-semibold tracking-tight">{title}</h1>
       <div className="ml-auto flex items-center gap-1.5">
         {pathname === '/compose' ? null : (
-          <Button size="sm" render={<Link to="/compose" />}>
-            <IconPencilPlus data-icon="inline-start" />
+          <Button size="sm" render={<Link to="/compose" />} {...newPostHover}>
+            <MessageSquarePlusIcon ref={newPostRef} data-icon="inline-start" />
             New post
           </Button>
         )}

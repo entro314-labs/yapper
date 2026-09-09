@@ -36,18 +36,26 @@ export const IPC_COMMANDS = {
   getSettings: 'get_settings',
   updateSettings: 'update_settings',
   oauthRedirectUri: 'oauth_redirect_uri',
+
+  getWebHost: 'get_web_host',
+  saveWebHost: 'save_web_host',
+  forgetWebHost: 'forget_web_host',
+
+  metaAdsTools: 'meta_ads_tools',
+  metaAdsCall: 'meta_ads_call',
+
   setWindowMaterial: 'set_window_material',
 } as const
 
 export const IPC_EVENTS = {
   /** A post or one of its destinations changed. Payload: the post id, or nothing. */
-  queueChanged: 'yapper://queue-changed',
-  accountsChanged: 'yapper://accounts-changed',
+  queueChanged: 'windbag://queue-changed',
+  accountsChanged: 'windbag://accounts-changed',
   /** A destination is being sent right now. Payload: the target id. */
-  publishing: 'yapper://publishing',
+  publishing: 'windbag://publishing',
   /** A connect flow finished, either way. Payload: `AuthOutcome`. */
-  auth: 'yapper://auth',
-  notesChanged: 'yapper://notes-changed',
+  auth: 'windbag://auth',
+  notesChanged: 'windbag://notes-changed',
 } as const
 
 type ValueOf<T> = T[keyof T]

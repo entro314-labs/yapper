@@ -7,10 +7,10 @@ import { cn } from '@/lib/utils'
 /**
  * Minimise / maximise / close on the platforms whose system frame we removed.
  *
- * They carry the desktop's own three colours rather than Yapper's palette: close is red everywhere,
- * and a user whose OS accent is cyan still expects that. macOS renders nothing here — Tauri keeps
- * the real traffic lights, positioned from `tauri.conf.json` to sit inside the sidebar's header
- * band.
+ * They carry the desktop's own three colours rather than Windbag's palette: close is red
+ * everywhere, and a user whose OS accent is cyan still expects that. macOS renders nothing here —
+ * Tauri keeps the real traffic lights, positioned from `tauri.conf.json` to sit inside the
+ * sidebar's header band.
  */
 export function WindowControls({ className }: { className?: string }) {
   if (IS_MACOS) return null
