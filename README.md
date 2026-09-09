@@ -21,8 +21,14 @@ in a local SQLite store and every credential in your OS keychain.
   the assistant reads when it drafts for you.
 - **An assistant, if you already have one.** Apple's on-device model, or the
   Claude Code or Codex CLI on your PATH. Off by default; Windbag ships no API key.
-- **Stats.** What published, what failed and why, and when you actually post —
-  every bar is a drilldown into the posts behind it.
+- **Reporting.** What published, what failed and why, when you actually post,
+  and what each post earned — delivery drawn over time, a weekday × hour punch
+  card, engagement per platform and a leaderboard of the posts that did best.
+  Every bar and every cell is a drilldown into the posts behind it. Engagement
+  is read from each platform's own official API: Bluesky, Mastodon, Threads,
+  Instagram, Facebook and X. Reddit and LinkedIn are named as gaps rather than
+  drawn as zeroes, because a zero is a claim and "we cannot see it" is the
+  truth.
 - **An agent door, both ways.** An MCP server so Claude Code or Codex can read
   your queue and schedule posts, where you approve each tool call — and a
   passthrough to Meta's own hosted ads MCP server, so the same session can read
@@ -208,10 +214,26 @@ Two halves, deliberately kept apart:
   current: what published, what failed and under which error code, which hours
   you actually post at, per platform and per account. Filter by range, platform
   or account; click any bar to see the posts behind it.
-- **Engagement** comes from the platforms, and only Bluesky and Mastodon give it
-  away on endpoints Windbag already has credentials for. X's metrics need a paid
-  tier and LinkedIn's need approved read scopes, so those are named as gaps
-  rather than drawn as zeroes. Fetched when you press Refresh — nothing polls.
+- **Engagement** is read from each platform's own official API when you press
+  Refresh — nothing polls. Bluesky and Mastodon serve public counts, Threads and
+  Instagram serve per-media insights, a Page post carries its own summary counts,
+  and X returns `public_metrics` in a bulk lookup. Reddit's score and LinkedIn's
+  analytics need scopes Windbag does not request, so those are named as gaps
+  rather than drawn as zeroes.
+
+  Two things gate the rest. **Threads and Instagram insights are opt-in** — set
+  *Insights access* to `yes` in **Settings → Platform apps** and reconnect the
+  account, because the extra scope widens the consent screen and a connection
+  made without it does not gain it retroactively. **X reads cost money**: it
+  bills per id in a lookup, so Refresh tells you how many posts it is about to
+  read before it makes the call.
+
+There are no engagement trend lines, on purpose. Windbag keeps one row of counts
+per destination, replaced on each refresh, and refreshes are manual — so a
+history would be a handful of points at whatever moments you happened to press
+the button, which invites being read as a trend when it is not one. Delivery is
+the half that dates every destination exactly, so that is the half drawn over
+time; engagement is drawn as a distribution and always labelled *as of*.
 
 ## Development
 
@@ -242,7 +264,7 @@ src-tauri/src/
   atproto.rs            AT Protocol OAuth: identity, discovery, PAR, tokens
   dpop.rs               proof-of-possession signing for that flow
   ai.rs                 three assistant backends behind one verb
-  stats.rs              delivery figures, and engagement where it is free
+  stats.rs              delivery figures, and engagement off each platform's API
   mcp.rs + bin/mcp.rs   the agent door
   platforms/            one adapter per destination behind the Platform trait
 ```

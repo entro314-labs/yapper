@@ -19,8 +19,8 @@ use tauri::{AppHandle, Emitter};
 
 use crate::db::{self, Db, DueTarget, POST_MISSED, POST_SCHEDULED};
 use crate::error::{AppError, Result};
+use crate::media;
 use crate::platforms::{self, PublishRequest, Published};
-use crate::{media, secrets};
 
 /// How often the worker looks for work. Twenty seconds is well inside the
 /// smallest scheduling granularity the UI offers (one minute) while costing a
@@ -169,15 +169,7 @@ fn pass(app: &AppHandle, database: &Arc<Db>) -> Result<usize> {
 fn publish_one(database: &Arc<Db>, item: &DueTarget) -> Result<Published> {
     let account = &item.account;
     let adapter = platforms::adapter(account.platform);
-    let app_credentials =
-        secrets::load_app_credentials(account.platform, account.instance.as_deref())?;
-
-    let mut secret = secrets::load_account_secret(account.platform, &account.remote_id)?;
-    if let Some(refreshed) = adapter.refresh(account, &secret, app_credentials.as_ref())? {
-        secrets::store_account_secret(account.platform, &account.remote_id, &refreshed)?;
-        database.set_account_token_expiry(account.id, refreshed.expires_at.as_deref())?;
-        secret = refreshed;
-    }
+    let secret = platforms::live_secret(database, account)?;
 
     let stored_media = database.list_media(item.post.id)?;
     let media = stored_media

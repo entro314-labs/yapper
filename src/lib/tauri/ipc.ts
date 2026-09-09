@@ -31,6 +31,7 @@ export const IPC_COMMANDS = {
   suggestPosts: 'suggest_posts',
 
   getStats: 'get_stats',
+  getRefreshCost: 'get_refresh_cost',
   refreshEngagement: 'refresh_engagement',
 
   getSettings: 'get_settings',

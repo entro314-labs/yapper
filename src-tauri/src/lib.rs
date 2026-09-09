@@ -104,6 +104,7 @@ pub fn run() {
             commands::ai_availability,
             commands::suggest_posts,
             commands::get_stats,
+            commands::get_refresh_cost,
             commands::refresh_engagement,
             commands::get_settings,
             commands::update_settings,

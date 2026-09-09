@@ -389,9 +389,36 @@ impl Session {
                 "likes": computed.engagement.likes,
                 "reposts": computed.engagement.reposts,
                 "replies": computed.engagement.replies,
+                "views": computed.engagement.views,
                 "measuredDestinations": computed.engagement.measured,
                 "asOf": computed.engagement.oldest_fetch,
             },
+            "engagementByPlatform": computed.engagement_by_platform.iter().map(|row| json!({
+                "platform": row.platform,
+                "likes": row.likes,
+                "reposts": row.reposts,
+                "replies": row.replies,
+                "views": row.views,
+                "measuredDestinations": row.measured,
+            })).collect::<Vec<_>>(),
+            "topPosts": computed.top_posts.iter().map(|post| json!({
+                "postId": post.post_id,
+                "platform": post.platform,
+                "handle": post.handle,
+                "excerpt": post.excerpt,
+                "publishedAt": post.published_at,
+                "url": post.remote_url,
+                "likes": post.likes,
+                "reposts": post.reposts,
+                "replies": post.replies,
+                "views": post.views,
+                "interactions": post.interactions,
+            })).collect::<Vec<_>>(),
+            // Named so a model does not read a missing platform as a zero.
+            "unreadable": computed.engagement_gaps.iter().map(|(platform, reason)| json!({
+                "platform": platform,
+                "reason": reason,
+            })).collect::<Vec<_>>(),
         }))?)
     }
 }
@@ -487,8 +514,12 @@ fn store_tools() -> Vec<Value> {
         tool(
             "get_stats",
             "Publishing statistics from Windbag's own records: how much published, what \
-             failed and why, which hours the user posts at, plus engagement counts where \
-             the platform provides them free (Bluesky and Mastodon only).",
+             failed and why, which hours the user posts at, the best-performing posts, and \
+             engagement counts per platform as of the last refresh. Engagement is read from \
+             Bluesky, Mastodon, Threads, Instagram, Facebook and X; Reddit and LinkedIn come \
+             back under `unreadable` with a reason rather than as zero. Reads only the local \
+             store — it never calls a platform, so the numbers are as of the user's last \
+             refresh (`engagement.asOf`).",
             json!({
                 "type": "object",
                 "properties": {

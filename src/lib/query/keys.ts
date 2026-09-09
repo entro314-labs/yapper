@@ -38,6 +38,7 @@ export const queryKeys = {
     // Keyed on the whole filter: a narrowed view is a different question, not a
     // client-side slice of the same answer.
     view: (filter: unknown) => [...queryKeys.stats.root, 'view', filter] as const,
+    refreshCost: () => [...queryKeys.stats.root, 'refresh-cost'] as const,
   },
   ai: {
     root: ['ai'] as const,

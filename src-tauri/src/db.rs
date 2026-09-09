@@ -18,7 +18,7 @@ use serde::Serialize;
 use crate::error::{AppError, Result, internal};
 use crate::platforms::PlatformId;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -129,6 +129,10 @@ pub struct Metrics {
     pub reposts: Option<i64>,
     pub replies: Option<i64>,
     pub quotes: Option<i64>,
+    /// Impressions: how many times the post was seen. Threads and Instagram
+    /// call it `views`, X `impression_count`; Bluesky and Mastodon do not
+    /// report it at all, which is why it is optional like the rest.
+    pub views: Option<i64>,
 }
 
 /// A post with everything the renderer draws in one row of the queue.
@@ -823,13 +827,14 @@ impl Db {
 
     pub fn save_metrics(&self, metrics: &Metrics) -> Result<()> {
         self.lock().execute(
-            "INSERT INTO metrics (target_id, fetched_at, likes, reposts, replies, quotes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO metrics (target_id, fetched_at, likes, reposts, replies, quotes, views)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(target_id) DO UPDATE SET
                fetched_at = excluded.fetched_at,
                likes      = excluded.likes,
                reposts    = excluded.reposts,
                replies    = excluded.replies,
+               views      = excluded.views,
                quotes     = excluded.quotes",
             params![
                 metrics.target_id,
@@ -837,7 +842,8 @@ impl Db {
                 metrics.likes,
                 metrics.reposts,
                 metrics.replies,
-                metrics.quotes
+                metrics.quotes,
+                metrics.views
             ],
         )?;
         Ok(())
@@ -846,7 +852,7 @@ impl Db {
     pub fn list_metrics(&self) -> Result<Vec<Metrics>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT target_id, fetched_at, likes, reposts, replies, quotes FROM metrics",
+            "SELECT target_id, fetched_at, likes, reposts, replies, quotes, views FROM metrics",
         )?;
         stmt.query_map([], map_metrics)?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -879,6 +885,7 @@ fn step_sql(version: i64) -> &'static str {
     match version {
         1 => V1_INITIAL,
         2 => V2_NOTES_AND_METRICS,
+        3 => V3_METRIC_VIEWS,
         // Unreachable while `SCHEMA_VERSION` and this match move together, and a
         // no-op rather than a panic if they ever do not: a store one version
         // ahead of the binary (a downgrade) is better left alone than crashed on.
@@ -982,6 +989,13 @@ const V2_NOTES_AND_METRICS: &str = r"
         replies    INTEGER,
         quotes     INTEGER
     );
+";
+
+/// Impressions, once the official insights endpoints were wired up. Additive:
+/// the existing rows keep their counts and report `NULL` views, which the UI
+/// already distinguishes from a zero.
+const V3_METRIC_VIEWS: &str = r"
+    ALTER TABLE metrics ADD COLUMN views INTEGER;
 ";
 
 /// One attachment as the renderer hands it over: a path on disk the user picked,
@@ -1093,6 +1107,7 @@ fn map_metrics(row: &rusqlite::Row<'_>) -> rusqlite::Result<Metrics> {
         reposts: row.get(3)?,
         replies: row.get(4)?,
         quotes: row.get(5)?,
+        views: row.get(6)?,
     })
 }
 
@@ -1183,11 +1198,13 @@ mod tests {
         let db = Db::from_connection(conn).expect("upgrade");
         assert_eq!(
             db.get_meta("schema_version").expect("version"),
-            Some("2".to_string())
+            Some("3".to_string())
         );
         assert_eq!(db.list_posts().expect("posts").len(), 1);
         // The v2 tables now exist and are empty.
         assert!(db.list_notes().expect("notes").is_empty());
+        // And v3's `views` column is selectable, which `list_metrics` would
+        // fail on if the ALTER had not run.
         assert!(db.list_metrics().expect("metrics").is_empty());
     }
 
@@ -1249,6 +1266,7 @@ mod tests {
                 reposts: Some(1),
                 replies: None,
                 quotes: None,
+                views: None,
             })
             .expect("save");
         }

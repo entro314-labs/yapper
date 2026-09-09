@@ -31,7 +31,7 @@ const AUTHORIZE_URL: &str = "https://www.instagram.com/oauth/authorize";
 const TOKEN_URL: &str = "https://api.instagram.com/oauth/access_token";
 const EXCHANGE_URL: &str = "https://graph.instagram.com/access_token";
 const REFRESH_URL: &str = "https://graph.instagram.com/refresh_access_token";
-const API_BASE: &str = "https://graph.instagram.com/v23.0";
+pub(crate) const API_BASE: &str = "https://graph.instagram.com/v23.0";
 const SCOPES: &str = "instagram_business_basic,instagram_business_content_publish";
 const LABEL: &str = "Instagram";
 
@@ -71,6 +71,9 @@ impl Platform for Instagram {
                     "",
                     "Required — Meta has no public-client flow for Instagram.",
                 ),
+                FieldSpec::text("insights_access", "Insights access", "no", "Also request the insights permission, so the stats screen can show what each post earned. Off by default: it widens the consent screen, and a connection made without it must be reconnected to gain it.")
+                    .optional()
+                    .choosing(&["no", "yes"]),
             ],
             setup_url: Some("https://developers.facebook.com/apps"),
             // Not a constant, and deliberately not read from the credential
@@ -95,7 +98,7 @@ impl Platform for Instagram {
             AUTHORIZE_URL,
             &app.client_id,
             &redirect,
-            SCOPES,
+            &scopes_for(app),
             &[],
             false,
         )?;
@@ -162,7 +165,7 @@ impl Platform for Instagram {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
             instance: None,
-            scopes: Some(SCOPES.to_string()),
+            scopes: Some(scopes_for(app)),
             char_limit: None,
             secret: AccountSecret {
                 expires_at: long.expires_at(),
@@ -349,6 +352,20 @@ fn is_too_soon(err: &AppError) -> bool {
     text.contains("24 hours") || text.contains("less than 24")
 }
 
+/// The consent screen this connection asks for. Insights are opt-in, so the
+/// default is exactly what posting needs — see [`crate::stats`] for what the
+/// extra scope unlocks.
+fn scopes_for(app: &AppCredentials) -> String {
+    if app
+        .extra("insights_access")
+        .is_some_and(|value| value.eq_ignore_ascii_case("yes"))
+    {
+        format!("{SCOPES},instagram_business_manage_insights")
+    } else {
+        SCOPES.to_string()
+    }
+}
+
 fn client_secret(app: &AppCredentials) -> Result<&str> {
     app.client_secret
         .as_deref()
@@ -405,5 +422,36 @@ mod tests {
         );
         assert!(is_too_soon(&err));
         assert!(!is_too_soon(&AppError::Unauthorized("revoked".into())));
+    }
+
+    fn app_with(insights: Option<&str>) -> AppCredentials {
+        let mut extra = std::collections::HashMap::new();
+        if let Some(value) = insights {
+            extra.insert("insights_access".to_string(), value.to_string());
+        }
+        AppCredentials {
+            client_id: "id".into(),
+            client_secret: Some("s".into()),
+            extra,
+        }
+    }
+
+    #[test]
+    fn insights_are_off_unless_asked_for() {
+        // Someone who only schedules posts must never see an insights consent
+        // screen.
+        assert!(!scopes_for(&app_with(None)).contains("insights"));
+        assert!(!scopes_for(&app_with(Some("no"))).contains("insights"));
+    }
+
+    #[test]
+    fn insights_add_exactly_one_scope_when_opted_in() {
+        let scopes = scopes_for(&app_with(Some("yes")));
+        assert!(
+            scopes.contains("instagram_business_manage_insights"),
+            "{scopes}"
+        );
+        // The posting scopes survive — insights are additive, not a swap.
+        assert!(scopes.contains(SCOPES), "{scopes}");
     }
 }

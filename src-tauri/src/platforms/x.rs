@@ -36,7 +36,7 @@ pub struct X;
 
 const AUTHORIZE_URL: &str = "https://x.com/i/oauth2/authorize";
 const TOKEN_URL: &str = "https://api.x.com/2/oauth2/token";
-const API_BASE: &str = "https://api.x.com/2";
+pub(crate) const API_BASE: &str = "https://api.x.com/2";
 const SCOPES: &str = "tweet.read tweet.write users.read media.write offline.access";
 /// X caps an APPEND segment at 5 MB.
 const SEGMENT_BYTES: usize = 4 * 1024 * 1024;

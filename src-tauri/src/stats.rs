@@ -7,26 +7,40 @@
 //!     always current, costs nothing: how many posts published, how many failed
 //!     and why, which platform is flaky, what hour of the day you actually post
 //!     at. This is the half that works the moment you have used the app.
-//!   * **Engagement** — likes, reposts, replies, fetched from the platform.
-//!     Only two of the five give it away: Bluesky and Mastodon serve public
-//!     counts on endpoints the app already has credentials for. X's metrics need
-//!     a paid tier and `LinkedIn`'s need approved read scopes, so those are
-//!     reported as unavailable rather than shown as zero.
+//!   * **Engagement** — likes, reposts, replies and impressions, read from each
+//!     platform's own official endpoint. Six of the eight give it away:
+//!     Bluesky's `getPosts` and Mastodon's status endpoint serve public counts;
+//!     Threads and Instagram serve per-media `/insights`; a Facebook Page post
+//!     carries its own summary counts; X returns `public_metrics` in a bulk
+//!     lookup. Reddit and `LinkedIn` stay unavailable rather than shown as zero —
+//!     both need scopes Windbag does not request.
 //!
 //! Nothing here polls. Engagement is fetched when the user asks, because a
-//! background poller against five APIs is a rate-limit budget spent on numbers
-//! nobody is looking at.
+//! background poller against eight APIs is a rate-limit budget spent on numbers
+//! nobody is looking at — and on X it is a bill.
+//!
+//! **Why there are no engagement trend lines.** The `metrics` table keeps one
+//! row per destination, replaced on each refresh (see the V2 note in
+//! [`crate::db`]). With a manual refresh, a history would be a handful of rows
+//! at whatever moments someone happened to press the button — a shape that
+//! invites being read as a trend when it is not one. So the charts here graph
+//! what is genuinely dense: delivery over time, which every published
+//! destination dates exactly, and engagement as a distribution across
+//! platforms, posts and posting hours, always labelled `as of fetched_at`.
 
 use std::collections::HashMap;
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::db::{self, Db, Metrics, PostTarget};
 use crate::error::{AppError, Result, from_status};
 use crate::http;
-use crate::platforms::PlatformId;
+use crate::platforms::{
+    self, PlatformId,
+    meta::{self, facebook, instagram, threads},
+    x,
+};
 use crate::secrets;
 
 /// What a stats view is narrowed to. Every field is optional; an empty filter is
@@ -82,17 +96,59 @@ pub struct Bucket {
     pub post_ids: Vec<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngagementTotals {
     pub likes: i64,
     pub reposts: i64,
     pub replies: i64,
+    /// Impressions, where the platform reports them — Threads, Instagram and X.
+    pub views: i64,
     /// How many destinations these totals are summed from — without it, "0
     /// likes" and "nothing fetched yet" look the same.
     pub measured: i64,
     /// The oldest fetch in the set: the totals are only as fresh as this.
     pub oldest_fetch: Option<String>,
+}
+
+/// One platform's engagement, summed over the destinations actually measured.
+///
+/// Separate from [`Bucket`] on purpose: a bucket counts destinations, this
+/// carries five independent dimensions of which any may be unreported.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngagementRow {
+    pub platform: PlatformId,
+    pub label: &'static str,
+    pub likes: i64,
+    pub reposts: i64,
+    pub replies: i64,
+    pub views: i64,
+    /// How many destinations these came from — without it, a platform with one
+    /// measured post and one with fifty look comparable.
+    pub measured: i64,
+}
+
+/// A published destination that earned something, for the leaderboard.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopPost {
+    pub post_id: i64,
+    pub platform: PlatformId,
+    pub handle: String,
+    /// The first line of the body, trimmed — enough to recognise the post.
+    pub excerpt: String,
+    pub published_at: Option<String>,
+    pub remote_url: Option<String>,
+    pub likes: i64,
+    pub reposts: i64,
+    pub replies: i64,
+    pub views: i64,
+    /// Likes + reposts + replies. What the list is ranked by, and deliberately
+    /// not including views: impressions are a reach number, not an earned one,
+    /// and only three platforms report them at all.
+    pub interactions: i64,
+    pub fetched_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,15 +166,25 @@ pub struct Stats {
     pub by_hour: Vec<Bucket>,
     pub by_weekday: Vec<Bucket>,
     pub by_day: Vec<Bucket>,
+    /// Weekday × hour, keyed `"{weekday}-{hour}"` with both zero-padded. The
+    /// punch card: `by_hour` and `by_weekday` each collapse one axis of it, and
+    /// "Tuesday at 09:00" is not recoverable from the two of them.
+    pub by_slot: Vec<Bucket>,
     /// Failures grouped by their error code — the taxonomy that says whether a
     /// platform is flaky or the posts are wrong.
     pub failures: Vec<Bucket>,
     pub engagement: EngagementTotals,
-    /// Platforms in scope whose engagement Windbag cannot read, with the reason.
-    pub engagement_gaps: Vec<(PlatformId, &'static str)>,
+    /// Engagement per platform, over the destinations that have been measured.
+    pub engagement_by_platform: Vec<EngagementRow>,
+    /// The best-performing destinations in scope, ranked by interactions.
+    pub top_posts: Vec<TopPost>,
+    /// Accounts in scope whose engagement Windbag cannot read, with the reason.
+    /// Per account rather than per platform: two Threads accounts can differ,
+    /// because insights are granted at connect time and one may predate it.
+    pub engagement_gaps: Vec<(PlatformId, String)>,
 }
 
-/// The six breakdowns, filled together as destinations are walked.
+/// The seven breakdowns, filled together as destinations are walked.
 #[derive(Default)]
 struct Groupers {
     platform: Grouper,
@@ -126,6 +192,7 @@ struct Groupers {
     hour: Grouper,
     weekday: Grouper,
     day: Grouper,
+    slot: Grouper,
     failure: Grouper,
 }
 
@@ -161,6 +228,16 @@ impl Groupers {
                 );
                 let key = local.format("%Y-%m-%d").to_string();
                 self.day.add(&key, &key, post_id, true);
+                self.slot.add(
+                    &format!(
+                        "{}-{:02}",
+                        local.weekday().number_from_monday(),
+                        local.hour()
+                    ),
+                    &local.format("%a %H:00").to_string(),
+                    post_id,
+                    true,
+                );
             }
         }
 
@@ -186,15 +263,11 @@ pub fn compute(database: &Db, filter: &StatsFilter) -> Result<Stats> {
         .collect();
 
     let mut totals = Totals::default();
-    let mut engagement = EngagementTotals {
-        likes: 0,
-        reposts: 0,
-        replies: 0,
-        measured: 0,
-        oldest_fetch: None,
-    };
+    let mut engagement = Engagement::default();
     let mut groupers = Groupers::default();
-    let mut platforms_in_scope: Vec<PlatformId> = Vec::new();
+    // Accounts, not platforms: two Threads connections can differ on whether
+    // insights were granted, so the gap has to be asked per account.
+    let mut accounts_in_scope: Vec<i64> = Vec::new();
 
     for detail in &posts {
         // Post-level counters describe INTENT and are not filtered by platform:
@@ -221,8 +294,8 @@ pub fn compute(database: &Db, filter: &StatsFilter) -> Result<Stats> {
             if !filter.matches(target, account, fallback) {
                 continue;
             }
-            if !platforms_in_scope.contains(&account.platform) {
-                platforms_in_scope.push(account.platform);
+            if !accounts_in_scope.contains(&account.id) {
+                accounts_in_scope.push(account.id);
             }
 
             let ok = target.status == db::TARGET_PUBLISHED;
@@ -237,7 +310,7 @@ pub fn compute(database: &Db, filter: &StatsFilter) -> Result<Stats> {
             groupers.add(detail.post.id, target, account, ok);
 
             if ok && let Some(row) = metrics.get(&target.id) {
-                engagement.add(row);
+                engagement.add(row, &detail.post, target, account);
             }
         }
     }
@@ -253,13 +326,46 @@ pub fn compute(database: &Db, filter: &StatsFilter) -> Result<Stats> {
         by_hour: groupers.hour.finish(Sort::Key),
         by_weekday: groupers.weekday.finish(Sort::Key),
         by_day: groupers.day.finish(Sort::Key),
+        by_slot: groupers.slot.finish(Sort::Key),
         failures: groupers.failure.finish(Sort::Count),
-        engagement,
-        engagement_gaps: platforms_in_scope
-            .into_iter()
-            .filter_map(|id| engagement_gap(id).map(|reason| (id, reason)))
-            .collect(),
+        engagement: engagement.totals.clone(),
+        engagement_by_platform: engagement.by_platform(),
+        top_posts: engagement.top_posts(),
+        engagement_gaps: {
+            let mut gaps: Vec<(PlatformId, String)> = Vec::new();
+            for id in accounts_in_scope {
+                let Some(account) = accounts.get(&id) else {
+                    continue;
+                };
+                if let Some(reason) = engagement_gap(account)
+                    && !gaps.iter().any(|(_, existing)| *existing == reason)
+                {
+                    gaps.push((account.platform, reason));
+                }
+            }
+            gaps
+        },
     })
+}
+
+/// How many destinations the leaderboard carries. Ten is the length of a list
+/// someone reads rather than scrolls.
+const TOP_POSTS: usize = 10;
+
+/// The first line of a body, short enough to sit in a table cell. Truncated on
+/// a character boundary, which `&body[..80]` would not guarantee.
+fn excerpt(body: &str) -> String {
+    let line = body
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if line.chars().count() <= 80 {
+        return line.to_string();
+    }
+    let mut out: String = line.chars().take(79).collect();
+    out.push('…');
+    out
 }
 
 #[derive(Default)]
@@ -271,44 +377,158 @@ struct Totals {
     missed: i64,
 }
 
-impl EngagementTotals {
-    /// Folds one destination's counts in. An unreported dimension adds nothing
+/// The engagement side of one `compute`, accumulated as destinations are
+/// walked: the totals, the same numbers split per platform, and every measured
+/// destination as a leaderboard candidate.
+#[derive(Default)]
+struct Engagement {
+    totals: EngagementTotals,
+    per_platform: HashMap<PlatformId, EngagementRow>,
+    leaderboard: Vec<TopPost>,
+}
+
+impl Engagement {
+    /// Folds one measured destination in. An unreported dimension adds nothing
     /// rather than a zero, and the oldest fetch wins — the totals are only as
     /// fresh as their stalest part.
-    fn add(&mut self, row: &Metrics) {
-        self.likes += row.likes.unwrap_or(0);
-        self.reposts += row.reposts.unwrap_or(0);
-        self.replies += row.replies.unwrap_or(0);
-        self.measured += 1;
+    fn add(&mut self, row: &Metrics, post: &db::Post, target: &PostTarget, account: &db::Account) {
+        let (likes, reposts, replies, views) = (
+            row.likes.unwrap_or(0),
+            row.reposts.unwrap_or(0),
+            row.replies.unwrap_or(0),
+            row.views.unwrap_or(0),
+        );
+
+        self.totals.likes += likes;
+        self.totals.reposts += reposts;
+        self.totals.replies += replies;
+        self.totals.views += views;
+        self.totals.measured += 1;
         if self
+            .totals
             .oldest_fetch
             .as_deref()
             .is_none_or(|current| row.fetched_at.as_str() < current)
         {
-            self.oldest_fetch = Some(row.fetched_at.clone());
+            self.totals.oldest_fetch = Some(row.fetched_at.clone());
+        }
+
+        let platform = account.platform;
+        let entry = self
+            .per_platform
+            .entry(platform)
+            .or_insert_with(|| EngagementRow {
+                platform,
+                label: platform.label(),
+                likes: 0,
+                reposts: 0,
+                replies: 0,
+                views: 0,
+                measured: 0,
+            });
+        entry.likes += likes;
+        entry.reposts += reposts;
+        entry.replies += replies;
+        entry.views += views;
+        entry.measured += 1;
+
+        self.leaderboard.push(TopPost {
+            post_id: post.id,
+            platform,
+            handle: account.handle.clone(),
+            excerpt: excerpt(&post.body),
+            published_at: target.published_at.clone(),
+            remote_url: target.remote_url.clone(),
+            likes,
+            reposts,
+            replies,
+            views,
+            interactions: likes + reposts + replies,
+            fetched_at: row.fetched_at.clone(),
+        });
+    }
+
+    /// Per-platform rows, ranked by what was earned — so the platform doing the
+    /// work is the first bar rather than whichever one hashed first.
+    fn by_platform(&self) -> Vec<EngagementRow> {
+        let mut rows: Vec<EngagementRow> = self.per_platform.values().cloned().collect();
+        rows.sort_by(|a, b| {
+            (b.likes + b.reposts + b.replies)
+                .cmp(&(a.likes + a.reposts + a.replies))
+                .then_with(|| a.label.cmp(b.label))
+        });
+        rows
+    }
+
+    /// The leaderboard, longest-earning first and cut to [`TOP_POSTS`].
+    fn top_posts(&self) -> Vec<TopPost> {
+        let mut rows = self.leaderboard.clone();
+        rows.sort_by(|a, b| {
+            b.interactions
+                .cmp(&a.interactions)
+                .then_with(|| b.views.cmp(&a.views))
+        });
+        rows.truncate(TOP_POSTS);
+        rows
+    }
+}
+
+/// Why this account's engagement is not shown. `None` means it is readable.
+///
+/// Per account rather than per platform, because two of the gaps are a matter
+/// of what the connection was granted rather than what the platform offers:
+/// Threads and Instagram serve `/insights` only to a token carrying the
+/// insights scope, which is opt-in on the Meta app credential. The granted
+/// scopes are on the account row, so this costs no keychain read.
+fn engagement_gap(account: &db::Account) -> Option<String> {
+    match account.platform {
+        // Readable on credentials the app already holds: Bluesky and Mastodon
+        // serve public counts, a Page post carries its own summary edges, and
+        // X returns `public_metrics` — though every X id in a lookup bills
+        // against the app's credits, which is why that refresh confirms the
+        // cost first rather than running on its own.
+        PlatformId::Bluesky | PlatformId::Mastodon | PlatformId::Facebook | PlatformId::X => None,
+        PlatformId::Threads | PlatformId::Instagram => {
+            let needed = insights_scope(account.platform)?;
+            if granted(account, needed) {
+                None
+            } else {
+                Some(format!(
+                    "Insights need the {needed} scope. Turn on \"Insights access\" in \
+                     Settings → Platform apps, then reconnect {}.",
+                    account.handle
+                ))
+            }
+        }
+        PlatformId::Reddit => {
+            Some("Reddit's score needs a read scope Windbag does not request.".into())
+        }
+        PlatformId::Linkedin => {
+            Some("LinkedIn's analytics need approved read permissions on your app.".into())
         }
     }
 }
 
-/// Why a platform's engagement is not shown. `None` means it is readable.
-fn engagement_gap(platform: PlatformId) -> Option<&'static str> {
+/// The scope a platform's per-post insights endpoint requires, where that is
+/// the only thing standing between Windbag and the numbers.
+pub fn insights_scope(platform: PlatformId) -> Option<&'static str> {
     match platform {
-        PlatformId::Bluesky | PlatformId::Mastodon => None,
-        PlatformId::X => Some("X's post metrics need a paid API tier."),
-        PlatformId::Reddit => Some("Reddit's score needs a read scope Windbag does not request."),
-        PlatformId::Linkedin => {
-            Some("LinkedIn's analytics need approved read permissions on your app.")
-        }
-        // All three read insights under a separate `*_manage_insights`
-        // permission Windbag does not request: asking for it at connect time
-        // would widen the consent screen for every user to serve a panel most
-        // never open.
-        PlatformId::Threads => Some("Threads insights need the threads_manage_insights scope."),
-        PlatformId::Instagram => {
-            Some("Instagram insights need the instagram_business_manage_insights scope.")
-        }
-        PlatformId::Facebook => Some("Page insights need the read_insights permission."),
+        PlatformId::Threads => Some("threads_manage_insights"),
+        PlatformId::Instagram => Some("instagram_business_manage_insights"),
+        _ => None,
     }
+}
+
+/// Whether the connection actually came back with a scope. Matched on word
+/// boundaries against the stored grant: Meta returns them comma-separated, the
+/// OAuth spec says space-separated, and `contains` alone would let
+/// `threads_manage_insights_foo` pass for the real thing.
+fn granted(account: &db::Account, scope: &str) -> bool {
+    account.scopes.as_deref().is_some_and(|scopes| {
+        scopes
+            .split([',', ' '])
+            .any(|granted| granted.trim() == scope)
+    })
 }
 
 /// The `[CODE]` an error string was recorded under. Errors are written by
@@ -398,6 +618,50 @@ pub struct RefreshReport {
     pub problems: Vec<String>,
 }
 
+/// What a refresh would read, before it runs.
+///
+/// Exists for one reason: X bills per id in a lookup, so the button that spends
+/// that money has to be able to say how much first. Everything else is free and
+/// is reported only so the confirmation can say what the spend buys.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshCost {
+    /// Destinations on X that would be looked up. Each one is a billed read.
+    pub billed_reads: i64,
+    /// Destinations on the platforms that serve counts for nothing.
+    pub free_reads: i64,
+}
+
+/// Counts what [`refresh_engagement`] would read, without reading anything.
+pub fn refresh_cost(database: &Db) -> Result<RefreshCost> {
+    let accounts: HashMap<i64, db::Account> = database
+        .list_accounts()?
+        .into_iter()
+        .map(|account| (account.id, account))
+        .collect();
+
+    let mut cost = RefreshCost::default();
+    for (target, account) in database.published_targets()? {
+        // A destination with no remote id was never really published, so no
+        // lookup would be made for it.
+        if target.remote_id.is_none() {
+            continue;
+        }
+        let Some(account) = accounts.get(&account.id) else {
+            continue;
+        };
+        if engagement_gap(account).is_some() {
+            continue;
+        }
+        if account.platform == PlatformId::X {
+            cost.billed_reads += 1;
+        } else {
+            cost.free_reads += 1;
+        }
+    }
+    Ok(cost)
+}
+
 /// Fetches engagement for every published destination Windbag can read.
 ///
 /// Bluesky is batched (its `getPosts` takes up to 25 URIs per call); Mastodon is
@@ -411,7 +675,7 @@ pub fn refresh_engagement(database: &Db) -> Result<RefreshReport> {
     // Mastodon needs the account's instance and token.
     let mut by_account: HashMap<i64, (db::Account, Vec<PostTarget>)> = HashMap::new();
     for (target, account) in published {
-        if engagement_gap(account.platform).is_some() {
+        if engagement_gap(&account).is_some() {
             report.skipped += 1;
             continue;
         }
@@ -424,9 +688,15 @@ pub fn refresh_engagement(database: &Db) -> Result<RefreshReport> {
 
     for (account, targets) in by_account.into_values() {
         let outcome = match account.platform {
-            PlatformId::Bluesky => refresh_bluesky(database, &account, &targets),
+            PlatformId::Bluesky => refresh_bluesky(database, &targets),
             PlatformId::Mastodon => refresh_mastodon(database, &account, &targets),
-            _ => Ok(0),
+            PlatformId::Threads => refresh_threads(database, &account, &targets),
+            PlatformId::Instagram => refresh_instagram(database, &account, &targets),
+            PlatformId::Facebook => refresh_facebook(database, &account, &targets),
+            PlatformId::X => refresh_x(database, &account, &targets),
+            // Gated above; a new variant lands here rather than silently
+            // counting as a success.
+            PlatformId::Reddit | PlatformId::Linkedin => Ok(0),
         };
         match outcome {
             Ok(count) => report.updated += count,
@@ -440,38 +710,17 @@ pub fn refresh_engagement(database: &Db) -> Result<RefreshReport> {
 }
 
 /// Bluesky's public counts, batched 25 URIs at a time.
-fn refresh_bluesky(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Result<usize> {
-    let secret = secrets::load_account_secret(account.platform, &account.remote_id)?;
-    let pds = secret
-        .extra_str("pds")
-        .unwrap_or("https://bsky.social")
-        .to_string();
-    let app_password = secret.extra_str("app_password").ok_or_else(|| {
-        AppError::Unauthorized("The stored Bluesky app password is missing.".into())
-    })?;
-
-    let (status, body) = http::read_body(
-        http::client()
-            .post(format!("{pds}/xrpc/com.atproto.server.createSession"))
-            .json(&json!({ "identifier": account.remote_id, "password": app_password }))
-            .send()?,
-    );
-    if !(200..300).contains(&status) {
-        return Err(from_status(status, &body, "Bluesky"));
-    }
-    let token = serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("accessJwt")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .ok_or_else(|| AppError::Platform("Bluesky returned an unreadable session.".into()))?;
-
+///
+/// Read from the public `AppView`, unauthenticated. `getPosts` serves the counts
+/// to anyone, so this used to open a session with the stored app password for
+/// no reason — and once "Sign in with Bluesky" became the default there IS no
+/// stored app password, which would have failed the refresh for every new
+/// account with a message about a credential the user never created.
+fn refresh_bluesky(database: &Db, targets: &[PostTarget]) -> Result<usize> {
     let now = db::now_rfc3339();
     let mut updated = 0usize;
-    for chunk in targets.chunks(25) {
+
+    for chunk in targets.chunks(BLUESKY_LOOKUP_BATCH) {
         let query: Vec<(&str, &str)> = chunk
             .iter()
             .filter_map(|target| target.remote_id.as_deref().map(|uri| ("uris", uri)))
@@ -482,9 +731,8 @@ fn refresh_bluesky(database: &Db, account: &db::Account, targets: &[PostTarget])
 
         let (status, body) = http::read_body(
             http::client()
-                .get(format!("{pds}/xrpc/app.bsky.feed.getPosts"))
+                .get(format!("{BLUESKY_APPVIEW}/xrpc/app.bsky.feed.getPosts"))
                 .query(&query)
-                .bearer_auth(&token)
                 .send()?,
         );
         if !(200..300).contains(&status) {
@@ -518,12 +766,21 @@ fn refresh_bluesky(database: &Db, account: &db::Account, targets: &[PostTarget])
                 reposts: count(post, "repostCount"),
                 replies: count(post, "replyCount"),
                 quotes: count(post, "quoteCount"),
+                // Bluesky publishes no impression count.
+                views: None,
             })?;
             updated += 1;
         }
     }
     Ok(updated)
 }
+
+/// The unauthenticated `AppView`. Not the account's PDS: a PDS serves the
+/// repository, the `AppView` serves the aggregated counts.
+const BLUESKY_APPVIEW: &str = "https://public.api.bsky.app";
+
+/// How many URIs one `getPosts` accepts.
+const BLUESKY_LOOKUP_BATCH: usize = 25;
 
 /// Mastodon's per-status counts. One call each; a deleted status 404s and is
 /// skipped rather than failing the account.
@@ -562,10 +819,259 @@ fn refresh_mastodon(database: &Db, account: &db::Account, targets: &[PostTarget]
             reposts: count(&post, "reblogs_count"),
             replies: count(&post, "replies_count"),
             quotes: None,
+            // Mastodon publishes no impression count.
+            views: None,
         })?;
         updated += 1;
     }
     Ok(updated)
+}
+
+/// Threads' per-media `/insights`, one call per post.
+///
+/// Requires `threads_manage_insights`, which [`engagement_gap`] has already
+/// checked was granted before this runs.
+fn refresh_threads(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Result<usize> {
+    let secret = platforms::live_secret(database, account)?;
+    let now = db::now_rfc3339();
+    let mut updated = 0usize;
+
+    for target in targets {
+        let Some(id) = target.remote_id.as_deref() else {
+            continue;
+        };
+        let reply = meta::get_json(
+            &format!("{}/{id}/insights", threads::API_BASE),
+            &[
+                ("metric", "views,likes,replies,reposts,quotes,shares"),
+                ("access_token", &secret.access_token),
+            ],
+            "Threads",
+        );
+        let Some(named) = insight_values(reply)? else {
+            continue;
+        };
+        database.save_metrics(&Metrics {
+            target_id: target.id,
+            fetched_at: now.clone(),
+            likes: named.get("likes").copied(),
+            reposts: named.get("reposts").copied(),
+            replies: named.get("replies").copied(),
+            quotes: named.get("quotes").copied(),
+            views: named.get("views").copied(),
+        })?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
+/// Instagram's per-media `/insights`.
+///
+/// `impressions` is deliberately not requested: Meta deprecated it for media
+/// created after 2 July 2024, and asking for it on a newer post fails the whole
+/// call rather than omitting one metric. `views` is its replacement. Instagram
+/// reports no reposts or quotes, so both stay `None` rather than becoming zero.
+fn refresh_instagram(
+    database: &Db,
+    account: &db::Account,
+    targets: &[PostTarget],
+) -> Result<usize> {
+    let secret = platforms::live_secret(database, account)?;
+    let now = db::now_rfc3339();
+    let mut updated = 0usize;
+
+    for target in targets {
+        let Some(id) = target.remote_id.as_deref() else {
+            continue;
+        };
+        let reply = meta::get_json(
+            &format!("{}/{id}/insights", instagram::API_BASE),
+            &[
+                ("metric", "likes,comments,saved,shares,views,reach"),
+                ("access_token", &secret.access_token),
+            ],
+            "Instagram",
+        );
+        let Some(named) = insight_values(reply)? else {
+            continue;
+        };
+        database.save_metrics(&Metrics {
+            target_id: target.id,
+            fetched_at: now.clone(),
+            likes: named.get("likes").copied(),
+            reposts: None,
+            replies: named.get("comments").copied(),
+            quotes: None,
+            views: named.get("views").copied(),
+        })?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
+/// A Page post's own summary counts.
+///
+/// Not `/insights`: the summary edges come back on the Page token the adapter
+/// already holds, where Page-level insights would need `read_insights` and the
+/// App Review that permission carries. `shares` is Facebook's nearest thing to
+/// a repost; it publishes no impression count on a post without insights.
+fn refresh_facebook(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Result<usize> {
+    // The Page token IS the stored `access_token` — `connect` swaps the user
+    // token for the Page's own one and keeps the user token in `extra`. So the
+    // post reads back on exactly the credential that wrote it.
+    let secret = platforms::live_secret(database, account)?;
+    let token = secret.access_token.clone();
+
+    let now = db::now_rfc3339();
+    let mut updated = 0usize;
+    for target in targets {
+        let Some(id) = target.remote_id.as_deref() else {
+            continue;
+        };
+        let reply = meta::get_json(
+            &format!("{}/{id}", facebook::api_base()),
+            &[
+                (
+                    "fields",
+                    "likes.summary(true),comments.summary(true),shares",
+                ),
+                ("access_token", &token),
+            ],
+            "Facebook",
+        );
+        let post = match reply {
+            Ok(post) => post,
+            // A post deleted on Facebook is not a failure of the refresh.
+            Err(AppError::NotFound(_)) => continue,
+            Err(err) => return Err(err),
+        };
+        database.save_metrics(&Metrics {
+            target_id: target.id,
+            fetched_at: now.clone(),
+            likes: summary_total(&post, "likes"),
+            reposts: post.get("shares").and_then(|shares| count(shares, "count")),
+            replies: summary_total(&post, "comments"),
+            quotes: None,
+            views: None,
+        })?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
+/// X's `public_metrics`, 100 ids per call.
+///
+/// Every id in the request is a billed read, which is why this is only ever
+/// reached from a manual refresh the user confirmed the cost of.
+fn refresh_x(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Result<usize> {
+    let secret = platforms::live_secret(database, account)?;
+    let now = db::now_rfc3339();
+    let mut updated = 0usize;
+
+    for chunk in targets.chunks(X_LOOKUP_BATCH) {
+        let ids: Vec<&str> = chunk
+            .iter()
+            .filter_map(|target| target.remote_id.as_deref())
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+
+        let (status, body) = http::read_body(
+            http::client()
+                .get(format!("{}/tweets", x::API_BASE))
+                .query(&[
+                    ("ids", ids.join(",").as_str()),
+                    ("tweet.fields", "public_metrics"),
+                ])
+                .bearer_auth(&secret.access_token)
+                .send()?,
+        );
+        if !(200..300).contains(&status) {
+            return Err(from_status(status, &body, "X"));
+        }
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| AppError::Platform(format!("X returned unreadable posts: {e}")))?;
+        let Some(posts) = parsed.get("data").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+
+        // Matched back by id: a deleted post is simply absent from `data`, so
+        // position is not an index.
+        let by_id: HashMap<&str, &serde_json::Value> = posts
+            .iter()
+            .filter_map(|post| {
+                post.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|id| (id, post))
+            })
+            .collect();
+
+        for target in chunk {
+            let Some(post) = target.remote_id.as_deref().and_then(|id| by_id.get(id)) else {
+                continue;
+            };
+            let Some(m) = post.get("public_metrics") else {
+                continue;
+            };
+            database.save_metrics(&Metrics {
+                target_id: target.id,
+                fetched_at: now.clone(),
+                likes: count(m, "like_count"),
+                reposts: count(m, "repost_count").or_else(|| count(m, "retweet_count")),
+                replies: count(m, "reply_count"),
+                quotes: count(m, "quote_count"),
+                views: count(m, "impression_count"),
+            })?;
+            updated += 1;
+        }
+    }
+    Ok(updated)
+}
+
+/// How many ids one `GET /2/tweets` accepts.
+const X_LOOKUP_BATCH: usize = 100;
+
+/// Flattens a Meta `/insights` reply into `name → value`.
+///
+/// Meta returns metrics two ways — `values: [{ value }]` on the periodic ones
+/// and `total_value: { value }` on the lifetime ones — and which shape a given
+/// metric uses is not stable across Graph versions, so both are read. A media
+/// object deleted on the platform 404s, which advances nothing and is not an
+/// error; `Ok(None)` says "skip this one".
+fn insight_values(reply: Result<serde_json::Value>) -> Result<Option<HashMap<String, i64>>> {
+    let payload = match reply {
+        Ok(payload) => payload,
+        Err(AppError::NotFound(_)) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let Some(rows) = payload.get("data").and_then(serde_json::Value::as_array) else {
+        return Ok(None);
+    };
+
+    let mut named = HashMap::new();
+    for row in rows {
+        let Some(name) = row.get("name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let value = row
+            .get("values")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|values| values.first())
+            .and_then(|first| count(first, "value"))
+            .or_else(|| row.get("total_value").and_then(|tv| count(tv, "value")));
+        if let Some(value) = value {
+            named.insert(name.to_string(), value);
+        }
+    }
+    Ok(Some(named))
+}
+
+/// A `likes.summary(true)` style total.
+fn summary_total(post: &serde_json::Value, edge: &str) -> Option<i64> {
+    post.get(edge)
+        .and_then(|edge| edge.get("summary"))
+        .and_then(|summary| count(summary, "total_count"))
 }
 
 /// A count field, or `None` when the platform did not report that dimension —
@@ -590,6 +1096,8 @@ pub fn parse_bound(value: Option<&str>) -> Result<Option<DateTime<Utc>>> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use crate::platforms::{AccountSecret, Connected};
 
@@ -709,12 +1217,140 @@ mod tests {
     }
 
     #[test]
-    fn engagement_reports_which_platforms_it_cannot_read() {
+    fn engagement_reports_which_accounts_it_cannot_read() {
         let (db, _, _) = seeded();
         let stats = compute(&db, &StatsFilter::default()).expect("stats");
         let gaps: Vec<PlatformId> = stats.engagement_gaps.iter().map(|(id, _)| *id).collect();
-        assert!(gaps.contains(&PlatformId::X), "X's metrics are paid");
+        // Both seeded platforms are readable now that X's bulk lookup is wired:
+        // X costs money per read, which is a confirmation, not a gap.
+        assert!(
+            !gaps.contains(&PlatformId::X),
+            "X's public_metrics are read"
+        );
         assert!(!gaps.contains(&PlatformId::Bluesky), "Bluesky's are free");
+    }
+
+    #[test]
+    fn reddit_and_linkedin_stay_gapped() {
+        let db = Db::open_in_memory().expect("store");
+        for (platform, remote) in [(PlatformId::Reddit, "r:1"), (PlatformId::Linkedin, "li:1")] {
+            let id = db
+                .upsert_account(platform, &connected(remote, "@me"))
+                .expect("account");
+            let post = db
+                .create_post(
+                    "sent",
+                    None,
+                    None,
+                    Some(&db::now_rfc3339()),
+                    db::POST_SCHEDULED,
+                )
+                .expect("post");
+            db.set_targets(post, &[(id, json!({}))]).expect("targets");
+            let targets = db.list_targets(post).expect("targets");
+            db.finish_target_ok(targets[0].id, "1", None).expect("ok");
+            db.reconcile_post_status(post).expect("status");
+        }
+
+        let stats = compute(&db, &StatsFilter::default()).expect("stats");
+        let gaps: Vec<PlatformId> = stats.engagement_gaps.iter().map(|(id, _)| *id).collect();
+        assert!(gaps.contains(&PlatformId::Reddit));
+        assert!(gaps.contains(&PlatformId::Linkedin));
+    }
+
+    /// The insights gate is per account, so a Threads connection made before
+    /// insights were turned on is reported while a later one is not.
+    #[test]
+    fn threads_insights_are_gated_on_the_granted_scope() {
+        let db = Db::open_in_memory().expect("store");
+
+        let mut without = connected("th:1", "@old");
+        without.scopes = Some("threads_basic,threads_content_publish".into());
+        let mut with = connected("th:2", "@new");
+        with.scopes = Some("threads_basic,threads_content_publish,threads_manage_insights".into());
+
+        for account in [&without, &with] {
+            let id = db
+                .upsert_account(PlatformId::Threads, account)
+                .expect("account");
+            let post = db
+                .create_post(
+                    "sent",
+                    None,
+                    None,
+                    Some(&db::now_rfc3339()),
+                    db::POST_SCHEDULED,
+                )
+                .expect("post");
+            db.set_targets(post, &[(id, json!({}))]).expect("targets");
+            let targets = db.list_targets(post).expect("targets");
+            db.finish_target_ok(targets[0].id, "1", None).expect("ok");
+            db.reconcile_post_status(post).expect("status");
+        }
+
+        let stats = compute(&db, &StatsFilter::default()).expect("stats");
+        assert_eq!(
+            stats.engagement_gaps.len(),
+            1,
+            "only the connection missing the scope is a gap: {:?}",
+            stats.engagement_gaps
+        );
+        assert!(stats.engagement_gaps[0].1.contains("@old"));
+    }
+
+    #[test]
+    fn a_scope_matches_on_word_boundaries_not_substrings() {
+        let mut account = connected("th:1", "@me");
+        account.scopes = Some("threads_basic,threads_manage_insights_extra".into());
+        let db = Db::open_in_memory().expect("store");
+        let id = db
+            .upsert_account(PlatformId::Threads, &account)
+            .expect("account");
+        let stored = db
+            .list_accounts()
+            .expect("accounts")
+            .into_iter()
+            .find(|row| row.id == id)
+            .expect("row");
+
+        assert!(
+            !granted(&stored, "threads_manage_insights"),
+            "a longer scope name must not pass for the real one"
+        );
+    }
+
+    #[test]
+    fn a_meta_insights_reply_is_flattened_from_either_shape() {
+        let payload = json!({
+            "data": [
+                { "name": "views", "values": [{ "value": 1_200 }] },
+                { "name": "likes", "total_value": { "value": 34 } },
+                { "name": "replies", "values": [] }
+            ]
+        });
+        let named = insight_values(Ok(payload)).expect("ok").expect("some");
+
+        assert_eq!(named.get("views"), Some(&1_200));
+        assert_eq!(named.get("likes"), Some(&34), "total_value is read too");
+        assert!(
+            !named.contains_key("replies"),
+            "a metric with no value is absent, not zero"
+        );
+    }
+
+    #[test]
+    fn a_deleted_media_object_is_skipped_rather_than_failing_the_account() {
+        let missing = insight_values(Err(AppError::NotFound("gone".into()))).expect("not an error");
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn an_excerpt_takes_the_first_real_line_and_keeps_char_boundaries() {
+        assert_eq!(excerpt("\n\n  hello there \nsecond"), "hello there");
+        let wide = "\u{1f600}".repeat(200);
+        let cut = excerpt(&wide);
+        assert_eq!(cut.chars().count(), 80, "79 chars plus the ellipsis");
+        assert!(cut.ends_with('\u{2026}'));
     }
 
     #[test]
@@ -742,6 +1378,7 @@ mod tests {
             reposts: Some(2),
             replies: None,
             quotes: None,
+            views: None,
         })
         .expect("metrics");
 

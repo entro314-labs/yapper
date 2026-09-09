@@ -12,6 +12,7 @@ import type {
   PlatformInfo,
   PostDetail,
   Note,
+  RefreshCost,
   RefreshReport,
   ResolvedMedia,
   SaveNoteInput,
@@ -334,6 +335,19 @@ export function useSuggestPosts() {
       accountIds: number[]
       count: number
     }) => invokeCommand<Suggestion[]>(IPC_COMMANDS.suggestPosts, input),
+  })
+}
+
+/**
+ * What a refresh would read, so the button that spends money on X can say how much first.
+ *
+ * Reads the local store only, and is refetched after a refresh because the number moves as
+ * destinations publish.
+ */
+export function useRefreshCost() {
+  return useQuery({
+    queryKey: queryKeys.stats.refreshCost(),
+    queryFn: async () => invokeCommand<RefreshCost>(IPC_COMMANDS.getRefreshCost),
   })
 }
 

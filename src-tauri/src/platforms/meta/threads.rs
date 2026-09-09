@@ -33,7 +33,7 @@ const AUTHORIZE_URL: &str = "https://threads.net/oauth/authorize";
 const TOKEN_URL: &str = "https://graph.threads.net/oauth/access_token";
 const EXCHANGE_URL: &str = "https://graph.threads.net/access_token";
 const REFRESH_URL: &str = "https://graph.threads.net/refresh_access_token";
-const API_BASE: &str = "https://graph.threads.net/v1.0";
+pub(crate) const API_BASE: &str = "https://graph.threads.net/v1.0";
 const SCOPES: &str = "threads_basic,threads_content_publish";
 const LABEL: &str = "Threads";
 
@@ -74,6 +74,9 @@ impl Platform for Threads {
                     "",
                     "Required — Meta has no public-client flow for Threads.",
                 ),
+                FieldSpec::text("insights_access", "Insights access", "no", "Also request the insights permission, so the stats screen can show what each post earned. Off by default: it widens the consent screen, and a connection made without it must be reconnected to gain it.")
+                    .optional()
+                    .choosing(&["no", "yes"]),
             ],
             setup_url: Some("https://developers.facebook.com/apps"),
             // Filled in from the companion deployment, because Meta refuses a
@@ -132,7 +135,7 @@ impl Platform for Threads {
             AUTHORIZE_URL,
             &app.client_id,
             &redirect,
-            SCOPES,
+            &scopes_for(app),
             &[],
             false,
         )?;
@@ -183,7 +186,7 @@ impl Platform for Threads {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
             instance: None,
-            scopes: Some(SCOPES.to_string()),
+            scopes: Some(scopes_for(app)),
             char_limit: None,
             secret: AccountSecret {
                 expires_at: long.expires_at(),
@@ -423,6 +426,20 @@ fn exchange_long_lived(short_token: &str, client_secret: &str) -> Result<Grant> 
     )
 }
 
+/// The consent screen this connection asks for. Insights are opt-in, so the
+/// default is exactly what posting needs — see [`crate::stats`] for what the
+/// extra scope unlocks.
+fn scopes_for(app: &AppCredentials) -> String {
+    if app
+        .extra("insights_access")
+        .is_some_and(|value| value.eq_ignore_ascii_case("yes"))
+    {
+        format!("{SCOPES},threads_manage_insights")
+    } else {
+        SCOPES.to_string()
+    }
+}
+
 fn client_secret(app: &AppCredentials) -> Result<&str> {
     app.client_secret
         .as_deref()
@@ -528,5 +545,33 @@ mod tests {
         let form = single_media_form(&item, "https://x/y.mp4", "tok");
         assert!(form.iter().any(|(k, v)| k == "media_type" && v == "VIDEO"));
         assert!(form.iter().any(|(k, _)| k == "video_url"));
+    }
+
+    fn app_with(insights: Option<&str>) -> AppCredentials {
+        let mut extra = std::collections::HashMap::new();
+        if let Some(value) = insights {
+            extra.insert("insights_access".to_string(), value.to_string());
+        }
+        AppCredentials {
+            client_id: "id".into(),
+            client_secret: Some("s".into()),
+            extra,
+        }
+    }
+
+    #[test]
+    fn insights_are_off_unless_asked_for() {
+        // Someone who only schedules posts must never see an insights consent
+        // screen.
+        assert!(!scopes_for(&app_with(None)).contains("insights"));
+        assert!(!scopes_for(&app_with(Some("no"))).contains("insights"));
+    }
+
+    #[test]
+    fn insights_add_exactly_one_scope_when_opted_in() {
+        let scopes = scopes_for(&app_with(Some("yes")));
+        assert!(scopes.contains("threads_manage_insights"), "{scopes}");
+        // The posting scopes survive — insights are additive, not a swap.
+        assert!(scopes.contains(SCOPES), "{scopes}");
     }
 }

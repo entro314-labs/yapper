@@ -18,7 +18,7 @@ use crate::scheduler::{
     self, EVENT_ACCOUNTS_CHANGED, EVENT_QUEUE_CHANGED, META_GRACE_MINUTES, META_MISSED_POLICY,
     MissedPolicy, Scheduler,
 };
-use crate::stats::{self, RefreshReport, Stats, StatsFilter};
+use crate::stats::{self, RefreshCost, RefreshReport, Stats, StatsFilter};
 use crate::{media, secrets};
 
 pub const EVENT_AUTH: &str = "windbag://auth";
@@ -631,9 +631,16 @@ pub fn get_stats(state: State<'_, AppState>, filter: StatsFilter) -> Result<Stat
     stats::compute(&state.db, &filter)
 }
 
+/// What a refresh would read, so the button that spends money on X can say how
+/// much before it does.
+#[tauri::command]
+pub fn get_refresh_cost(state: State<'_, AppState>) -> Result<RefreshCost> {
+    stats::refresh_cost(&state.db)
+}
+
 /// Fetches engagement for every published destination Windbag can read. Manual
-/// on purpose: a background poller against five APIs spends a rate-limit budget
-/// on numbers nobody is looking at.
+/// on purpose: a background poller against eight APIs spends a rate-limit
+/// budget on numbers nobody is looking at — and on X it spends real credits.
 #[tauri::command]
 pub fn refresh_engagement(app: AppHandle, state: State<'_, AppState>) -> Result<RefreshReport> {
     let report = stats::refresh_engagement(&state.db)?;

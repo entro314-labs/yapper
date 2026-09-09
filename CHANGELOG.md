@@ -8,6 +8,46 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Added
 
+- **Reporting, off the official APIs.** Engagement is now read from each
+  platform's own documented endpoint rather than being reported as unavailable:
+  Threads and Instagram per-media `/insights`, a Facebook Page post's own
+  summary edges, and X's bulk `public_metrics` lookup (100 ids a call) beside
+  the Bluesky and Mastodon counts that were already there. Six of the eight now
+  answer; Reddit and LinkedIn keep their stated gap. Impressions are stored
+  alongside likes, reposts and replies — Threads, Instagram and X report them.
+- **Insights are opt-in per Meta app credential**, the same shape the ads
+  permissions already used. The default consent screen is still exactly what
+  posting needs, and the gap is reported PER ACCOUNT against the scopes that
+  connection actually came back with — so a Threads account connected before you
+  turned insights on says so by name instead of the platform going quiet.
+- **X reads are confirmed before they are spent.** X bills per id in a lookup,
+  so Refresh says how many posts it is about to read and what the free half is
+  before it makes the call. `get_refresh_cost` reports it without reading
+  anything.
+- **Charts.** Delivery over time as a stacked area with a crosshair and keyboard
+  stepping, a weekday × hour punch card, engagement per platform, and the ten
+  best-performing posts. Dependency-free SVG in the Signal palette. Colour on
+  the engagement chart encodes the METRIC and not the platform: the brand tones
+  are right on an identity chip but fail as a series palette — two of the eight
+  ship black, and Bluesky sits below the normal-vision legibility floor from
+  Mastodon — so identity stays on the axis, where it gets a mark and a name. The
+  three series hues are validated for deuteranopia, tritanopia and contrast
+  against each mode's own surface.
+- **There is deliberately no engagement trend line.** `metrics` keeps one row
+  per destination, replaced on each refresh, and refreshes are manual — so a
+  history would be a handful of points at whatever moments someone pressed the
+  button, which invites being read as a trend when it is not one. Only delivery,
+  which dates every destination exactly, is drawn over time; engagement is drawn
+  as a distribution and always labelled `as of`.
+- **Bluesky engagement reads unauthenticated**, from the public AppView. It used
+  to open a session with the stored app password — which "Sign in with Bluesky"
+  accounts do not have, so every OAuth-connected account would have failed the
+  refresh citing a credential its owner never created. `getPosts` serves the
+  counts to anyone, so the session call is gone rather than duplicated.
+- The agent door reports it too: `get_stats` now carries impressions,
+  engagement per platform, the leaderboard, and an `unreadable` list with the
+  reason, so a model never reads a missing platform as a zero.
+
 - **An icon of its own.** The bag of Aeolus — a tied sack with the winds
   streaming out — in the palette's carrier cyan on its dark ground, drawn to
   Apple's inset squircle so it sits at the same size as its Dock neighbours.

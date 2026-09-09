@@ -176,6 +176,41 @@
   --brand-facebook: oklch(0.7 0.15 260);
 }
 
+/* ─── Chart series ──────────────────────────────────────────────────────────
+   The three engagement dimensions — likes, reposts, replies — as chart series.
+   Deliberately NOT the brand tones above: those encode WHICH PLATFORM and are
+   right on an identity chip, but as a series palette they fail outright. X and
+   Threads ship black, so two of the eight carry no hue at all, and Bluesky sits
+   ΔE 12.7 from Mastodon for a normal-vision reader — below the 15 floor, which
+   no amount of direct labelling excuses. So platform identity stays on the axis
+   (its mark and its name), and colour here encodes the METRIC instead: three
+   hues 216° / 320° / 80° apart, validated in both modes for deuteranopia,
+   tritanopia and contrast against each mode's own surface.
+
+   Each mode's steps are chosen against that mode's surface rather than flipped:
+   the light band tops out where the dark band begins. */
+:root {
+  --series-likes: oklch(0.62 0.15 216);
+  --series-reposts: oklch(0.52 0.21 320);
+  --series-replies: oklch(0.62 0.15 80);
+  /* Impressions are a reach number on a scale 100× the other three, so they are
+     never a fourth bar in the same chart — this is for the figure that reports
+     them on their own. */
+  --series-views: oklch(0.5 0.016 250);
+  /* The punch card and any other magnitude ramp: one hue, light → dark. */
+  --ramp-from: oklch(0.94 0.025 216);
+  --ramp-to: oklch(0.52 0.15 216);
+}
+
+.dark {
+  --series-likes: oklch(0.6 0.15 216);
+  --series-reposts: oklch(0.56 0.21 320);
+  --series-replies: oklch(0.65 0.14 80);
+  --series-views: oklch(0.7 0.02 250);
+  --ramp-from: oklch(0.26 0.03 216);
+  --ramp-to: oklch(0.74 0.14 216);
+}
+
 /* ─── Window materials ──────────────────────────────────────────────────────
    With an OS effect active behind a transparent window, the chrome surfaces thin
    out and the effect shows through. `data-material` is stamped from what the OS

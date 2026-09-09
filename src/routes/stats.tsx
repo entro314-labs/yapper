@@ -1,15 +1,20 @@
 import { IconChartBar, IconInfoCircle } from '@tabler/icons-react'
 import { Link, createFileRoute } from '@tanstack/react-router'
+import { ask } from '@tauri-apps/plugin-dialog'
 import * as React from 'react'
 import { toast } from 'sonner'
 
+import { DeliveryChart } from '@/components/charts/delivery-chart'
+import { EngagementChart } from '@/components/charts/engagement-chart'
+import { PunchCard } from '@/components/charts/punch-card'
+import { TopPosts } from '@/components/charts/top-posts'
 import { RefreshCwIcon } from '@/components/icons/refresh-cw'
 import { EmptyState } from '@/components/shell/empty-state'
 import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
 import { useAnimatedIcon } from '@/lib/animated-icon'
 import { brandOf } from '@/lib/platform-brand'
-import { useAccounts, usePosts, useRefreshEngagement, useStats } from '@/lib/query'
+import { useAccounts, usePosts, useRefreshCost, useRefreshEngagement, useStats } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
 import type { Bucket, PlatformId, StatsFilter } from '@/lib/tauri/types'
 import { cn, formatRelative } from '@/lib/utils'
@@ -27,9 +32,13 @@ const RANGES = [
  * What actually happened.
  *
  * Two halves, kept visibly apart. DELIVERY is computed from Windbag's own records — always there,
- * always current, and the only half that can answer "why did this fail". ENGAGEMENT comes from the
- * platforms, and only two of the five give it away; the rest are named as gaps rather than drawn as
+ * always current, and the only half that can answer "why did this fail". ENGAGEMENT is read from
+ * each platform's official endpoint; the two that refuse are named as gaps rather than drawn as
  * zeroes, because a zero is a claim and "we cannot see it" is the truth.
+ *
+ * Only the delivery half is drawn over time. Engagement is one snapshot per destination, replaced
+ * on each refresh, so there is no honest trend line to draw from it — see the module comment in
+ * `stats.rs`. It is shown as a distribution instead: across platforms, across posts.
  *
  * Every bar is a drilldown: it carries the ids of the posts behind it, and clicking one opens that
  * set.
@@ -38,6 +47,7 @@ function StatsScreen() {
   const accounts = useAccounts()
   const posts = usePosts()
   const refresh = useRefreshEngagement()
+  const cost = useRefreshCost()
   const [refreshRef, refreshHover] = useAnimatedIcon()
 
   const [range, setRange] = React.useState<string>('30')
@@ -169,6 +179,18 @@ function StatsScreen() {
         />
       ) : null}
 
+      {data && data.byDay.length > 1 ? (
+        <div className="rounded-lg border border-border/60 bg-card/50 p-3.5">
+          <DeliveryChart buckets={data.byDay} onDrill={setDrilldown} />
+        </div>
+      ) : null}
+
+      {data && data.bySlot.length > 0 ? (
+        <div className="rounded-lg border border-border/60 bg-card/50 p-3.5">
+          <PunchCard buckets={data.bySlot} onDrill={setDrilldown} />
+        </div>
+      ) : null}
+
       <section>
         <div className="mb-2 flex items-baseline gap-2">
           <h2 className="font-display text-xs font-semibold tracking-wide text-muted-foreground uppercase">
@@ -182,7 +204,24 @@ function StatsScreen() {
             {...refreshHover}
             onClick={() => {
               void (async () => {
+                // X is the only platform that bills per read, so it is the only one that gets a
+                // confirmation. Asking before every free refresh would train the click away.
+                //
+                // The cost is fetched HERE rather than read off the cached query: a click that
+                // lands before the query resolves would otherwise see zero billed reads and spend
+                // the money without asking. `ask` rather than `window.confirm` for the same class
+                // of reason — the webview's own confirm resolves to a Promise, which is truthy
+                // whatever the user clicked, so the guard would never once have held.
                 try {
+                  const spend = await cost.refetch()
+                  const billed = spend.data?.billedReads ?? 0
+                  if (billed > 0) {
+                    const proceed = await ask(
+                      `This reads ${billed} post${billed === 1 ? '' : 's'} from X, which bills against your app's credits. The other ${spend.data?.freeReads ?? 0} are free.`,
+                      { title: 'Refresh engagement', kind: 'warning' },
+                    )
+                    if (!proceed) return
+                  }
                   const report = await refresh.mutateAsync()
                   const skipped = report.skipped > 0 ? `, skipped ${report.skipped}` : ''
                   const plural = report.updated === 1 ? '' : 's'
@@ -210,16 +249,31 @@ function StatsScreen() {
         <div className="rounded-lg border border-border/60 bg-card/50 p-3.5">
           {data && data.engagement.measured > 0 ? (
             <>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 <Figure label="Likes" value={data.engagement.likes} />
                 <Figure label="Reposts" value={data.engagement.reposts} />
                 <Figure label="Replies" value={data.engagement.replies} />
+                {/* Impressions sit beside the three rather than among them: a reach number on a
+                    scale 100× the others is not a fourth interaction. */}
+                <Figure label="Impressions" value={data.engagement.views} muted />
               </div>
               <p className="mt-2.5 text-xs text-muted-foreground">
                 Across {data.engagement.measured} destination
                 {data.engagement.measured === 1 ? '' : 's'}, as of{' '}
                 {formatRelative(data.engagement.oldestFetch)}.
               </p>
+
+              {data.engagementByPlatform.length > 1 ? (
+                <div className="mt-4 border-t border-border/50 pt-3.5">
+                  <EngagementChart rows={data.engagementByPlatform} />
+                </div>
+              ) : null}
+
+              {data.topPosts.length > 0 ? (
+                <div className="mt-4 border-t border-border/50 pt-3.5">
+                  <TopPosts posts={data.topPosts} />
+                </div>
+              ) : null}
             </>
           ) : (
             <p className="text-sm text-muted-foreground">
@@ -322,10 +376,25 @@ function Tile({
   )
 }
 
-function Figure({ label, value }: { label: string; value: number }) {
+function Figure({
+  label,
+  value,
+  muted = false,
+}: {
+  label: string
+  value: number
+  muted?: boolean
+}) {
   return (
     <div>
-      <p className="font-display text-xl font-semibold tabular-nums">{value}</p>
+      <p
+        className={cn(
+          'font-display text-xl font-semibold tabular-nums',
+          muted && 'text-muted-foreground',
+        )}
+      >
+        {value.toLocaleString()}
+      </p>
       <p className="text-xs text-muted-foreground">{label}</p>
     </div>
   )

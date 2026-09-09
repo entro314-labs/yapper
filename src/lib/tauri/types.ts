@@ -273,6 +273,8 @@ export interface EngagementTotals {
   likes: number
   reposts: number
   replies: number
+  /** Impressions, where the platform reports them — Threads, Instagram and X. */
+  views: number
   /**
    * How many destinations the totals are summed from — without it, "0 likes" and "nothing fetched
    * yet" look identical.
@@ -293,10 +295,49 @@ export interface Stats {
   byHour: Bucket[]
   byWeekday: Bucket[]
   byDay: Bucket[]
+  /** Weekday × hour, keyed `"{weekday}-{hour}"`. The punch card. */
+  bySlot: Bucket[]
   failures: Bucket[]
   engagement: EngagementTotals
-  /** Platforms in scope whose engagement Windbag cannot read, with the reason. */
+  engagementByPlatform: EngagementRow[]
+  topPosts: TopPost[]
+  /** Accounts in scope whose engagement Windbag cannot read, with the reason. */
   engagementGaps: Array<[PlatformId, string]>
+}
+
+/** `stats::EngagementRow` — one platform's engagement, over the destinations measured. */
+export interface EngagementRow {
+  platform: PlatformId
+  label: string
+  likes: number
+  reposts: number
+  replies: number
+  views: number
+  measured: number
+}
+
+/** `stats::TopPost` */
+export interface TopPost {
+  postId: number
+  platform: PlatformId
+  handle: string
+  excerpt: string
+  publishedAt: string | null
+  remoteUrl: string | null
+  likes: number
+  reposts: number
+  replies: number
+  views: number
+  /** Likes + reposts + replies. What the list is ranked by; views are reach, not earned. */
+  interactions: number
+  fetchedAt: string
+}
+
+/** `stats::RefreshCost` — what a refresh would read, before it runs. */
+export interface RefreshCost {
+  /** Destinations on X that would be looked up. Each one is a billed read. */
+  billedReads: number
+  freeReads: number
 }
 
 /** `stats::RefreshReport` */

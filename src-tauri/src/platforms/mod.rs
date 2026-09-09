@@ -412,6 +412,31 @@ pub fn adapter(id: PlatformId) -> &'static dyn Platform {
     }
 }
 
+/// The account's credentials, refreshed first if they are about to expire and
+/// written back when they rotate.
+///
+/// Both callers need exactly this: the scheduler before it publishes, and
+/// [`crate::stats`] before it reads engagement. X's access tokens live two
+/// hours, so a reporting read on a day-old token fails without it.
+pub fn live_secret(
+    database: &crate::db::Db,
+    account: &crate::db::Account,
+) -> Result<AccountSecret> {
+    let adapter = adapter(account.platform);
+    let app_credentials =
+        crate::secrets::load_app_credentials(account.platform, account.instance.as_deref())?;
+    let secret = crate::secrets::load_account_secret(account.platform, &account.remote_id)?;
+
+    match adapter.refresh(account, &secret, app_credentials.as_ref())? {
+        Some(refreshed) => {
+            crate::secrets::store_account_secret(account.platform, &account.remote_id, &refreshed)?;
+            database.set_account_token_expiry(account.id, refreshed.expires_at.as_deref())?;
+            Ok(refreshed)
+        }
+        None => Ok(secret),
+    }
+}
+
 pub fn all_info() -> Vec<PlatformInfo> {
     PlatformId::ALL
         .iter()

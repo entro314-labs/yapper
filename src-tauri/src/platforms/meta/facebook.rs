@@ -36,7 +36,7 @@ fn authorize_url() -> String {
     format!("https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth")
 }
 
-fn api_base() -> String {
+pub(crate) fn api_base() -> String {
     format!("https://graph.facebook.com/{GRAPH_VERSION}")
 }
 
