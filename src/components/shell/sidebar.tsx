@@ -14,13 +14,15 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useAnimatedIcon } from '@/lib/animated-icon'
 import {
   APP_NAME,
+  MAC_TITLEBAR_INSET_LEFT,
+  MAC_TITLEBAR_INSET_LEFT_FULLSCREEN,
   SIDEBAR_MAX_W,
   SIDEBAR_MIN_W,
   SIDEBAR_RAIL_W,
   TITLEBAR_H,
-  TITLEBAR_INSET_LEFT,
   IS_MACOS,
 } from '@/lib/chrome'
+import { useIsFullscreen } from '@/lib/fullscreen'
 import { usePrefs } from '@/lib/prefs'
 import { cn } from '@/lib/utils'
 
@@ -46,8 +48,9 @@ const FOOTER: NavItem[] = [{ to: '/settings', label: 'Settings', icon: SettingsI
 
 /**
  * The navigation column — and, with the system frame gone, the window's leading chrome. It runs the
- * full window height and hosts the macOS traffic lights in its own header band, so there is no
- * shared horizontal titlebar; the content island carries its own (see PaneTitlebar).
+ * full window height and hosts the macOS traffic lights in its own header band — in both states,
+ * which is why the rail is wider than its icons need — so there is no shared horizontal titlebar;
+ * the content island carries its own (see PaneTitlebar).
  *
  * Two states. The outer shell animates its width while the inner wrapper keeps a fixed one, so
  * content slides out of the clip instead of squashing mid-animation.
@@ -90,6 +93,9 @@ export function Sidebar() {
 }
 
 function FullContent() {
+  // Fullscreen hides the traffic lights, so the wordmark stops clearing a gap that is no
+  // longer occupied and moves back to the window edge.
+  const fullscreen = useIsFullscreen()
   return (
     <div
       className="flex h-full flex-col"
@@ -100,7 +106,11 @@ function FullContent() {
         className="drag-region flex shrink-0 items-center"
         style={{
           height: TITLEBAR_H,
-          paddingLeft: IS_MACOS ? TITLEBAR_INSET_LEFT : 14,
+          paddingLeft: IS_MACOS
+            ? fullscreen
+              ? MAC_TITLEBAR_INSET_LEFT_FULLSCREEN
+              : MAC_TITLEBAR_INSET_LEFT
+            : 14,
         }}
       >
         <span className="font-display pointer-events-none truncate text-sm font-semibold tracking-tight">
@@ -130,8 +140,9 @@ function RailContent() {
       <header
         data-tauri-drag-region
         className="drag-region flex shrink-0 items-end justify-center pb-1"
-        // On macOS the traffic lights own this band, so the rail's toggle drops
-        // below them instead of colliding with the close button.
+        // On macOS the traffic lights own this band — the rail is sized so they
+        // sit entirely inside it — so the toggle drops below them instead of
+        // colliding with the close button.
         style={{ height: IS_MACOS ? TITLEBAR_H + 24 : TITLEBAR_H }}
       >
         <LayoutButton />

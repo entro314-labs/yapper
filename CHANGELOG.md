@@ -122,6 +122,18 @@ All notable changes to Windbag are documented here. The format follows
 - `FieldSpec` now declares its allowed values, which the renderer draws as a
   picker. It previously parsed them out of the help sentence.
 
+### Fixed
+
+- **The macOS traffic lights sit where macOS puts them.** Their position was
+  pinned from `tauri.conf.json`, which macOS 26 stopped honouring vertically —
+  leaving the buttons off-centre in a header band sized for coordinates the OS
+  was ignoring. The window now carries an empty unified toolbar instead, so
+  AppKit places and centres them itself the way Finder's are, and the sidebar
+  header is sized to that band. The collapsed rail widened to match: the lights
+  span 80px from the window edge, and at 56px the green one straddled the seam
+  between the rail and the content pane. In fullscreen, where the OS hides them,
+  the wordmark stops reserving the gap.
+
 ### Activation
 
 OAuth needs `docs/client-metadata.json` published on the web and a bundled

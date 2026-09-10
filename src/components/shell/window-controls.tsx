@@ -9,8 +9,8 @@ import { cn } from '@/lib/utils'
  *
  * They carry the desktop's own three colours rather than Windbag's palette: close is red
  * everywhere, and a user whose OS accent is cyan still expects that. macOS renders nothing here —
- * Tauri keeps the real traffic lights, positioned from `tauri.conf.json` to sit inside the
- * sidebar's header band.
+ * it keeps the real traffic lights, which AppKit places in the title-bar band the sidebar header is
+ * sized to (see windowing.rs and lib/chrome.ts).
  */
 export function WindowControls({ className }: { className?: string }) {
   if (IS_MACOS) return null

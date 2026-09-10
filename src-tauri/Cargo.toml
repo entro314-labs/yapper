@@ -95,6 +95,18 @@ env_logger = "0.11"
 # tauri's `set_effects`: tauri 2.11 links window-vibrancy 0.6, which predates
 # the newer materials and lacks the `clear_*` half a live toggle needs.
 window-vibrancy = "0.8"
+# The title-bar surgery the traffic lights need (windowing.rs): a transparent
+# titlebar over a full-size content view, plus the empty unified toolbar that
+# makes AppKit place the lights itself. Same versions tauri/tao already link, so
+# this adds no second copy to the graph. Apple-only at the CRATE level — objc2
+# emits a hard `compile_error!` elsewhere — hence the target section.
+objc2 = "0.6"
+# `NSWindow` carries every enum used here (style mask, title visibility, toolbar
+# style, titlebar separator); the rest of AppKit's bindings would be dead weight.
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSWindow",
+] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 window-vibrancy = "0.8"

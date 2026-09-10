@@ -7,6 +7,13 @@
 
 use tauri::WebviewWindow;
 
+#[cfg(target_os = "macos")]
+use objc2::msg_send;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{
+    NSTitlebarSeparatorStyle, NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle,
+};
+
 /// Applies a material and returns what the OS really did — `off` whenever the
 /// platform or the compositor refused.
 pub fn apply_material(window: &WebviewWindow, requested: &str) -> String {
@@ -54,6 +61,52 @@ pub fn apply_material(window: &WebviewWindow, requested: &str) -> String {
         // honest answer is that nothing was applied.
         let _ = (window, requested);
         "off".to_string()
+    }
+}
+
+/// The macOS title bar the traffic lights live in.
+///
+/// Placement is left to `AppKit` rather than pinned from `tauri.conf.json`. An
+/// EMPTY unified toolbar gives the window the standard toolbar-window title-bar
+/// height, and `AppKit` centres the lights in it on every macOS version — the same
+/// geometry Finder has. The toolbar paints nothing: the title bar is
+/// transparent, the title hidden, the separator off.
+///
+/// Deliberately NOT `trafficLightPosition`: tao implements it by growing the
+/// title-bar container and re-setting only the buttons' x on every drawRect, and
+/// macOS 26+ no longer moves the buttons with that container — so `y` is inert
+/// there while still shifting them on 14/15, which is one placement per OS.
+/// Setting the buttons' frames by hand is no better: `AppKit` re-lays them out.
+///
+/// The renderer sizes its top strips to the band this produces (`lib/chrome.ts`).
+#[cfg(target_os = "macos")]
+pub fn configure_titlebar(window: &WebviewWindow) {
+    let Ok(ns_window) = window.ns_window() else {
+        log::warn!("no NSWindow to configure; the traffic lights keep AppKit's defaults");
+        return;
+    };
+    let ns_window = ns_window.cast::<objc2::runtime::AnyObject>();
+
+    // SAFETY: `ns_window` is the live NSWindow tauri returned for this webview
+    // window, and every call is made on the main thread (this runs inside the
+    // setup callback). The style-mask assignment ORs into the existing mask so
+    // the bits we do not own survive.
+    #[expect(unsafe_code)]
+    unsafe {
+        let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: true];
+        let _: () = msg_send![ns_window, setTitleVisibility: NSWindowTitleVisibility::Hidden];
+
+        let current_style: NSWindowStyleMask = msg_send![ns_window, styleMask];
+        let _: () = msg_send![
+            ns_window,
+            setStyleMask: current_style | NSWindowStyleMask::FullSizeContentView
+        ];
+
+        let toolbar: *mut objc2::runtime::AnyObject = msg_send![objc2::class!(NSToolbar), new];
+        let _: () = msg_send![toolbar, setAllowsUserCustomization: false];
+        let _: () = msg_send![ns_window, setToolbar: toolbar];
+        let _: () = msg_send![ns_window, setToolbarStyle: NSWindowToolbarStyle::Unified];
+        let _: () = msg_send![ns_window, setTitlebarSeparatorStyle: NSTitlebarSeparatorStyle::None];
     }
 }
 

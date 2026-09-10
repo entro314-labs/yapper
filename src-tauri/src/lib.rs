@@ -175,6 +175,9 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
 
     if let Some(window) = app.get_webview_window("main") {
         windowing::apply_material(&window, "standard");
+        // Before the window is shown, so the title bar never jumps.
+        #[cfg(target_os = "macos")]
+        windowing::configure_titlebar(&window);
         // Shown only once the renderer has painted, so the first frame is
         // never an unthemed white flash against a transparent window.
         let launched_hidden = std::env::args().any(|arg| arg == "--hidden");
