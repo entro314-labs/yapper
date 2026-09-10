@@ -45,6 +45,12 @@ export const IPC_COMMANDS = {
   metaAdsTools: 'meta_ads_tools',
   metaAdsCall: 'meta_ads_call',
 
+  checkForUpdate: 'check_for_update',
+  installUpdate: 'install_update',
+  restartAndInstall: 'restart_and_install',
+  updateStaged: 'update_staged',
+  updateInstallSupport: 'update_install_support',
+
   setWindowMaterial: 'set_window_material',
 } as const
 
@@ -57,6 +63,8 @@ export const IPC_EVENTS = {
   /** A connect flow finished, either way. Payload: `AuthOutcome`. */
   auth: 'windbag://auth',
   notesChanged: 'windbag://notes-changed',
+  /** An update download is in flight. Payload: `{ downloaded, total }` in bytes. */
+  updateProgress: 'windbag://update-progress',
 } as const
 
 type ValueOf<T> = T[keyof T]

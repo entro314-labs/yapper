@@ -265,9 +265,19 @@ src-tauri/src/
   dpop.rs               proof-of-possession signing for that flow
   ai.rs                 three assistant backends behind one verb
   stats.rs              delivery figures, and engagement off each platform's API
+  update.rs             signed auto-updates, staged and installed on quit
   mcp.rs + bin/mcp.rs   the agent door
   platforms/            one adapter per destination behind the Platform trait
 ```
+
+### Releasing
+
+`pnpm release patch` writes the version, rolls the changelog and pushes a tag;
+the tag runs the pipeline that builds every platform, signs the updater
+artifacts and publishes them on the public `windbag-releases` mirror. The
+updater endpoints and the minisign public key that verifies every download are
+in `src-tauri/tauri.conf.json`. Full ritual and the one-time secrets in
+[`docs/RELEASING.md`](docs/RELEASING.md).
 
 ### Adding a platform
 

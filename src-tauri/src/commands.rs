@@ -670,6 +670,11 @@ pub struct Settings {
     pub ai_model: String,
     /// `low` | `medium` | `high` | `xhigh`. Empty means the tool's default.
     pub ai_effort: String,
+    /// `auto` | `stable` | `beta` | `alpha` — which release manifest the updater
+    /// polls. `auto` derives it from the running build's own version, so a
+    /// prerelease install does not sit on the stable endpoint waiting for a
+    /// release that will not arrive for months.
+    pub update_channel: String,
 }
 
 impl Default for Settings {
@@ -683,9 +688,15 @@ impl Default for Settings {
             ai_backend: Backend::Off.as_str().into(),
             ai_model: String::new(),
             ai_effort: String::new(),
+            update_channel: "auto".into(),
         }
     }
 }
+
+/// `meta` key for the update channel. Kept beside the setting it stores rather
+/// than in `update.rs`: the store is `commands`' business, and `update.rs` is
+/// handed the resolved channel by the renderer.
+const META_UPDATE_CHANNEL: &str = "update_channel";
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
@@ -713,6 +724,10 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
             .into(),
         ai_model: state.db.get_meta(ai::META_MODEL)?.unwrap_or_default(),
         ai_effort: state.db.get_meta(ai::META_EFFORT)?.unwrap_or_default(),
+        update_channel: state
+            .db
+            .get_meta(META_UPDATE_CHANNEL)?
+            .unwrap_or(defaults.update_channel),
     })
 }
 
@@ -753,6 +768,16 @@ pub fn update_settings(
     state
         .db
         .set_meta(ai::META_EFFORT, settings.ai_effort.trim())?;
+    // Anything unrecognised falls back to `auto`, which is always answerable:
+    // an unknown channel string would send the updater at an endpoint that does
+    // not exist and report it as a broken pipeline.
+    state.db.set_meta(
+        META_UPDATE_CHANNEL,
+        match settings.update_channel.as_str() {
+            channel @ ("stable" | "beta" | "alpha") => channel,
+            _ => "auto",
+        },
+    )?;
     get_settings(state)
 }
 

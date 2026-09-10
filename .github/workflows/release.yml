@@ -1,0 +1,136 @@
+# Thin caller for the shared Tauri release pipeline (tauri-release-kit) —
+# meltemi's and anasa's model: the full build → sign → manifest → verify →
+# publish → homebrew pipeline lives in entro314-labs/tauri-release-kit; fixes
+# land there once and every app picks them up.
+#
+# Required secrets: TAURI_SIGNING_PRIVATE_KEY (the ~/.tauri/windbag.key minisign
+# key, whose public half is in src-tauri/tauri.conf.json), RELEASES_TOKEN (write
+# access to the public releases repo), HOMEBREW_TAP_TOKEN.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.3.0 — plain semver, single channel)'
+        required: true
+        type: string
+      build_targets:
+        description: >-
+          Retry lever: only build these legs (comma-separated updater keys,
+          e.g. "windows-x86_64,windows-aarch64"). Empty = all. After a
+          partially failed release, re-dispatch with the SAME tag and just the
+          failed legs — the run reuses the existing draft, so successful legs'
+          assets are kept and only the failed legs cost runner minutes again.
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Release gate. The kit's own pipeline runs only `cargo fmt` and `cargo
+  # clippy`, so without this job a tag on a commit that is not the tip of a
+  # green branch (a hotfix, a cherry-pick, main mid-CI) would publish signed,
+  # auto-updating binaries that never saw tsc, oxlint, knip or cargo test.
+  # `release` needs this job, so a red gate stops the release before any asset
+  # exists.
+  preflight:
+    name: Preflight gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux system dependencies
+        # clippy and cargo test compile the tauri crate, which links
+        # webkit2gtk/soup/gtk — and, because tauri is taken with the `tray-icon`
+        # feature, libappindicator too, whether or not Windbag draws a tray icon.
+        # Ayatana only: libappindicator3-dev Conflicts: with it on ubuntu-24.04.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Setup Rust
+        # No explicit toolchain input: rustup resolves rust-toolchain.toml (the
+        # single source of the pin) when cargo runs inside the repo, and that
+        # file pins the components too.
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Full check (oxlint, oxfmt, tsc, vite build, cargo fmt + clippy + test)
+        run: pnpm check
+
+      - name: Unused-code check
+        run: pnpm knip
+
+      - name: Validate Tauri capabilities/permissions load
+        # `tauri permission ls` parses tauri.conf.json plus every capability
+        # file; a malformed capability fails here instead of mid-release-build.
+        run: pnpm tauri permission ls > /dev/null
+
+  release:
+    needs: preflight
+    # Pinned to a reviewed commit, NOT @main: this workflow runs with
+    # `contents: write` and the RELEASES_TOKEN secret, so a mutable external ref
+    # would let any push to the kit's default branch publish releases here. Bump
+    # deliberately after reviewing the diff.
+    # 95a417e = kit tip 2026-09-08: asserts the tag matches the app version and
+    # gates channel pointers on it, both of which a first release wants.
+    uses: entro314-labs/tauri-release-kit/.github/workflows/release.yml@95a417eb6fabbb19f1dc4777537110f34a7873ec
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      app_display_name: 'Windbag'
+      project_path: '.'
+      cargo_package: 'windbag'
+      # Match mise.toml and the preflight gate above; the kit defaults to 24.
+      node_version: '26'
+      tag: ${{ inputs.tag || '' }}
+      build_targets: ${{ inputs.build_targets || '' }}
+      # deb + rpm + AppImage on both Linux legs. AppImage is the one the updater
+      # can replace in place; deb/rpm installs are told to use their package
+      # manager instead (`update_install_support` in src-tauri/src/update.rs).
+      linux_bundles: 'deb,rpm,appimage'
+      # release-kit writes the version BEFORE tagging (release.config.json), so
+      # the kit's post-release patch-bump PR would be a second writer.
+      post_release_bump: false
+      # Releases and updater manifests live on the public mirror; the endpoints
+      # in tauri.conf.json and src-tauri/src/update.rs point there. Keeping them
+      # off the app repo is what makes the updater work even while this repo is
+      # private — private release assets 404 for anyone unauthenticated.
+      releases_repo: 'entro314-labs/windbag-releases'
+      # Case-sensitive: this is the bundled asset filename stem
+      # (Windbag_<version>_aarch64.dmg) and the .app name in the generated cask,
+      # so it must match tauri.conf.json's productName exactly.
+      product_name: 'Windbag'
+      homebrew_tap: 'entro314-labs/homebrew-tap'
+      cask_desc: 'Keyboard-first desktop composer and scheduler for social platforms'
+      cask_homepage: 'https://windbag.social'
+      bundle_identifier: 'com.entro314.windbag'
+    secrets: inherit

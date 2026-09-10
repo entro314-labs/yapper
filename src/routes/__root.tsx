@@ -15,6 +15,7 @@ import { humanMessage, subscribeEvent } from '@/lib/tauri/client'
 import { IPC_EVENTS } from '@/lib/tauri/ipc'
 import type { AuthOutcome } from '@/lib/tauri/types'
 import { ThemeProvider, useTheme } from '@/lib/theme'
+import { UpdatesProvider } from '@/lib/updates'
 import { cn } from '@/lib/utils'
 
 interface RouterContext {
@@ -31,15 +32,17 @@ function RootShell() {
   return (
     <ThemeProvider settings={settings.data}>
       <PrefsProvider>
-        <TooltipProvider delay={250} closeDelay={100}>
-          {/* The CSS reduced-motion rule only reaches CSS animations. Motion drives its own, so
-              it has to be told about the setting separately. */}
-          <MotionConfig reducedMotion="user">
-            <AuthListener />
-            <ThemedToaster />
-            <ShellLayout />
-          </MotionConfig>
-        </TooltipProvider>
+        <UpdatesProvider>
+          <TooltipProvider delay={250} closeDelay={100}>
+            {/* The CSS reduced-motion rule only reaches CSS animations. Motion drives its own, so
+                it has to be told about the setting separately. */}
+            <MotionConfig reducedMotion="user">
+              <AuthListener />
+              <ThemedToaster />
+              <ShellLayout />
+            </MotionConfig>
+          </TooltipProvider>
+        </UpdatesProvider>
       </PrefsProvider>
     </ThemeProvider>
   )

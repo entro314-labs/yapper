@@ -15,6 +15,7 @@ mod platforms;
 mod scheduler;
 mod secrets;
 mod stats;
+mod update;
 pub mod webhost;
 mod windowing;
 
@@ -64,6 +65,10 @@ pub fn run() {
         // and the assistant tier simply reports "unavailable" off macOS.
         .plugin(tauri_plugin_apple_intelligence::init())
         .plugin(tauri_plugin_opener::init())
+        // Signed auto-updates. The plugin only makes the check possible; when a
+        // downloaded bundle is actually swapped in is decided in `update.rs`,
+        // and that is deliberately not while the app is running.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         // Started with `--hidden` so a login launch waits in the background: a
         // scheduler that only runs when you happen to open the app is not one.
@@ -114,21 +119,31 @@ pub fn run() {
             commands::forget_web_host,
             commands::meta_ads_tools,
             commands::meta_ads_call,
+            update::check_for_update,
+            update::install_update,
+            update::restart_and_install,
+            update::update_staged,
+            update::update_install_support,
             windowing::set_window_material,
         ])
         .build(tauri::generate_context!())
         .expect("Windbag failed to start")
-        .run(|app, event| {
+        .run(|app, event| match event {
             // macOS: clicking the Dock icon does not start a second process, so
             // the single-instance handler never fires and a window hidden by the
             // close button would be unreachable — quit-and-relaunch would be the
             // only way back. This is the one event that offers it.
-            if let tauri::RunEvent::Reopen { .. } = event
-                && let Some(window) = app.get_webview_window("main")
-            {
-                let _ = window.show();
-                let _ = window.set_focus();
+            tauri::RunEvent::Reopen { .. } => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
             }
+            // The quit path, and the only safe moment to swap the bundle:
+            // replacing it while the process runs breaks its code signature.
+            // Closing the window only hides Windbag, so this really is the exit.
+            tauri::RunEvent::ExitRequested { .. } => update::install_pending_on_exit(app),
+            _ => {}
         });
 }
 
@@ -172,6 +187,9 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
         scheduler,
         connecting: AtomicBool::new(false),
     });
+    // Empty until something is downloaded; `install_pending_on_exit` reads it on
+    // the way out.
+    app.manage(update::PendingUpdate(std::sync::Mutex::new(None)));
 
     if let Some(window) = app.get_webview_window("main") {
         windowing::apply_material(&window, "standard");

@@ -9,6 +9,7 @@ import { CopyIcon } from '@/components/icons/copy'
 import { ExternalLinkIcon } from '@/components/icons/external-link'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Progress } from '@/components/ui/progress'
 import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { useAnimatedIcon } from '@/lib/animated-icon'
@@ -28,6 +29,13 @@ import {
 } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
 import type { AiBackend, PlatformInfo, Settings } from '@/lib/tauri/types'
+import {
+  UPDATE_CHANNEL_LABELS,
+  describeUpdateError,
+  formatUpdateSize,
+  updateProgressPercent,
+} from '@/lib/update-channel'
+import { useUpdates } from '@/lib/updates'
 
 export const Route = createFileRoute('/settings')({ component: SettingsScreen })
 
@@ -172,6 +180,30 @@ function SettingsScreen() {
       </Section>
 
       <Section
+        title="Updates"
+        note="Windbag checks its releases repository at launch and once a day after that. A downloaded update is never swapped in while the app is running — that would break its code signature — so it installs when you quit, or immediately if you ask it to restart."
+      >
+        <Row
+          label="Channel"
+          hint="Which release stream to follow. Matching this build keeps a prerelease install on the channel it came from."
+        >
+          <Select
+            value={current.updateChannel}
+            onChange={(event) => {
+              patch({ updateChannel: event.target.value as Settings['updateChannel'] })
+            }}
+          >
+            {(['auto', 'stable', 'beta', 'alpha'] as const).map((channel) => (
+              <option key={channel} value={channel}>
+                {UPDATE_CHANNEL_LABELS[channel]}
+              </option>
+            ))}
+          </Select>
+        </Row>
+        <UpdateRow />
+      </Section>
+
+      <Section
         title="Agent door"
         note="Windbag ships an MCP server so an agent host can read your queue and schedule posts directly — where you see and approve each tool call. Build it with `cargo build --release --bin windbag-mcp`, then register the binary:"
       >
@@ -197,6 +229,107 @@ function SettingsScreen() {
           ))}
       </Section>
     </div>
+  )
+}
+
+/**
+ * The whole update flow in one row: what the check found, the download, and the restart that
+ * applies it. Deliberately not a modal — nothing here is urgent enough to interrupt a compose, and
+ * the status bar already carries the ambient half.
+ *
+ * A `packageManager` install is told the truth instead of being offered a check it cannot act on:
+ * the Tauri updater can only replace an AppImage on Linux.
+ */
+function UpdateRow() {
+  const { state, meta, progress, error, support, check, download, restartNow } = useUpdates()
+  const [version, setVersion] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    void (async () => {
+      try {
+        const { getVersion } = await import('@tauri-apps/api/app')
+        setVersion(await getVersion())
+      } catch {
+        // Not running under Tauri; the version line simply stays out.
+      }
+    })()
+  }, [])
+
+  if (support === 'packageManager') {
+    return (
+      <Row
+        label={version ? `Windbag ${version}` : 'Windbag'}
+        hint="This install is managed by your package manager — update it from there. The in-app updater can only replace an AppImage."
+      >
+        <span className="text-xs text-muted-foreground">Managed externally</span>
+      </Row>
+    )
+  }
+
+  const busy = state === 'checking' || state === 'downloading'
+  const percent = updateProgressPercent(progress)
+  const size = formatUpdateSize(meta?.downloadSize)
+  const failure = state === 'error' && error ? describeUpdateError(error) : null
+
+  const hint =
+    state === 'staged'
+      ? `Version ${meta?.version ?? ''} is downloaded and verified. It installs when you quit Windbag.`
+      : state === 'available'
+        ? `Version ${meta?.version ?? ''} is available${size ? ` (${size})` : ''}.`
+        : state === 'downloading'
+          ? percent === null
+            ? 'Downloading…'
+            : `Downloading — ${percent}%`
+          : state === 'checking'
+            ? 'Checking…'
+            : failure
+              ? failure.detail
+              : 'Up to date.'
+
+  return (
+    <>
+      <Row label={version ? `Windbag ${version}` : 'Windbag'} hint={failure?.title ?? hint}>
+        {state === 'staged' ? (
+          <Button
+            size="sm"
+            onClick={() => {
+              void restartNow()
+            }}
+          >
+            Restart now
+          </Button>
+        ) : state === 'available' ? (
+          <Button
+            size="sm"
+            onClick={() => {
+              void download()
+            }}
+          >
+            Download
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            variant="outline"
+            // A failure the copy calls unretryable (a bad signature) gets no
+            // button that pretends otherwise.
+            disabled={busy || failure?.retryable === false}
+            onClick={() => {
+              void check(true)
+            }}
+          >
+            {state === 'checking' ? 'Checking…' : 'Check for updates'}
+          </Button>
+        )}
+      </Row>
+      {state === 'downloading' ? (
+        <div className="px-3 py-2.5">
+          {/* A server that sent no Content-Length gives no honest percentage;
+              base-ui renders a null value as its indeterminate bar. */}
+          <Progress value={percent} />
+        </div>
+      ) : null}
+    </>
   )
 }
 

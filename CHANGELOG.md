@@ -8,6 +8,29 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Added
 
+- **Updates, and the pipeline behind them.** Windbag checks its releases
+  repository at launch and once a day after that, and Settings → Updates carries
+  the whole flow: the channel to follow (stable, beta, alpha, or matching this
+  build), what a check found and how large the download is, the download itself
+  with a progress bar, and the restart that applies it. The status bar carries
+  the ambient half — an available, downloading or staged update stays visible
+  without ever interrupting a compose.
+- **A downloaded update is never installed while the app runs.** Replacing a
+  live bundle breaks the running process's code signature, so a verified
+  download is staged and swapped in on quit — or immediately, if you ask for the
+  restart. Closing the window only hides Windbag, so the quit really is the exit.
+- **Failures say which failure they are.** The Tauri updater flattens every
+  unreadable manifest into one string, which makes a missing releases repository
+  indistinguishable from a channel that has no release yet. Windbag re-asks the
+  releases host directly and reports a broken pipeline as broken instead of as
+  the calm pre-first-release state. A deb, rpm or Flatpak install is told it is
+  managed by its package manager rather than offered a self-update it cannot do.
+- **The release pipeline.** `pnpm release` writes the version, rolls the
+  changelog and tags; the tag runs a preflight gate and then
+  `entro314-labs/tauri-release-kit`, which builds six platform legs, signs the
+  updater artifacts, and publishes the release plus its `latest.json` manifest
+  on the public `windbag-releases` mirror. See
+  [`docs/RELEASING.md`](docs/RELEASING.md).
 - **Reporting, off the official APIs.** Engagement is now read from each
   platform's own documented endpoint rather than being reported as unavailable:
   Threads and Instagram per-media `/insights`, a Facebook Page post's own

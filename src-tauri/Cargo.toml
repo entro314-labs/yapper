@@ -41,6 +41,12 @@ tauri-plugin-window-state = "2"
 # a loopback redirect is invalid for a production native client there — so the
 # OS has to route `io.github.…:/callback` into the running app.
 tauri-plugin-deep-link = "2"
+# Signed, deferred auto-updates against the public windbag-releases mirror
+# (src/update.rs). Default features on purpose: they carry `rustls-tls`, which is
+# the same TLS choice this crate makes below, so no OpenSSL enters the graph. It
+# does link its own reqwest 0.13 beside ours — the two majors cannot unify, and
+# the alternative is pinning the whole app to the plugin's reqwest.
+tauri-plugin-updater = "2"
 # Apple's on-device Foundation model: the free, offline, keyless assistant tier.
 # Deliberately NOT platform-gated — the plugin carries its own non-Apple-silicon
 # stub whose every command rejects with `UnsupportedPlatform`, so registering it

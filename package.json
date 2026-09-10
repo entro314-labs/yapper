@@ -25,7 +25,11 @@
     "check": "pnpm lint && pnpm fmt:check && pnpm check:frontend && pnpm fmt:rust:check && pnpm lint:rust && pnpm test:rust",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:build:macos": "tauri build --config src-tauri/tauri.macos.conf.json",
+    "tauri:build:windows": "tauri build --config src-tauri/tauri.windows.conf.json",
+    "tauri:build:linux": "tauri build --config src-tauri/tauri.linux.conf.json",
+    "release": "npx @entro314labs/release-kit@2.9.4"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

@@ -184,6 +184,31 @@ export interface Settings {
   /** Empty means the tool's own default model, which is usually the right one. */
   aiModel: string
   aiEffort: string
+  /** Which release manifest the updater polls; `auto` derives it from this build's version. */
+  updateChannel: 'auto' | 'stable' | 'beta' | 'alpha'
+}
+
+/** `update::UpdateMeta` */
+export interface UpdateMeta {
+  version: string
+  /** The release's CHANGELOG section, as published by the release pipeline. */
+  notes: string | null
+  date: string | null
+  /** Absent when the manifest predates the pipeline's `size` extension. */
+  downloadSize: number | null
+}
+
+/**
+ * `update::UpdateInstallSupport` — whether the in-app updater can replace THIS install. A deb, rpm
+ * or Flatpak is owned by its package manager, and offering it a self-update it cannot perform is
+ * worse than saying so.
+ */
+export type UpdateInstallSupport = 'supported' | 'packageManager'
+
+/** Payload of `windbag://update-progress`. `total` is null when the server sent no length. */
+export interface UpdateProgress {
+  downloaded: number
+  total: number | null
 }
 
 /** `commands::AuthOutcome`, delivered on `windbag://auth`. */

@@ -1,7 +1,9 @@
-import { IconAlertTriangle, IconCircleCheck, IconClock } from '@tabler/icons-react'
+import { IconAlertTriangle, IconCircleCheck, IconClock, IconDownload } from '@tabler/icons-react'
 import { Link } from '@tanstack/react-router'
 
 import { usePosts, useAccounts } from '@/lib/query'
+import { updateProgressPercent } from '@/lib/update-channel'
+import { useUpdates } from '@/lib/updates'
 import { formatRelative } from '@/lib/utils'
 
 /**
@@ -48,6 +50,8 @@ export function StatusBar() {
         </Link>
       ) : null}
 
+      <UpdateReadout />
+
       {stale.length > 0 ? (
         <Link to="/accounts" className="flex items-center gap-1.5 text-destructive hover:underline">
           <IconAlertTriangle className="size-3" />
@@ -56,5 +60,35 @@ export function StatusBar() {
         </Link>
       ) : null}
     </footer>
+  )
+}
+
+/**
+ * The ambient half of the updater: an available, downloading or staged update stays discoverable
+ * without ever interrupting. `downloading` is included deliberately — an indicator that vanishes
+ * for exactly as long as something is happening is worth the least when it matters most.
+ *
+ * The whole flow lives in Settings → Updates, which is where this points.
+ */
+function UpdateReadout() {
+  const { state, meta, progress } = useUpdates()
+  if (state !== 'available' && state !== 'downloading' && state !== 'staged') return null
+
+  const percent = updateProgressPercent(progress)
+  const label =
+    state === 'staged'
+      ? 'Update ready — restart to apply'
+      : state === 'downloading'
+        ? // No Content-Length means no honest percentage to show.
+          percent === null
+          ? 'Downloading update'
+          : `Downloading update ${percent}%`
+        : `Version ${meta?.version ?? ''} available`
+
+  return (
+    <Link to="/settings" className="flex items-center gap-1.5 text-primary hover:underline">
+      <IconDownload className={state === 'downloading' ? 'size-3 animate-pulse' : 'size-3'} />
+      <span className="tabular-nums">{label}</span>
+    </Link>
   )
 }

@@ -48,4 +48,10 @@ export const queryKeys = {
     root: ['settings'] as const,
     current: () => [...queryKeys.settings.root, 'current'] as const,
   },
+  updates: {
+    root: ['updates'] as const,
+    /** Whether a download from THIS session is waiting for the next quit. */
+    staged: () => [...queryKeys.updates.root, 'staged'] as const,
+    installSupport: () => [...queryKeys.updates.root, 'installSupport'] as const,
+  },
 } as const
