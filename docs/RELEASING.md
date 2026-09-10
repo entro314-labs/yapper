@@ -47,22 +47,42 @@ The tag push triggers `release.yml`: a preflight gate runs `pnpm check` and
 signs the updater artifacts, publishes the release and `latest.json` on the
 mirror, and updates the Homebrew cask.
 
-## One-time setup
+## What is already wired
 
-Nothing below is in the repo, and the pipeline is inert until all of it exists:
+Nothing here needs doing again — it is written down because losing any of it
+breaks the pipeline in a way the error messages will not explain.
 
-1. **The releases mirror.** A public `entro314-labs/windbag-releases` repo.
-2. **Secrets** on this repo:
-   - `TAURI_SIGNING_PRIVATE_KEY` — the contents of `~/.tauri/windbag.key`. Its
-     public half is already in `tauri.conf.json`; **lose the private key and no
-     existing install can ever be updated again.**
-   - `RELEASES_TOKEN` — write access to the mirror.
-   - `HOMEBREW_TAP_TOKEN` — write access to `entro314-labs/homebrew-tap`.
+- **`entro314-labs/windbag-releases`** — the public mirror releases and the
+  `latest.json` manifests are published to.
+- **`TAURI_SIGNING_PRIVATE_KEY`** — the minisign key at `~/.tauri/windbag.key`,
+  whose public half is in `src-tauri/tauri.conf.json`. **That local file is the
+  only copy: lose it and no installed copy of Windbag can ever be updated
+  again, on any channel, forever.** Back it up somewhere that is not this
+  machine. There is deliberately no `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+  secret — the key is passwordless, and the kit sets that variable to the empty
+  string, which is what a passwordless key expects.
+- **`RELEASES_TOKEN` / `HOMEBREW_TAP_TOKEN`** — currently both hold the same
+  broad classic PAT, which is org-wide (`repo`, `admin:org`, `delete_repo`) and
+  lives in a *public* repo's Actions secrets. It works, and it is more access
+  than either job needs. When convenient, replace them with two fine-grained
+  PATs carrying only `Contents: Read and write`, one on `windbag-releases` and
+  one on `homebrew-tap`:
 
-macOS runners bill 10× on a private repo. The kit accepts `macos_arm_runner` /
-`macos_intel_runner` inputs pointing at a self-hosted Apple Silicon label (the
-other apps here use `macbook`); wire those in once a runner exists, and never
-on a public repo whose workflows run for fork PRs.
+  ```sh
+  gh secret set RELEASES_TOKEN     --repo entro314-labs/yapper   # scoped to windbag-releases
+  gh secret set HOMEBREW_TAP_TOKEN --repo entro314-labs/yapper   # scoped to homebrew-tap
+  ```
+
+- **GitHub Pages, from `/docs` on `main`.** Not part of releasing, but it shares
+  this repo's fate: it serves `client-metadata.json` at the URL the AT Protocol
+  treats as Windbag's identity. **This repo cannot be made private** — Sign in
+  with Bluesky would stop working for every user the moment it were.
+
+macOS runners bill 10× on a private repo; this one is public, so they bill at
+the standard rate and the `macos_arm_runner` / `macos_intel_runner`
+self-hosted overrides the other apps here use are not needed. Never point them
+at a self-hosted runner while this repo is public and its workflows run for
+fork PRs.
 
 ## A partially failed release
 
