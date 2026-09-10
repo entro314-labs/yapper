@@ -11,9 +11,12 @@ Fixes to the pipeline land in the kit once and every app picks them up.
 ## Where releases live
 
 Releases and the updater manifests are published to the **public**
-`entro314-labs/windbag-releases` mirror, not to this repo. That is not
-tidiness: release assets on a private repository 404 for anyone
-unauthenticated, which breaks both downloads and the auto-updater silently.
+`entro314-labs/windbag-releases` mirror, not to this repo — the same split
+every other app here uses. This repo has to stay public regardless: GitHub
+Pages serves `docs/client-metadata.json` at the URL the AT Protocol treats as
+Windbag's identity, so a private repo would break Sign in with Bluesky, not
+the updater. The mirror keeps six platforms' worth of binaries and the rolling
+channel tags out of the repo people actually read.
 
 | Channel | Tag shape      | Manifest                                            |
 | ------- | -------------- | --------------------------------------------------- |

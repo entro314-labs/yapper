@@ -121,9 +121,10 @@ jobs:
       # the kit's post-release patch-bump PR would be a second writer.
       post_release_bump: false
       # Releases and updater manifests live on the public mirror; the endpoints
-      # in tauri.conf.json and src-tauri/src/update.rs point there. Keeping them
-      # off the app repo is what makes the updater work even while this repo is
-      # private — private release assets 404 for anyone unauthenticated.
+      # in tauri.conf.json and src-tauri/src/update.rs point there. Not a privacy
+      # measure — this repo is necessarily public, since GitHub Pages serves the
+      # AT Protocol client metadata the Bluesky sign-in identifies Windbag by.
+      # It keeps binaries and rolling channel tags out of the repo people read.
       releases_repo: 'entro314-labs/windbag-releases'
       # Case-sensitive: this is the bundled asset filename stem
       # (Windbag_<version>_aarch64.dmg) and the .app name in the generated cask,

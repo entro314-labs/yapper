@@ -27,9 +27,11 @@ pub struct PendingUpdate(pub Mutex<Option<(tauri_plugin_updater::Update, Vec<u8>
 /// `endpoints_live_on_the_releases_repo` test keeps it and [`Channel::endpoint`]
 /// from drifting apart.
 ///
-/// A separate repo from the app's own: release assets on a private repository
-/// 404 for anyone unauthenticated, which breaks downloads and the updater
-/// silently.
+/// A separate repo from the app's own, matching every sibling app here. Not for
+/// privacy — this app's repo is necessarily public, because the AT Protocol
+/// `client_id` is a URL its GitHub Pages site serves. It keeps six platforms'
+/// worth of binaries and rolling channel tags out of the repo people read, and
+/// it means the updater keeps working if that ever stops being true.
 const RELEASES_REPO_URL: &str = "https://github.com/entro314-labs/windbag-releases";
 
 /// Marker prefix the renderer keys off (`isUpdateSourceUnreachable`,
