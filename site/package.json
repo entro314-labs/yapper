@@ -17,13 +17,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1129.0",
+    "@aws-sdk/client-s3": "^3.1132.0",
     "@mdx-js/loader": "^3.1.1",
     "@mdx-js/react": "^3.1.1",
-    "@next/mdx": "^16.3.4",
-    "next": "16.3.4",
-    "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "@next/mdx": "^16.3.5",
+    "next": "16.3.5",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
@@ -37,5 +37,5 @@
   "engines": {
     "node": ">=24"
   },
-  "packageManager": "pnpm@12.4.0"
+  "packageManager": "pnpm@12.4.1"
 }
