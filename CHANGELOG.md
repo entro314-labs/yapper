@@ -135,6 +135,10 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Changed
 
+- **A custom Bluesky client-metadata URL must be hosted on
+  entro314-labs.github.io.** The app registers one callback scheme, derived from
+  that host, so any other host is refused up front with an explanation instead
+  of a sign-in that hangs for five minutes.
 - **Animated icons where a control is live.** The sidebar rows and its collapse
   toggle, New post / Write a post, Post now, Attach, the assistant buttons, the
   stats Refresh, the calendar arrows, the copy chips and the developer-portal
@@ -166,6 +170,20 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Fixed
 
+- **Threads and Instagram attachments over 4.5 MB publish.** The app now uploads
+  the file straight to R2 through a short-lived signed URL from the web
+  deployment, instead of through a Vercel function, which rejects any body over
+  4.5 MB. An attachment the deployment refuses fails at once with its reason
+  rather than after five retries.
+- **A stray sign-in callback no longer cancels the sign-in in progress.** A
+  leftover tab or a foreign `?error=` link is ignored and the app keeps
+  waiting, and a callback macOS could silently drop now gets through.
+- **The Bluesky "paste the link" fallback works.** The connect dialog stays open
+  while the sign-in waits, and pasting the link the browser could not open
+  finishes that same sign-in.
+- **Bluesky token refreshes check who they talk to.** The refresh token is only
+  sent to the server that issued it, and refreshed tokens must belong to the
+  account.
 - **Failed loads are shown as errors, not as empty screens.** A store that
   cannot be read no longer shows "Nothing queued" or "No accounts yet"; each
   screen says what failed, with a Retry.
