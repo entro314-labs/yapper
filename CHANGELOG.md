@@ -204,6 +204,9 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Fixed
 
+- **Editing a partly sent post is not blocked by where it already went.** Text
+  that no longer fits a platform the post has already published to no longer
+  stops the save that re-queues the rest.
 - **A rejected upload token no longer flags a Threads or Instagram account for
   reconnection.** The web deployment's token is what is wrong, so the post
   fails with a pointer to Settings → Web deployment instead.
