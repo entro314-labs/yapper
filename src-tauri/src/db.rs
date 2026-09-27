@@ -263,6 +263,15 @@ impl Db {
             .optional()?)
     }
 
+    /// SQLite's `data_version` for this connection: it moves when ANOTHER
+    /// connection commits, never for this one's own writes — which is exactly
+    /// the signal for "the MCP process changed something behind the UI".
+    pub fn data_version(&self) -> Result<i64> {
+        Ok(self
+            .lock()
+            .query_row("PRAGMA data_version", [], |row| row.get(0))?)
+    }
+
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.lock().execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)
@@ -1537,6 +1546,38 @@ mod tests {
             Some("alt")
         );
         assert_eq!(db.list_targets(id).expect("targets")[0].options["k"], "v");
+    }
+
+    #[test]
+    fn a_write_from_another_connection_moves_the_data_version() {
+        // The MCP server is a separate process with its own connection; this
+        // is how the app notices what it wrote.
+        let path = std::env::temp_dir().join(format!(
+            "windbag-data-version-{}-{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let app = Db::open_at(&path).expect("app");
+        let other = Db::open_at(&path).expect("other");
+
+        let before = app.data_version().expect("version");
+        app.save_note(None, "", "own write", false).expect("own");
+        assert_eq!(
+            app.data_version().expect("version"),
+            before,
+            "the app's own writes must not look like someone else's"
+        );
+        other.save_note(None, "", "from MCP", false).expect("other");
+        assert_ne!(app.data_version().expect("version"), before);
+
+        drop(app);
+        drop(other);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = path.clone().into_os_string();
+            file.push(suffix);
+            // Absent when SQLite already folded the WAL back in on close.
+            let _ = std::fs::remove_file(file);
+        }
     }
 
     #[test]

@@ -17,6 +17,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tauri::{AppHandle, Emitter};
 
+use crate::commands::EVENT_NOTES_CHANGED;
 use crate::db::{self, Db, DueTarget, POST_MISSED, POST_SCHEDULED};
 use crate::error::{AppError, Result};
 use crate::media;
@@ -118,7 +119,22 @@ impl Scheduler {
 }
 
 fn run(app: &AppHandle, database: &Arc<Db>, wakeups: &Receiver<()>) {
+    // The MCP server is a separate process writing to the same store, so a
+    // post or note an agent creates raises no event here, and the open UI
+    // never refetched it. `data_version` moves only on another connection's
+    // commit, so each tick can tell cheaply whether that happened.
+    let mut seen: Option<i64> = None;
     loop {
+        match database.data_version() {
+            Ok(version) => {
+                if seen.is_some_and(|last| last != version) {
+                    let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+                    let _ = app.emit(EVENT_NOTES_CHANGED, ());
+                }
+                seen = Some(version);
+            }
+            Err(err) => log::error!("reading the store's data version failed: {err}"),
+        }
         match pass(app, database) {
             Ok(0) => {}
             Ok(count) => log::info!("scheduler settled {count} destination(s)"),
