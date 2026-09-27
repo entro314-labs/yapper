@@ -181,6 +181,11 @@ All notable changes to Windbag are documented here. The format follows
   post on some platforms), probing the assistant CLIs and the Meta ads calls
   ran on the main thread, so the whole app stopped responding until they
   returned. They now run on a worker.
+- **A post that does not fit is refused before it is saved.** The composer's
+  save wrote the post, its attachments and its destinations first and
+  validated afterwards, so a refused save still left a scheduled post that
+  would fail at its time — and on a new post, the next save created a
+  duplicate. It now validates first, as the agent door already did.
 
 ### Activation
 

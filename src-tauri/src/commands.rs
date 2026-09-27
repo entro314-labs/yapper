@@ -328,6 +328,39 @@ pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInpu
         .map(str::trim)
         .filter(|v| !v.is_empty());
 
+    // Everything a destination will be judged on is known before anything is
+    // written, so refuse here rather than at 09:00 tomorrow when nobody is
+    // watching — and refuse without leaving a half-saved post behind (a stored
+    // invalid post would fail at its time; an orphaned new one would be
+    // duplicated by the next save, since the composer never learned its id).
+    let media = input
+        .media
+        .iter()
+        .map(|item| {
+            let resolved = media::resolve(&item.path)?;
+            Ok(MediaInput {
+                path: resolved.path,
+                mime: resolved.mime,
+                bytes: resolved.bytes,
+                alt_text: item
+                    .alt_text
+                    .clone()
+                    .filter(|value| !value.trim().is_empty()),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for target in &input.targets {
+        let account = state.db.get_account(target.account_id)?;
+        let adapter = platforms::adapter(account.platform);
+        platforms::validate(
+            account.platform,
+            &input.body,
+            title,
+            media.len(),
+            scheduler::effective_char_limit(&account, adapter),
+        )?;
+    }
+
     let post_id = match input.id {
         Some(id) => {
             let existing = state.db.get_post(id)?;
@@ -345,23 +378,6 @@ pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInpu
             .db
             .create_post(&input.body, title, link, scheduled_at, status)?,
     };
-
-    let media = input
-        .media
-        .iter()
-        .map(|item| {
-            let resolved = media::resolve(&item.path)?;
-            Ok(MediaInput {
-                path: resolved.path,
-                mime: resolved.mime,
-                bytes: resolved.bytes,
-                alt_text: item
-                    .alt_text
-                    .clone()
-                    .filter(|value| !value.trim().is_empty()),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
     state.db.set_media(post_id, &media)?;
 
     let targets: Vec<(i64, serde_json::Value)> = input
@@ -370,20 +386,6 @@ pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInpu
         .map(|target| (target.account_id, target.options.clone()))
         .collect();
     state.db.set_targets(post_id, &targets)?;
-
-    // Everything a destination will be judged on is known now, so refuse here
-    // rather than at 09:00 tomorrow when nobody is watching.
-    for target in &input.targets {
-        let account = state.db.get_account(target.account_id)?;
-        let adapter = platforms::adapter(account.platform);
-        platforms::validate(
-            account.platform,
-            &input.body,
-            title,
-            media.len(),
-            scheduler::effective_char_limit(&account, adapter),
-        )?;
-    }
 
     let _ = app.emit(EVENT_QUEUE_CHANGED, post_id);
     state.scheduler.nudge();
