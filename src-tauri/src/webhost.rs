@@ -171,7 +171,9 @@ pub fn upload(host: &WebHost, item: &MediaItem) -> Result<Hosted> {
 fn reservation_error(status: u16, body: &str, endpoint: &str) -> AppError {
     let detail: String = body.trim().chars().take(400).collect();
     match status {
-        401 | 403 => AppError::Unauthorized(
+        // Terminal, and deliberately not `Unauthorized`: that would flag the
+        // Threads or Instagram account for reconnection, which fixes nothing.
+        401 | 403 => AppError::InvalidInput(
             "The web deployment rejected Windbag's upload token. Check it in \
              Settings → Web deployment."
                 .into(),
@@ -266,9 +268,12 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_upload_token_points_at_the_setting() {
+    fn a_bad_upload_token_points_at_the_setting_not_at_the_account() {
+        // Unauthorized would make the scheduler flag the Threads or Instagram
+        // ACCOUNT for reconnection, when what is wrong is the deployment's token.
         let err = reservation_error(401, "", "https://w.example/api/media");
-        assert!(matches!(err, AppError::Unauthorized(_)), "{err}");
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
+        assert!(!err.is_retryable());
         assert!(err.to_string().contains("Web deployment"), "{err}");
     }
 

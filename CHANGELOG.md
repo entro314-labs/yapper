@@ -204,6 +204,9 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Fixed
 
+- **A rejected upload token no longer flags a Threads or Instagram account for
+  reconnection.** The web deployment's token is what is wrong, so the post
+  fails with a pointer to Settings → Web deployment instead.
 - **No double posts after a lost answer.** A timeout or unreadable reply after a
   post was sent is no longer retried blindly: Bluesky, Threads and Instagram
   pick up the post they already started, and the other platforms stop with
