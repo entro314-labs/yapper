@@ -1,0 +1,6 @@
+# The toolchain this repo builds with. rust-toolchain.toml pins Rust; this pins
+# the JavaScript side, matching `packageManager` in package.json and the Node
+# version the release workflow installs.
+[tools]
+node = "26"
+pnpm = "12.6.0"
