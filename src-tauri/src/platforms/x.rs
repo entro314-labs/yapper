@@ -362,11 +362,17 @@ fn map_error(status: u16, body: &str) -> AppError {
     // Out of credit is neither a credential problem nor something a retry fixes:
     // it clears when the app's owner buys more. Terminal, with the fix named,
     // beats five silent retries into a dead end.
-    if (status == 403 || status == 402)
+    //
+    // The spend cap also arrives as a 429 — the rate limit's status — told
+    // apart only by its problem type, `.../problems/usage-capped` (seen in
+    // developer-community reports from mid-2026; X's docs do not list it).
+    let usage_capped = lowered.contains("usage-capped") || lowered.contains("usagecapexceeded");
+    if ((status == 403 || status == 402)
         && (lowered.contains("usage")
             || lowered.contains("cap")
             || lowered.contains("credit")
-            || lowered.contains("payment"))
+            || lowered.contains("payment")))
+        || (status == 429 && usage_capped)
     {
         return AppError::InvalidInput(
             "X refused this because the developer app is out of API credit. Posting is \
@@ -410,6 +416,30 @@ mod tests {
             );
             assert!(err.to_string().contains("credit"), "{err}");
         }
+    }
+
+    #[test]
+    fn a_usage_cap_is_terminal_even_though_it_arrives_as_a_429() {
+        // Pay-per-use: the spend cap comes back as 429, the same status as a
+        // rate limit, and only the problem type tells them apart. Five retries
+        // into a spent balance fix nothing.
+        for body in [
+            r#"{"title":"Too Many Requests","detail":"Too Many Requests","type":"https://api.x.com/2/problems/usage-capped"}"#,
+            r#"{"title":"UsageCapExceeded","detail":"Usage cap exceeded: Monthly product cap","type":"https://api.x.com/2/problems/usage-capped"}"#,
+        ] {
+            let err = map_error(429, body);
+            assert!(!err.is_retryable(), "{err}");
+            assert!(err.to_string().contains("credit"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_plain_rate_limit_stays_retryable() {
+        let err = map_error(
+            429,
+            r#"{"title":"Too Many Requests","detail":"Too Many Requests","type":"about:blank","status":429}"#,
+        );
+        assert!(err.is_retryable(), "{err}");
     }
 
     #[test]
