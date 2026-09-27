@@ -55,8 +55,10 @@ require an HTTPS URL. So this site provides one at `/oauth/meta`.
 
 When you finish signing in at Meta, your browser is sent here with an authorization code in the
 URL, and this site immediately redirects your browser back to the Windbag application running on
-your own machine. **The code is not stored, not logged and not read by this site** — it is passed
-through in a redirect and is only ever exchanged for a token by the app on your computer.
+your own machine. **The code is not stored or read by this site** — it is passed through in a
+redirect and is only ever exchanged for a token by the app on your computer. Because it travels in
+the URL, the hosting provider's request logs may briefly record it; it is single-use, expires within
+minutes, and cannot be exchanged without the app secret that exists only on your computer.
 
 ### 2. Attachment hosting
 
@@ -89,7 +91,8 @@ If you never connect a Meta account, no part of this site is ever contacted by t
 It sets no cookies. It runs no analytics and no third-party scripts. It has no login. It collects
 no personal information, and there is no account to which any stored file could be linked.
 
-Standard web server request logs may briefly record IP addresses, as they do for any website.
+Standard web server request logs may briefly record IP addresses and requested URLs, as they do
+for any website.
 
 ## Children
 
