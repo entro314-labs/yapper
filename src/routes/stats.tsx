@@ -10,6 +10,7 @@ import { PunchCard } from '@/components/charts/punch-card'
 import { TopPosts } from '@/components/charts/top-posts'
 import { RefreshCwIcon } from '@/components/icons/refresh-cw'
 import { EmptyState } from '@/components/shell/empty-state'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
 import { useAnimatedIcon } from '@/lib/animated-icon'
@@ -80,9 +81,14 @@ function StatsScreen() {
     return (posts.data ?? []).filter((post) => ids.has(post.id))
   }, [drilldown, posts.data])
 
-  const nothingYet =
-    data?.published === 0 && data.failed === 0 && data.scheduled === 0 && data.drafts === 0
-  if (nothingYet) {
+  if (stats.isError || posts.isError || accounts.isError) {
+    return <QueryErrorState what="the stats" queries={[stats, posts, accounts]} />
+  }
+
+  // First run is a fact about the STORE, never about the filtered view: an empty 30-day window
+  // with the filters hidden behind this screen would leave no way to widen it. Strictly `=== 0`,
+  // so a store still loading does not flash the empty state either.
+  if (posts.data?.length === 0) {
     return (
       <EmptyState
         icon={IconChartBar}
@@ -155,6 +161,12 @@ function StatsScreen() {
         <Tile label="Missed" value={data?.missed ?? 0} tone="warning" />
         <Tile label="Drafts" value={data?.drafts ?? 0} tone="muted" />
       </section>
+
+      {data && data.published === 0 && data.failed === 0 ? (
+        <p className="rounded-lg border border-border/60 bg-card/50 px-3.5 py-3 text-sm text-muted-foreground">
+          Nothing published or failed in this view. Widen the range or clear a filter to see more.
+        </p>
+      ) : null}
 
       <Breakdown
         title="By platform"
