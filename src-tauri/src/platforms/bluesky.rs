@@ -72,14 +72,6 @@ impl Platform for Bluesky {
                 )
                 .optional(),
                 FieldSpec::text(
-                    "callback_url",
-                    "Callback URL",
-                    "",
-                    "Only if your browser could not hand the sign-in back automatically: \
-                     paste the whole URL it failed to open.",
-                )
-                .optional(),
-                FieldSpec::text(
                     "pds",
                     "Server",
                     DEFAULT_PDS,
@@ -92,8 +84,9 @@ impl Platform for Bluesky {
                     "client_id",
                     "OAuth client metadata URL",
                     atproto::DEFAULT_CLIENT_ID,
-                    "Where Windbag's OAuth client document is published. Change it only if you \
-                     host your own copy.",
+                    "Where Windbag's OAuth client document is published. A copy must live on \
+                     entro314-labs.github.io (any path): the sign-in returns on a scheme derived \
+                     from that host, and it is the only one this build receives.",
                 )
                 .optional(),
             ],
@@ -260,22 +253,6 @@ fn connect_oauth(input: &ConnectInput) -> Result<Connected> {
         .and_then(|app| app.extra("client_id"))
         .unwrap_or(atproto::DEFAULT_CLIENT_ID)
         .to_string();
-
-    // The escape hatch. A custom URI scheme only routes from a BUNDLED app — in
-    // a dev build, and anywhere scheme registration misbehaves, the browser
-    // shows a link it cannot open. Pasting it here finishes the same flow.
-    if let Some(pasted) = input.optional_field("callback_url") {
-        if !atproto::deliver_callback(pasted) {
-            return Err(AppError::InvalidInput(
-                "There is no sign-in waiting for that URL. Start the sign-in first, then paste \
-                 the callback here if your browser could not hand it back."
-                    .into(),
-            ));
-        }
-        return Err(AppError::InvalidInput(
-            "Callback delivered to the sign-in already in progress.".into(),
-        ));
-    }
 
     let session = atproto::authorize(&client_id, handle)?;
     // Best effort: a profile that will not load is no reason to refuse a

@@ -45,8 +45,10 @@ use crate::error::{AppError, Result, from_status};
 use crate::http;
 
 /// Where Windbag's own client metadata is published. Overridable per install
-/// (Settings → Platform apps) so a fork, or anyone self-hosting, can point at
-/// their own document without rebuilding.
+/// (Settings → Platform apps), but only with a document on the same host: the
+/// callback scheme is derived from the host and the bundle registers exactly
+/// one (see [`check_callback_routes`]). A fork on another host changes this,
+/// [`CALLBACK_SCHEME`] and `tauri.conf.json` together and rebuilds.
 pub const DEFAULT_CLIENT_ID: &str = "https://entro314-labs.github.io/yapper/client-metadata.json";
 
 /// `atproto` is mandatory for every client. `transition:generic` is what grants
@@ -299,6 +301,31 @@ pub fn redirect_scheme(client_id: &str) -> Result<String> {
     Ok(host.split('.').rev().collect::<Vec<_>>().join("."))
 }
 
+/// Refuses a client id this build cannot receive the callback for.
+///
+/// The redirect scheme is derived from the client id's host, but the OS only
+/// routes the ONE scheme the bundle registers ([`CALLBACK_SCHEME`], fixed in
+/// `tauri.conf.json` and, on macOS, in the signed `Info.plist`). A client id on
+/// any other host would send the browser to a link that opens nothing, and the
+/// sign-in would hang until it timed out — so it is stopped here instead.
+fn check_callback_routes(client_id: &str) -> Result<()> {
+    let scheme = redirect_scheme(client_id)?;
+    if scheme == CALLBACK_SCHEME {
+        return Ok(());
+    }
+    let host = CALLBACK_SCHEME
+        .split('.')
+        .rev()
+        .collect::<Vec<_>>()
+        .join(".");
+    Err(AppError::InvalidInput(format!(
+        "`{client_id}` would send the sign-in back to `{scheme}:/callback`, but this build of \
+         Windbag only receives `{CALLBACK_SCHEME}:/callback`. Host the client metadata on \
+         {host} (any path), or clear the override in Settings → Platform apps to use the \
+         default."
+    )))
+}
+
 /// Checks the client metadata is actually published before starting a flow.
 ///
 /// Without this the first failure is a `PAR` rejection reading
@@ -357,6 +384,7 @@ pub struct Session {
 
 /// Runs the whole browser handoff. Blocks; call it from a worker thread.
 pub fn authorize(client_id: &str, handle_or_did: &str) -> Result<Session> {
+    check_callback_routes(client_id)?;
     preflight_client_metadata(client_id)?;
 
     let identity = resolve_identity(handle_or_did)?;
@@ -766,6 +794,23 @@ mod tests {
                 "the document must declare the {grant} grant"
             );
         }
+    }
+
+    #[test]
+    fn a_client_id_on_another_host_is_refused_before_the_browser_opens() {
+        // Its redirect scheme would be `com.example`, which the bundle does not
+        // register: the browser would open a link the OS routes nowhere.
+        let err = check_callback_routes("https://example.com/client-metadata.json")
+            .expect_err("unroutable");
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
+        let message = err.to_string();
+        assert!(message.contains("com.example:/callback"), "{message}");
+        assert!(message.contains("entro314-labs.github.io"), "{message}");
+
+        // Another path on the registered host routes fine.
+        check_callback_routes(DEFAULT_CLIENT_ID).expect("default");
+        check_callback_routes("https://entro314-labs.github.io/fork/client-metadata.json")
+            .expect("same host");
     }
 
     #[test]

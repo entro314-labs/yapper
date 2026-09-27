@@ -90,6 +90,7 @@ pub fn run() {
             commands::list_platforms,
             commands::list_accounts,
             commands::connect_account,
+            commands::deliver_auth_callback,
             commands::disconnect_account,
             commands::get_app_credentials,
             commands::save_app_credentials,

@@ -112,6 +112,26 @@ pub fn connect_account(
     Ok(())
 }
 
+/// The manual end of a Bluesky sign-in: the callback URL the browser could not
+/// hand back, pasted in by the user. A custom URI scheme only routes from a
+/// bundled app — in a dev build, and anywhere scheme registration misbehaves,
+/// the browser shows a link it cannot open instead.
+///
+/// Deliberately outside [`connect_account`] and its `connecting` guard: the
+/// paste arrives WHILE that sign-in holds the guard, and finishes it rather
+/// than starting another. The outcome still arrives on [`EVENT_AUTH`].
+#[tauri::command]
+pub fn deliver_auth_callback(url: String) -> Result<()> {
+    if crate::atproto::deliver_callback(url.trim()) {
+        return Ok(());
+    }
+    Err(AppError::InvalidInput(
+        "No sign-in is waiting for that URL. Paste the whole link from the sign-in you just \
+         started; if it has timed out, start it again."
+            .into(),
+    ))
+}
+
 fn run_connect(
     database: &Arc<Db>,
     platform: PlatformId,

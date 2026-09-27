@@ -162,17 +162,20 @@ web, which the authorization server fetches during sign-in:
 1. **Publish `docs/client-metadata.json`.** Create the GitHub repo, push, and
    enable Pages from `main` / `/docs`, so
    `https://entro314-labs.github.io/yapper/client-metadata.json` resolves.
-   Hosting it anywhere else works too — set the URL in
-   **Settings → Platform apps → Bluesky**, and the redirect scheme is derived
-   from that hostname automatically.
+   The redirect scheme is derived from the document's hostname, and the bundle
+   registers exactly one, so a copy set in **Settings → Platform apps →
+   Bluesky** must live on `entro314-labs.github.io` (any path); Windbag refuses
+   any other host up front. Hosting it elsewhere means a fork that changes
+   `DEFAULT_CLIENT_ID` and `CALLBACK_SCHEME` in `src-tauri/src/atproto.rs` and
+   the `deep-link` scheme in `tauri.conf.json` together, then rebuilds.
 2. **Run a bundled build** (`pnpm tauri:build`). The callback comes back on a
    custom URI scheme (`io.github.entro314-labs:/callback`), which macOS routes
    through the bundle's `Info.plist` — so it cannot work under `tauri dev`.
 
 Until both are done, Windbag says so before opening a browser rather than
 failing halfway through. If a callback ever fails to route, the browser shows a
-link it could not open: paste it into the dialog's **Callback URL** field and
-the same sign-in finishes.
+link it could not open: the connect dialog stays open while the sign-in waits,
+so paste that link there and the same sign-in finishes.
 
 ## The assistant
 

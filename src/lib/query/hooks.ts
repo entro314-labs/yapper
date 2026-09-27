@@ -195,6 +195,14 @@ export function useConnectAccount() {
   )
 }
 
+export function useDeliverAuthCallback() {
+  // Finishes the sign-in already waiting; its outcome arrives on `windbag://auth`
+  // like any other connect.
+  return useInvalidating<string, Nothing>(IPC_COMMANDS.deliverAuthCallback, [], (url) => ({
+    url,
+  }))
+}
+
 export function useDisconnectAccount() {
   return useInvalidating<number, Nothing>(
     IPC_COMMANDS.disconnectAccount,
