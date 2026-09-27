@@ -1,4 +1,4 @@
-import { IconFileOff, IconTrash, IconUsers } from '@tabler/icons-react'
+import { IconArrowDown, IconArrowUp, IconFileOff, IconTrash, IconUsers } from '@tabler/icons-react'
 import { Link, createFileRoute, useNavigate } from '@tanstack/react-router'
 import { open } from '@tauri-apps/plugin-dialog'
 import * as React from 'react'
@@ -478,6 +478,16 @@ function ComposeScreen() {
             current.map((item) => (item.path === path ? { ...item, altText: value } : item)),
           )
         }}
+        onMove={(index, delta) => {
+          // Array order IS the saved order: save_post writes each item's
+          // position from its index, which is how a carousel is sequenced.
+          setMedia((current) => {
+            const next = [...current]
+            const [item] = next.splice(index, 1)
+            if (item) next.splice(index + delta, 0, item)
+            return next
+          })
+        }}
       />
 
       <Destinations
@@ -552,13 +562,31 @@ function AttachmentList({
   onAdd,
   onRemove,
   onAlt,
+  onMove,
 }: {
   media: Attachment[]
   onAdd: () => void
   onRemove: (path: string) => void
   onAlt: (path: string, value: string) => void
+  onMove: (index: number, delta: -1 | 1) => void
 }) {
   const [attachRef, attachHover] = useAnimatedIcon()
+  const moveButtons = React.useRef(new Map<string, HTMLButtonElement>())
+  const refocus = React.useRef<{ path: string; delta: -1 | 1 } | null>(null)
+
+  // Keeps the keyboard on the item that moved. Reordering can detach the
+  // focused row from the DOM, and once it reaches an end its button in that
+  // direction is disabled, so focus falls back to the other one.
+  React.useEffect(() => {
+    const target = refocus.current
+    if (!target) return
+    refocus.current = null
+    const same = moveButtons.current.get(`${target.delta}:${target.path}`)
+    const other = moveButtons.current.get(`${-target.delta}:${target.path}`)
+    const button = same && !same.disabled ? same : other
+    button?.focus()
+  }, [media])
+
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2">
@@ -573,7 +601,7 @@ function AttachmentList({
         ) : null}
       </div>
 
-      {media.map((item) => (
+      {media.map((item, index) => (
         <div
           key={item.path}
           className="flex items-center gap-2 rounded-md border border-border/60 bg-card/50 px-2.5 py-2"
@@ -596,6 +624,28 @@ function AttachmentList({
             aria-label={`Alt text for ${item.path}`}
             className="h-7 flex-1 text-xs"
           />
+          {media.length > 1
+            ? ([-1, 1] as const).map((delta) => (
+                <Button
+                  key={delta}
+                  ref={(element: HTMLButtonElement | null) => {
+                    const key = `${delta}:${item.path}`
+                    if (element) moveButtons.current.set(key, element)
+                    else moveButtons.current.delete(key)
+                  }}
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label={`Move ${item.path.split('/').pop() ?? ''} ${delta < 0 ? 'up' : 'down'}`}
+                  disabled={delta < 0 ? index === 0 : index === media.length - 1}
+                  onClick={() => {
+                    refocus.current = { path: item.path, delta }
+                    onMove(index, delta)
+                  }}
+                >
+                  {delta < 0 ? <IconArrowUp /> : <IconArrowDown />}
+                </Button>
+              ))
+            : null}
           <Button
             size="icon-xs"
             variant="ghost"
