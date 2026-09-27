@@ -35,7 +35,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::commands::{self, SavePostInput, TargetInput};
-use crate::db::Db;
+use crate::db::{self, Db};
 use crate::error::{AppError, Result};
 use crate::platforms::{self, PlatformId};
 use crate::scheduler;
@@ -90,7 +90,21 @@ impl Session {
         let outcome = match method {
             "initialize" => Ok(Self::initialize(&params)),
             "tools/list" => Ok(json!({ "tools": tool_definitions() })),
-            "tools/call" => self.call(&params),
+            "tools/call" => {
+                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+                let args = params.get("arguments").cloned().unwrap_or(json!({}));
+                match self.call(name, &args) {
+                    Some(outcome) => {
+                        outcome.map(|text| json!({ "content": [{ "type": "text", "text": text }] }))
+                    }
+                    // A name that is not a tool at all is the caller's mistake
+                    // about the protocol, which the spec answers with -32602 —
+                    // unlike a tool that ran and failed, below.
+                    None => {
+                        return Some(error_frame(&id, -32602, &format!("Unknown tool: {name}")));
+                    }
+                }
+            }
             // `ping` is the host's liveness check and must answer even before
             // initialize completes.
             "ping" => Ok(json!({})),
@@ -142,26 +156,19 @@ impl Session {
         })
     }
 
-    fn call(&self, params: &Value) -> Result<Value> {
-        let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-        let args = params.get("arguments").cloned().unwrap_or(json!({}));
-
-        let text = match name {
-            "list_accounts" => self.list_accounts()?,
-            "list_posts" => self.list_posts()?,
-            "list_notes" => self.list_notes()?,
-            "create_note" => self.create_note(&args)?,
-            "create_post" => self.create_post(&args)?,
-            "get_stats" => self.get_stats(&args)?,
-            "meta_ads_tools" => self.meta_ads_tools()?,
-            "meta_ads_call" => self.meta_ads_call(&args)?,
-            other => {
-                return Err(crate::error::AppError::NotFound(format!(
-                    "No tool named `{other}`."
-                )));
-            }
-        };
-        Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+    /// Runs one tool. `None` means no tool has that name.
+    fn call(&self, name: &str, args: &Value) -> Option<Result<String>> {
+        Some(match name {
+            "list_accounts" => self.list_accounts(),
+            "list_posts" => self.list_posts(),
+            "list_notes" => self.list_notes(),
+            "create_note" => self.create_note(args),
+            "create_post" => self.create_post(args),
+            "get_stats" => self.get_stats(args),
+            "meta_ads_tools" => self.meta_ads_tools(),
+            "meta_ads_call" => self.meta_ads_call(args),
+            _ => return None,
+        })
     }
 
     // ─── Tools ──────────────────────────────────────────────────────────────
@@ -197,10 +204,24 @@ impl Session {
         Ok(serde_json::to_string_pretty(&rows)?)
     }
 
+    /// What an agent asks the queue: what is about to go out, then what just
+    /// happened. Every post still waiting (scheduled or sending) comes first,
+    /// soonest first; then everything else, newest first; 100 in all.
+    ///
+    /// Reordered here rather than in the store query, which the app's own queue
+    /// shares — newest-first is right for a screen and wrong for "what's next",
+    /// where it put a post a month out ahead of tomorrow's.
     fn list_posts(&self) -> Result<String> {
-        let posts = self.db.list_posts()?;
-        let rows: Vec<Value> = posts
+        let (mut waiting, done): (Vec<_>, Vec<_>) =
+            self.db.list_posts()?.into_iter().partition(|detail| {
+                detail.post.status == db::POST_SCHEDULED
+                    || detail.post.status == db::POST_PUBLISHING
+            });
+        // Stored times are canonical UTC, so the strings sort as the instants.
+        waiting.sort_by(|a, b| a.post.scheduled_at.cmp(&b.post.scheduled_at));
+        let rows: Vec<Value> = waiting
             .iter()
+            .chain(done.iter())
             .take(100)
             .map(|detail| {
                 json!({
@@ -519,8 +540,10 @@ fn store_tools() -> Vec<Value> {
         ),
         tool(
             "list_posts",
-            "List the 100 most recent posts with their status and per-destination outcome, \
-             including any error. Use it to see what is queued or what went wrong.",
+            "List posts with their status and per-destination outcome, including any error: \
+             first every post still waiting to go out (scheduled or sending), soonest first, \
+             then the most recent of the rest, newest first — 100 posts at most. Use it to \
+             see what is coming up next or what went wrong.",
             json!({ "type": "object", "properties": {} }),
         ),
         tool(
@@ -795,10 +818,48 @@ mod tests {
             let frame = call(&mut session, name, json!({}));
             // Missing required arguments is a fine answer; "no such tool" is not.
             assert!(
-                !text_of(&frame).contains("No tool named"),
+                frame.get("error").is_none(),
                 "{name} is advertised but not routed"
             );
         }
+    }
+
+    #[test]
+    fn an_unknown_tool_is_a_jsonrpc_invalid_params_error() {
+        // Per the spec's tools error handling: an unknown tool is a protocol
+        // error, while a tool that runs and fails stays an `isError` result.
+        let (mut session, _) = session();
+        let frame = call(&mut session, "delete_everything", json!({}));
+        assert_eq!(
+            frame.pointer("/error/code").and_then(Value::as_i64),
+            Some(-32602)
+        );
+        assert!(frame.get("result").is_none());
+    }
+
+    #[test]
+    fn list_posts_puts_what_is_waiting_first_soonest_first() {
+        // The regression this guards: the list ran newest-scheduled first, so a
+        // post a month out came before tomorrow's.
+        let (mut session, account) = session();
+        publish_one(&session, account);
+        for (body, days) in [("next month", 30), ("tomorrow", 1)] {
+            let at = (chrono::Utc::now() + chrono::Duration::days(days)).to_rfc3339();
+            session
+                .db
+                .create_post(body, None, None, Some(&at), db::POST_SCHEDULED)
+                .expect("post");
+        }
+        let listed: Value =
+            serde_json::from_str(&text_of(&call(&mut session, "list_posts", json!({}))))
+                .expect("json");
+        let bodies: Vec<&str> = listed
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter_map(|post| post["body"].as_str())
+            .collect();
+        assert_eq!(bodies, ["tomorrow", "next month", "sent"]);
     }
 
     #[test]
@@ -974,6 +1035,7 @@ mod tests {
             .db
             .finish_target_ok(target, "at://1", None)
             .expect("ok");
+        session.db.reconcile_post_status(post).expect("status");
         target
     }
 
