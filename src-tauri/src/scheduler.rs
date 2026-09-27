@@ -186,6 +186,10 @@ fn pass(app: &AppHandle, database: &Arc<Db>) -> Result<usize> {
         if !database.claim_target(item.target.id)? {
             continue;
         }
+        // The claim moved the post to `publishing`; telling the renderer now
+        // is what puts its guards (no edit, move or post now) up for the
+        // length of the send instead of only after it.
+        let _ = app.emit(EVENT_QUEUE_CHANGED, item.post.id);
         let target_id = item.target.id;
         let post_id = item.post.id;
         let attempts = item.target.attempts + 1;

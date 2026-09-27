@@ -383,11 +383,12 @@ function ComposeScreen() {
     return account ? platformById.get(account.platform)?.limits.requiresTitle : false
   })
 
-  // A partly sent post is editable, but what already went out cannot be taken
-  // back or changed — saving re-queues only the destinations that did not
-  // publish, so the user has to know the edit will not reach the others.
+  // A partly sent post is editable — `partial`, or `missed` after a retry it
+  // was waiting on — but what already went out cannot be taken back or
+  // changed: saving re-queues only the destinations that did not publish, so
+  // the user has to know the edit will not reach the others.
   const alreadySent =
-    id !== undefined && source?.status === 'partial'
+    id !== undefined && source
       ? source.targets.flatMap((target) => {
           const handle =
             target.status === 'published'
