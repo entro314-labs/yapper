@@ -21,6 +21,7 @@ import {
   useAppCredentials,
   useForgetAppCredentials,
   useForgetWebHost,
+  useMcpCommand,
   usePlatforms,
   useRedirectUri,
   useSaveAppCredentials,
@@ -244,7 +245,7 @@ function SettingsScreen() {
 
       <Section
         title="Agent door"
-        note="Windbag ships an MCP server so an agent host can read your queue and schedule posts directly — where you see and approve each tool call. Build it with `cargo build --release --bin windbag-mcp`, then register the binary:"
+        note="Windbag is also an MCP server, so an agent host can read your queue and schedule posts directly — where you see and approve each tool call. Register this app with your agent host:"
       >
         <AgentDoorRow />
       </Section>
@@ -724,9 +725,15 @@ function AssistantRow({
 
 /** The one command that registers the MCP server, copyable rather than retyped. */
 function AgentDoorRow() {
+  const command = useMcpCommand()
+  if (command.isError) {
+    return <p className="px-3 py-2.5 text-xs text-destructive">{humanMessage(command.error)}</p>
+  }
+  if (!command.data) return null
   return (
     <div className="flex flex-col gap-2 px-3 py-2.5">
-      <CopyChip value="claude mcp add windbag -- /path/to/windbag-mcp" />
+      <CopyChip value={`claude mcp add windbag -- ${command.data}`} />
+      <CopyChip value={`codex mcp add windbag -- ${command.data}`} />
       <p className="text-xs leading-relaxed text-muted-foreground">
         It reads the same store this app uses, so it works whether or not Windbag is open — but a
         post it schedules still only goes out while Windbag is running. It refuses anything that

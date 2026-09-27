@@ -6,19 +6,10 @@ authors = ["entro314-labs"]
 license = "MIT"
 edition = "2024"
 rust-version = "1.98.1"
-default-run = "windbag"
-
 
 [lib]
 name = "windbag_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
-
-# The agent door: an MCP stdio server over the same store, spawnable by any
-# agent host (`claude mcp add windbag -- .../windbag-mcp`). A separate binary so it
-# runs whether or not the app is open.
-[[bin]]
-name = "windbag-mcp"
-path = "src/bin/mcp.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

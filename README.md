@@ -190,8 +190,8 @@ Settings → Assistant:
 | Backend | What it needs | Notes |
 | --- | --- | --- |
 | **Apple Intelligence** | macOS on Apple silicon | On-device, offline, keyless, free. |
-| **Claude Code** | `claude` on your PATH | Run one-shot and restricted: no tools, no session saved. |
-| **Codex** | `codex` on your PATH | Run with plugins, hooks, memories and apps disabled. |
+| **Claude Code** | `claude` on your PATH | Run one-shot with no tools and no MCP servers, in an empty directory; no session saved. |
+| **Codex** | `codex` on your PATH | Run in a read-only sandbox without your `config.toml`, MCP servers, plugins, shell or web search; no session saved. Set the model and effort in Settings. |
 
 The assistant reads notes you select plus anything you paste, is told your
 destinations' real character limits, and hands back three drafts. **It has no
@@ -206,9 +206,12 @@ Windbag ships an MCP server. An agent host shows you each tool call before it
 runs, which is the trust boundary that makes write access reasonable.
 
 ```sh
-cargo build --release --bin windbag-mcp
-claude mcp add windbag -- "$PWD/src-tauri/target/release/windbag-mcp"
+claude mcp add windbag -- /Applications/Windbag.app/Contents/MacOS/windbag --mcp
 ```
+
+The agent door is the app's own executable run with `--mcp`, so every install
+has it; Settings → Agent door shows the exact command for this machine, for
+Claude Code and for Codex.
 
 It opens the same store the app uses, so it works whether or not Windbag is
 running — but nothing publishes until the app next runs, and `create_post` says
@@ -282,7 +285,7 @@ src-tauri/src/
   ai.rs                 three assistant backends behind one verb
   stats.rs              delivery figures, and engagement off each platform's API
   update.rs             signed auto-updates, staged and installed on quit
-  mcp.rs + bin/mcp.rs   the agent door
+  mcp.rs + main.rs      the agent door (`windbag --mcp`)
   platforms/            one adapter per destination behind the Platform trait
 ```
 

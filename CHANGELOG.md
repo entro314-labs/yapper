@@ -8,6 +8,12 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Added
 
+- **Engagement bars and top posts drill down too.** A platform's engagement bar
+  opens its measured posts; a top-post row opens the post in Windbag as a new
+  draft, beside the link to the live post.
+- **The stats drilldown comes to you.** Clicking a bar or cell scrolls the post
+  list into view and focuses it; rows carry readable status labels, and
+  published posts open as a new draft.
 - **Duplicate a post as a new draft.** Sent posts in the queue and published
   posts on the calendar open as a copy in the composer — text, destinations,
   options and attachments. Saving creates a new post; the original is never
@@ -135,6 +141,18 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Changed
 
+- **The agent door ships with every install.** It used to be a separate
+  `windbag-mcp` binary you had to build from source; it is now the app's own
+  executable run with `--mcp`. Settings → Agent door shows the exact
+  `claude mcp add` and `codex mcp add` commands for this machine.
+- **Claude Code and Codex drafts run with no tools and no MCP servers.**
+  Claude's `--restricted` still let the model read and write files, search the
+  web and call every claude.ai connector, so a prompt injection in a selected
+  note could put local file contents into a draft. Both now run in an empty
+  per-draft folder, with the tool list confirmed empty in a live session.
+- **Codex drafting no longer reads `~/.codex/config.toml`.** It is the only way
+  to keep its MCP servers out; set the model and effort in Settings →
+  Assistant.
 - **A custom Bluesky client-metadata URL must be hosted on
   entro314-labs.github.io.** The app registers one callback scheme, derived from
   that host, so any other host is refused up front with an explanation instead
@@ -170,6 +188,45 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Fixed
 
+- **The delivery chart's "Failed" series is no longer always zero.** Failed
+  destinations are drawn on the day the date filter dates them by.
+- **An empty date range no longer hides the stats filters.** The first-run
+  screen appears only when there are no posts at all; a filtered view with
+  nothing in it keeps its filters and says so.
+- **Engagement a platform does not report shows as "—", not 0.** Bluesky and
+  Mastodon no longer show "Impressions 0", and the screen names which platforms
+  do not report each figure. The agent door's `get_stats` says `null` too.
+- **A refresh that fails partway says what it did** — updated, skipped and
+  failed destinations, and the X reads already billed — instead of "Updated 0".
+- **The X cost prompt cannot be skipped.** If the cost cannot be read, the
+  refresh stops with that error instead of spending without asking.
+- **Stats filters survive leaving the screen**, and every connected platform is
+  always offered.
+- **The agent door negotiates its protocol version**, validates `get_stats`
+  filters (an offset date selects the right instant; an unknown platform is an
+  error naming the valid ones; `accountIds` filters), lists upcoming posts
+  first, and answers an unknown tool with a protocol error.
+- **The Meta ads tools are listed only when they can work** — a Facebook Page
+  connected with the ads scope — decided without reading the keychain, and the
+  ads client completes Meta's MCP handshake.
+- **Assistant drafts are measured the way each destination measures them.**
+  Each draft shows its tightest destination as used/limit from the composer's
+  own check, instead of a raw string length no platform uses.
+- **A hung assistant CLI can no longer freeze Settings.** The version check that
+  decides which backends are available gives up after ten seconds.
+- **The assistant finds `claude` and `codex` when Windbag is opened from Finder,
+  the Dock or at login.** It asks your login shell for its PATH instead of using
+  the system's minimal one, so neither backend reports "not on PATH" in a
+  release build.
+- **An assistant that runs past its time limit is stopped**, rather than left
+  running in the background after the request gave up.
+- **An assistant that quits early says why**, with the CLI's own error, and an
+  answer to only part of the prompt is not used.
+- **Drafts are found even when the reply has brackets before them.** A preamble
+  like "[as requested]" no longer turns the whole reply into one draft, and a
+  draft missing its text is skipped instead of failing the batch.
+- **A missing update manifest or a GitHub rate limit no longer reads as
+  "Nothing published on this channel yet".** Settings says which it is.
 - **Reddit link posts can be saved.** A post with a title and a link but no body
   was always refused, although that is exactly how a Reddit link submission
   works. A link now counts as content on Reddit and Facebook.

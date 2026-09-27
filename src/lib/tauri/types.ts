@@ -321,11 +321,15 @@ export interface Bucket {
 
 /** `stats::EngagementTotals` */
 export interface EngagementTotals {
-  likes: number
-  reposts: number
-  replies: number
+  /**
+   * Each dimension is `null` when no measured destination reports it — Bluesky and Mastodon publish
+   * no impressions — because a summed zero would be a claim the platform never made.
+   */
+  likes: number | null
+  reposts: number | null
+  replies: number | null
   /** Impressions, where the platform reports them — Threads, Instagram and X. */
-  views: number
+  views: number | null
   /**
    * How many destinations the totals are summed from — without it, "0 likes" and "nothing fetched
    * yet" look identical.
@@ -344,7 +348,6 @@ export interface Stats {
   byPlatform: Bucket[]
   byAccount: Bucket[]
   byHour: Bucket[]
-  byWeekday: Bucket[]
   byDay: Bucket[]
   /** Weekday × hour, keyed `"{weekday}-{hour}"`. The punch card. */
   bySlot: Bucket[]
@@ -360,11 +363,14 @@ export interface Stats {
 export interface EngagementRow {
   platform: PlatformId
   label: string
-  likes: number
-  reposts: number
-  replies: number
-  views: number
+  /** `null` per dimension on the same terms as `EngagementTotals`. */
+  likes: number | null
+  reposts: number | null
+  replies: number | null
+  views: number | null
   measured: number
+  /** The posts behind the row — the engagement bar is a drilldown like every other bar. */
+  postIds: number[]
 }
 
 /** `stats::TopPost` */
@@ -375,11 +381,15 @@ export interface TopPost {
   excerpt: string
   publishedAt: string | null
   remoteUrl: string | null
-  likes: number
-  reposts: number
-  replies: number
-  views: number
-  /** Likes + reposts + replies. What the list is ranked by; views are reach, not earned. */
+  /** `null` where the platform did not report that dimension for this post. */
+  likes: number | null
+  reposts: number | null
+  replies: number | null
+  views: number | null
+  /**
+   * Likes + reposts + replies, over the ones reported. What the list is ranked by; views are reach,
+   * not earned.
+   */
   interactions: number
   fetchedAt: string
 }
@@ -393,7 +403,13 @@ export interface RefreshCost {
 
 /** `stats::RefreshReport` */
 export interface RefreshReport {
+  /** Written — including what an account's pass wrote before it stopped on an error. */
   updated: number
+  /** Not read: unreadable accounts, and posts gone from the platform. */
   skipped: number
+  /** Not reached, because that account's pass stopped on an error. */
+  failed: number
+  /** X ids in lookups X answered — billed whether or not the refresh finished. */
+  billedReads: number
   problems: string[]
 }

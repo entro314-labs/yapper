@@ -10,16 +10,23 @@ import { PunchCard } from '@/components/charts/punch-card'
 import { TopPosts } from '@/components/charts/top-posts'
 import { RefreshCwIcon } from '@/components/icons/refresh-cw'
 import { EmptyState } from '@/components/shell/empty-state'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
+import { STATUS_LABEL } from '@/components/ui/status-dot'
 import { useAnimatedIcon } from '@/lib/animated-icon'
 import { brandOf } from '@/lib/platform-brand'
-import { useAccounts, usePosts, useRefreshCost, useRefreshEngagement, useStats } from '@/lib/query'
+import {
+  readRefreshCost,
+  useAccounts,
+  usePlatforms,
+  usePosts,
+  useRefreshEngagement,
+  useStats,
+} from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
-import type { Bucket, PlatformId, StatsFilter } from '@/lib/tauri/types'
+import type { Bucket, EngagementRow, PlatformId, StatsFilter } from '@/lib/tauri/types'
 import { cn, formatRelative } from '@/lib/utils'
-
-export const Route = createFileRoute('/stats')({ component: StatsScreen })
 
 const RANGES = [
   { key: '7', label: 'Last 7 days' },
@@ -27,6 +34,29 @@ const RANGES = [
   { key: '90', label: 'Last 90 days' },
   { key: 'all', label: 'All time' },
 ] as const
+
+type Range = (typeof RANGES)[number]['key']
+
+/**
+ * The filters live in the URL rather than in component state, so opening a post from a drilldown
+ * and coming back lands on the same view instead of resetting to the last 30 days. Every key is
+ * optional and a default is left out of the URL. `platform` is kept as a string here and resolved
+ * against the known platforms on the screen, where that list exists.
+ */
+export const Route = createFileRoute('/stats')({
+  component: StatsScreen,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { range?: Range; platform?: string; account?: number } => {
+    const range = RANGES.find((option) => option.key === search.range)?.key
+    const account = Number(search.account)
+    return {
+      ...(range === undefined ? {} : { range }),
+      ...(typeof search.platform === 'string' ? { platform: search.platform } : {}),
+      ...(Number.isInteger(account) && account > 0 ? { account } : {}),
+    }
+  },
+})
 
 /**
  * What actually happened.
@@ -40,34 +70,66 @@ const RANGES = [
  * on each refresh, so there is no honest trend line to draw from it — see the module comment in
  * `stats.rs`. It is shown as a distribution instead: across platforms, across posts.
  *
- * Every bar is a drilldown: it carries the ids of the posts behind it, and clicking one opens that
- * set.
+ * Every bar and every cell is a drilldown: it carries the ids of the posts behind it, and clicking
+ * one opens that set. A top post opens in the composer directly.
  */
 function StatsScreen() {
   const accounts = useAccounts()
+  const platforms = usePlatforms()
   const posts = usePosts()
   const refresh = useRefreshEngagement()
-  const cost = useRefreshCost()
   const [refreshRef, refreshHover] = useAnimatedIcon()
+  const search = Route.useSearch()
+  const navigate = Route.useNavigate()
+  // Any set of posts a chart can open: a delivery bucket, a punch-card cell or an engagement bar.
+  const [drilldown, setDrilldown] = React.useState<Pick<Bucket, 'label' | 'postIds'> | null>(null)
+  const drillRef = React.useRef<HTMLElement>(null)
 
-  const [range, setRange] = React.useState<string>('30')
-  // The bound is computed when the range is CHOSEN, not on every render: reading
+  // The drilldown renders below every chart, so a click on a bar near the top would otherwise
+  // change something off-screen and look like it did nothing. Scrolled to and focused, so a
+  // keyboard or screen-reader user lands on the answer too.
+  React.useEffect(() => {
+    const section = drillRef.current
+    if (!drilldown || !section) return
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    section.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
+    section.focus({ preventScroll: true })
+  }, [drilldown])
+
+  const range = search.range ?? '30'
+  // The bound is computed when the range CHANGES, not on every render: reading
   // the clock during render makes a fresh query key each pass, so the cached
   // answer is never the one being asked for.
-  const [since, setSince] = React.useState<string | null>(() => boundFor('30'))
-  const [platform, setPlatform] = React.useState<PlatformId | 'all'>('all')
-  const [accountId, setAccountId] = React.useState<number | 'all'>('all')
-  const [drilldown, setDrilldown] = React.useState<Bucket | null>(null)
+  const since = React.useMemo(() => boundFor(range), [range])
+  // The platforms on offer are the ones an account is connected to — not the
+  // ones in the current result, which a filter has already narrowed to one.
+  const connected = React.useMemo(
+    () =>
+      (platforms.data ?? []).filter((info) =>
+        (accounts.data ?? []).some((account) => account.platform === info.id),
+      ),
+    [platforms.data, accounts.data],
+  )
+  // Resolved against what is connected, so a URL naming a platform or account
+  // that has since been removed falls back to "all" instead of an empty view.
+  const platform = connected.find((info) => info.id === search.platform)?.id
+  const accountId = accounts.data?.find((account) => account.id === search.account)?.id
 
   const filter: StatsFilter = React.useMemo(
     () => ({
       since,
       until: null,
-      platforms: platform === 'all' ? [] : [platform],
-      accountIds: accountId === 'all' ? [] : [accountId],
+      platforms: platform === undefined ? [] : [platform],
+      accountIds: accountId === undefined ? [] : [accountId],
     }),
     [since, platform, accountId],
   )
+
+  /** Replaces one filter in the URL. `replace`, so Back leaves the screen rather than the filter. */
+  const setSearch = (next: { range?: Range; platform?: string; account?: number }) => {
+    setDrilldown(null)
+    void navigate({ search: (prev) => ({ ...prev, ...next }), replace: true })
+  }
 
   const stats = useStats(filter)
   const data = stats.data
@@ -80,9 +142,14 @@ function StatsScreen() {
     return (posts.data ?? []).filter((post) => ids.has(post.id))
   }, [drilldown, posts.data])
 
-  const nothingYet =
-    data?.published === 0 && data.failed === 0 && data.scheduled === 0 && data.drafts === 0
-  if (nothingYet) {
+  if (stats.isError || posts.isError || accounts.isError || platforms.isError) {
+    return <QueryErrorState what="the stats" queries={[stats, posts, accounts, platforms]} />
+  }
+
+  // First run is a fact about the STORE, never about the filtered view: an empty 30-day window
+  // with the filters hidden behind this screen would leave no way to widen it. Strictly `=== 0`,
+  // so a store still loading does not flash the empty state either.
+  if (posts.data?.length === 0) {
     return (
       <EmptyState
         icon={IconChartBar}
@@ -99,9 +166,8 @@ function StatsScreen() {
         <Select
           value={range}
           onChange={(event) => {
-            setRange(event.target.value)
-            setSince(boundFor(event.target.value))
-            setDrilldown(null)
+            const chosen = RANGES.find((option) => option.key === event.target.value)?.key
+            setSearch({ range: chosen === '30' ? undefined : chosen })
           }}
           aria-label="Date range"
           className="w-36"
@@ -114,27 +180,27 @@ function StatsScreen() {
         </Select>
 
         <Select
-          value={platform}
+          value={platform ?? 'all'}
           onChange={(event) => {
-            setPlatform(event.target.value as PlatformId | 'all')
-            setDrilldown(null)
+            setSearch({ platform: event.target.value === 'all' ? undefined : event.target.value })
           }}
           aria-label="Platform"
           className="w-36"
         >
           <option value="all">All platforms</option>
-          {(data?.byPlatform ?? []).map((bucket) => (
-            <option key={bucket.key} value={bucket.key}>
-              {bucket.label}
+          {connected.map((info) => (
+            <option key={info.id} value={info.id}>
+              {info.name}
             </option>
           ))}
         </Select>
 
         <Select
-          value={String(accountId)}
+          value={String(accountId ?? 'all')}
           onChange={(event) => {
-            setAccountId(event.target.value === 'all' ? 'all' : Number(event.target.value))
-            setDrilldown(null)
+            setSearch({
+              account: event.target.value === 'all' ? undefined : Number(event.target.value),
+            })
           }}
           aria-label="Account"
           className="w-44"
@@ -155,6 +221,12 @@ function StatsScreen() {
         <Tile label="Missed" value={data?.missed ?? 0} tone="warning" />
         <Tile label="Drafts" value={data?.drafts ?? 0} tone="muted" />
       </section>
+
+      {data && data.published === 0 && data.failed === 0 ? (
+        <p className="rounded-lg border border-border/60 bg-card/50 px-3.5 py-3 text-sm text-muted-foreground">
+          Nothing published or failed in this view. Widen the range or clear a filter to see more.
+        </p>
+      ) : null}
 
       <Breakdown
         title="By platform"
@@ -207,30 +279,39 @@ function StatsScreen() {
                 // X is the only platform that bills per read, so it is the only one that gets a
                 // confirmation. Asking before every free refresh would train the click away.
                 //
-                // The cost is fetched HERE rather than read off the cached query: a click that
-                // lands before the query resolves would otherwise see zero billed reads and spend
-                // the money without asking. `ask` rather than `window.confirm` for the same class
-                // of reason — the webview's own confirm resolves to a Promise, which is truthy
-                // whatever the user clicked, so the guard would never once have held.
+                // The cost is read HERE, at the click, and a failure to read it aborts the refresh
+                // with its error: a cached, pending or failed count defaulting to zero billed reads
+                // would spend the money without asking. `ask` rather than `window.confirm` for the
+                // same class of reason — the webview's own confirm resolves to a Promise, which is
+                // truthy whatever the user clicked, so the guard would never once have held.
                 try {
-                  const spend = await cost.refetch()
-                  const billed = spend.data?.billedReads ?? 0
+                  const spend = await readRefreshCost()
+                  const billed = spend.billedReads
                   if (billed > 0) {
                     const proceed = await ask(
-                      `This reads ${billed} post${billed === 1 ? '' : 's'} from X, which bills against your app's credits. The other ${spend.data?.freeReads ?? 0} are free.`,
+                      `This reads ${billed} post${billed === 1 ? '' : 's'} from X, which bills against your app's credits. The other ${spend.freeReads} are free.`,
                       { title: 'Refresh engagement', kind: 'warning' },
                     )
                     if (!proceed) return
                   }
                   const report = await refresh.mutateAsync()
-                  const skipped = report.skipped > 0 ? `, skipped ${report.skipped}` : ''
+                  // Every part is said, even on failure: rows written before an error are in the
+                  // store, and X reads made before it are on the bill.
                   const plural = report.updated === 1 ? '' : 's'
-                  toast.success(
-                    `Updated ${report.updated} destination${plural}${skipped}`,
+                  const summary = [
+                    `Updated ${report.updated} destination${plural}`,
+                    report.skipped > 0 ? `skipped ${report.skipped}` : null,
+                    report.failed > 0 ? `failed ${report.failed}` : null,
+                    report.billedReads > 0 ? `${report.billedReads} billed X reads` : null,
+                  ]
+                    .filter((part) => part !== null)
+                    .join(', ')
+                  const detail =
                     report.problems.length > 0
                       ? { description: report.problems.join('\n'), duration: 10_000 }
-                      : undefined,
-                  )
+                      : undefined
+                  if (report.failed > 0) toast.warning(summary, detail)
+                  else toast.success(summary, detail)
                 } catch (err) {
                   toast.error(humanMessage(err))
                 }
@@ -250,12 +331,29 @@ function StatsScreen() {
           {data && data.engagement.measured > 0 ? (
             <>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <Figure label="Likes" value={data.engagement.likes} />
-                <Figure label="Reposts" value={data.engagement.reposts} />
-                <Figure label="Replies" value={data.engagement.replies} />
+                <Figure
+                  label="Likes"
+                  value={data.engagement.likes}
+                  silent={unreported(data.engagementByPlatform, 'likes')}
+                />
+                <Figure
+                  label="Reposts"
+                  value={data.engagement.reposts}
+                  silent={unreported(data.engagementByPlatform, 'reposts')}
+                />
+                <Figure
+                  label="Replies"
+                  value={data.engagement.replies}
+                  silent={unreported(data.engagementByPlatform, 'replies')}
+                />
                 {/* Impressions sit beside the three rather than among them: a reach number on a
                     scale 100× the others is not a fourth interaction. */}
-                <Figure label="Impressions" value={data.engagement.views} muted />
+                <Figure
+                  label="Impressions"
+                  value={data.engagement.views}
+                  silent={unreported(data.engagementByPlatform, 'views')}
+                  muted
+                />
               </div>
               <p className="mt-2.5 text-xs text-muted-foreground">
                 Across {data.engagement.measured} destination
@@ -265,7 +363,7 @@ function StatsScreen() {
 
               {data.engagementByPlatform.length > 1 ? (
                 <div className="mt-4 border-t border-border/50 pt-3.5">
-                  <EngagementChart rows={data.engagementByPlatform} />
+                  <EngagementChart rows={data.engagementByPlatform} onDrill={setDrilldown} />
                 </div>
               ) : null}
 
@@ -300,9 +398,17 @@ function StatsScreen() {
       </section>
 
       {drilldown ? (
-        <section>
+        <section
+          ref={drillRef}
+          tabIndex={-1}
+          aria-labelledby="stats-drilldown"
+          className="scroll-mt-4 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
           <div className="mb-2 flex items-baseline gap-2">
-            <h2 className="font-display text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+            <h2
+              id="stats-drilldown"
+              className="font-display text-xs font-semibold tracking-wide text-muted-foreground uppercase"
+            >
               {drilldown.label}
             </h2>
             <span className="text-xs text-muted-foreground tabular-nums">
@@ -322,14 +428,17 @@ function StatsScreen() {
           <ul className="flex flex-col gap-1.5">
             {drilled.map((post) => (
               <li key={post.id}>
+                {/* A published post is history: opening it starts a new draft from it rather than
+                    editing what already went out. */}
                 <Link
                   to="/compose"
-                  search={{ id: post.id }}
+                  search={post.status === 'published' ? { from: post.id } : { id: post.id }}
                   className="flex flex-col gap-0.5 rounded-md border border-border/60 bg-card/50 px-3 py-2 transition-colors hover:border-border"
                 >
                   <span className="line-clamp-2 text-sm">{post.body || 'No text'}</span>
                   <span className="text-xs text-muted-foreground">
-                    {post.status} · {formatRelative(post.scheduledAt ?? post.updatedAt)}
+                    {STATUS_LABEL[post.status]} ·{' '}
+                    {formatRelative(post.scheduledAt ?? post.updatedAt)}
                   </span>
                 </Link>
               </li>
@@ -376,26 +485,43 @@ function Tile({
   )
 }
 
+/** The platforms in view that report nothing for one engagement dimension. */
+function unreported(
+  rows: EngagementRow[],
+  key: 'likes' | 'reposts' | 'replies' | 'views',
+): string[] {
+  return rows.filter((row) => row[key] === null).map((row) => row.label)
+}
+
+/**
+ * One engagement total. `null` is drawn as "—", never as 0: no measured platform reported it, and a
+ * zero would claim nobody engaged. `silent` names the platforms that do not report this dimension,
+ * so a partial total says which part of the picture it is missing.
+ */
 function Figure({
   label,
   value,
+  silent,
   muted = false,
 }: {
   label: string
-  value: number
+  value: number | null
+  silent: string[]
   muted?: boolean
 }) {
+  const hint = silent.length > 0 ? `Not reported by ${silent.join(', ')}` : undefined
   return (
-    <div>
+    <div title={hint}>
       <p
         className={cn(
           'font-display text-xl font-semibold tabular-nums',
-          muted && 'text-muted-foreground',
+          (muted || value === null) && 'text-muted-foreground',
         )}
       >
-        {value.toLocaleString()}
+        {value === null ? '—' : value.toLocaleString()}
       </p>
       <p className="text-xs text-muted-foreground">{label}</p>
+      {hint ? <p className="text-[0.6875rem] text-muted-foreground/70">{hint}</p> : null}
     </div>
   )
 }

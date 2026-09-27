@@ -900,6 +900,16 @@ pub fn oauth_redirect_uri() -> &'static str {
     crate::oauth::REDIRECT_URI
 }
 
+/// The command an agent host runs to reach the agent door: this very
+/// executable with the MCP flag. Resolved at runtime, so Settings shows the real
+/// installed path rather than a placeholder to edit.
+#[tauri::command]
+pub fn mcp_command() -> Result<String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| crate::error::internal("Locating the Windbag executable", e))?;
+    Ok(format!("\"{}\" {}", exe.display(), crate::MCP_FLAG))
+}
+
 // ─── The web deployment ─────────────────────────────────────────────────────
 
 /// What Settings shows for the companion deployment. The upload token is

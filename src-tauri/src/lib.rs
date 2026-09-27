@@ -19,6 +19,10 @@ mod update;
 pub mod webhost;
 mod windowing;
 
+/// The argument that turns the `windbag` executable into the agent door's stdio
+/// MCP server instead of the app (see `main.rs`).
+pub const MCP_FLAG: &str = "--mcp";
+
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -109,6 +113,7 @@ pub fn run() {
             commands::get_settings,
             commands::update_settings,
             commands::oauth_redirect_uri,
+            commands::mcp_command,
             commands::get_web_host,
             commands::save_web_host,
             commands::forget_web_host,

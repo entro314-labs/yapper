@@ -87,6 +87,14 @@ export function useRedirectUri() {
   })
 }
 
+export function useMcpCommand() {
+  return useQuery({
+    queryKey: queryKeys.platforms.mcpCommand(),
+    queryFn: async () => invokeCommand<string>(IPC_COMMANDS.mcpCommand),
+    staleTime: Number.POSITIVE_INFINITY,
+  })
+}
+
 export function useAppCredentials(platform: PlatformId, instance?: string | null) {
   return useQuery({
     queryKey: queryKeys.platforms.appCredentials(platform, instance),
@@ -353,14 +361,12 @@ export function useSuggestPosts() {
 /**
  * What a refresh would read, so the button that spends money on X can say how much first.
  *
- * Reads the local store only, and is refetched after a refresh because the number moves as
- * destinations publish.
+ * A plain read at the moment of the click rather than a cached query: a count that is stale, still
+ * loading or failed must never stand in for the real one, and this REJECTS when the count cannot be
+ * read — so the caller aborts instead of treating an unknown cost as zero and spending unasked.
  */
-export function useRefreshCost() {
-  return useQuery({
-    queryKey: queryKeys.stats.refreshCost(),
-    queryFn: async () => invokeCommand<RefreshCost>(IPC_COMMANDS.getRefreshCost),
-  })
+export async function readRefreshCost(): Promise<RefreshCost> {
+  return invokeCommand<RefreshCost>(IPC_COMMANDS.getRefreshCost)
 }
 
 export function useRefreshEngagement() {

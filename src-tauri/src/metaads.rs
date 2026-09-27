@@ -13,12 +13,14 @@
 //!
 //! ## Auth
 //!
-//! Bearer, using a connected Facebook Page account's own token — the "connect
-//! with your own developer app" route, which fits Windbag's credential model
-//! exactly and needs no second sign-in. The ads permissions are NOT part of the
-//! ordinary Page connection: `ads_access` on the Meta app credentials opts into
-//! them, so a user who only schedules posts is never shown an ads consent
-//! screen.
+//! Bearer, using the long-lived USER token a Facebook Page connection keeps
+//! alongside the Page token it publishes with — the "connect with your own
+//! developer app" route, which fits Windbag's credential model exactly and
+//! needs no second sign-in. Not the Page token itself: that one is scoped to
+//! the Page, and Meta refuses it for ad accounts. The ads permissions are NOT
+//! part of the ordinary Page connection: `ads_access` on the Meta app
+//! credentials opts into them, so a user who only schedules posts is never
+//! shown an ads consent screen.
 //!
 //! ## Transport
 //!
@@ -31,26 +33,52 @@ use serde_json::{Value, json};
 use crate::db::Db;
 use crate::error::{AppError, Result};
 use crate::http;
-use crate::platforms::PlatformId;
+use crate::mcp;
+use crate::platforms::{AppCredentials, PlatformId};
 
 pub const ENDPOINT: &str = "https://mcp.facebook.com/ads";
-/// The revision this client negotiates. Meta's server picks the highest it and
-/// the client both know, so a newer server stays compatible.
-const PROTOCOL_VERSION: &str = "2026-07-28";
 const LABEL: &str = "the Meta ads MCP server";
 
-/// One connection, holding the session id Meta hands back on `initialize`.
+/// Whether the Meta app credentials opt into the ads permissions — the one
+/// setting both the Facebook connect flow (which then asks for the ads scopes)
+/// and the agent door (which then lists the ads tools) read.
+pub fn ads_access(app: &AppCredentials) -> bool {
+    app.extra("ads_access")
+        .is_some_and(|value| value.eq_ignore_ascii_case("yes"))
+}
+
+/// Whether the ads tools can work at all: a Facebook Page connected WITH the ads
+/// scope. Read from the scopes the store recorded at connect time rather than
+/// from the app's Ads access setting: a Page connected before that setting was
+/// turned on never got the scope, and the store answers without touching the
+/// credential store — which an agent host starting `windbag --mcp` must not
+/// trigger a keychain prompt for.
+pub fn available(db: &Db) -> Result<bool> {
+    Ok(db.list_accounts()?.iter().any(|account| {
+        account.platform == PlatformId::Facebook
+            && account
+                .scopes
+                .as_deref()
+                .is_some_and(|scopes| scopes.split([',', ' ']).any(|s| s == "ads_management"))
+    }))
+}
+
+/// One connection, holding what Meta hands back on `initialize`.
 pub struct AdsClient {
     token: String,
     session: Option<String>,
+    /// The revision Meta's server chose on `initialize`, and the value of the
+    /// `MCP-Protocol-Version` header on every request after it. `None` until
+    /// the session is negotiated.
+    version: Option<&'static str>,
 }
 
 impl AdsClient {
     /// Builds a client from the first connected Facebook Page account.
     ///
-    /// The token is the PAGE token stored for that account — the same credential
-    /// that publishes — so an ads call needs no separate connection, only the
-    /// broader permissions the app asked for at connect time.
+    /// The token is the USER token that connection stored next to its Page
+    /// token, so an ads call needs no separate connection, only the broader
+    /// permissions the app asked for at connect time.
     pub fn from_store(db: &Db) -> Result<Self> {
         let account = db
             .list_accounts()?
@@ -65,40 +93,69 @@ impl AdsClient {
             })?;
         let secret = crate::secrets::load_account_secret(PlatformId::Facebook, &account.remote_id)?;
         // The USER token is what carries ads permissions — a Page token is scoped
-        // to the Page and Meta rejects it for ad accounts.
+        // to the Page and Meta rejects it for ad accounts, so there is nothing to
+        // fall back to: a connection without one gets told how to fix it here
+        // rather than a 401 from Meta.
         let token = secret
             .extra_str("user_token")
-            .unwrap_or(&secret.access_token)
+            .ok_or_else(|| {
+                AppError::Unauthorized(
+                    "This Facebook connection holds no user token, which Meta's ads tools \
+                     authorize with. Reconnect the Page in Windbag → Accounts."
+                        .into(),
+                )
+            })?
             .to_string();
         Ok(Self {
             token,
             session: None,
+            version: None,
         })
     }
 
-    /// Negotiates the session. Cheap enough to run per command — this is a
-    /// short-lived client, not a daemon holding a connection open.
+    /// Negotiates the session, then tells the server it is ready — the
+    /// handshake is not complete until `notifications/initialized` is sent.
+    /// Cheap enough to run per command — this is a short-lived client, not a
+    /// daemon holding a connection open.
     pub fn initialize(&mut self) -> Result<Value> {
         let result = self.rpc(
             "initialize",
             json!({
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": mcp::PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": { "name": "windbag", "version": env!("CARGO_PKG_VERSION") },
             }),
         )?;
+        // The server may answer an older revision than was asked for; the
+        // client must then speak that one, or leave if it cannot.
+        let answered = result
+            .get("protocolVersion")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        self.version = Some(
+            mcp::SUPPORTED_VERSIONS
+                .into_iter()
+                .find(|known| *known == answered)
+                .ok_or_else(|| {
+                    AppError::Platform(format!(
+                        "{LABEL} chose protocol version `{answered}`, which Windbag does not \
+                         speak."
+                    ))
+                })?,
+        );
+        self.notify("notifications/initialized")?;
         Ok(result)
     }
 
     pub fn list_tools(&mut self) -> Result<Value> {
-        if self.session.is_none() {
+        if self.version.is_none() {
             self.initialize()?;
         }
         self.rpc("tools/list", json!({}))
     }
 
     pub fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<Value> {
-        if self.session.is_none() {
+        if self.version.is_none() {
             self.initialize()?;
         }
         self.rpc(
@@ -107,15 +164,9 @@ impl AdsClient {
         )
     }
 
-    /// One JSON-RPC round trip.
-    fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
-        let body = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        });
-
+    /// One POST to the endpoint, with every header the streamable-HTTP
+    /// transport requires.
+    fn post(&self, body: &Value) -> Result<reqwest::blocking::Response> {
         let mut request = http::client()
             .post(ENDPOINT)
             .bearer_auth(&self.token)
@@ -125,13 +176,41 @@ impl AdsClient {
                 reqwest::header::ACCEPT,
                 "application/json, text/event-stream",
             )
-            .header("MCP-Protocol-Version", PROTOCOL_VERSION)
-            .json(&body);
+            // The negotiated revision once there is one; on `initialize`
+            // itself, the one being asked for.
+            .header(
+                "MCP-Protocol-Version",
+                self.version.unwrap_or(mcp::PROTOCOL_VERSION),
+            )
+            .json(body);
         if let Some(session) = &self.session {
             request = request.header("Mcp-Session-Id", session);
         }
+        Ok(request.send()?)
+    }
 
-        let response = request.send()?;
+    /// A notification: no id, so no answer frame. The transport acknowledges
+    /// one with `202 Accepted` and an empty body, which [`extract_frame`] would
+    /// reject — so only the status is read.
+    fn notify(&self, method: &str) -> Result<()> {
+        let (status, raw) = http::read_body(self.post(&json!({
+            "jsonrpc": "2.0",
+            "method": method,
+        }))?);
+        if !(200..300).contains(&status) {
+            return Err(status_error(status, &raw));
+        }
+        Ok(())
+    }
+
+    /// One JSON-RPC round trip.
+    fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
+        let response = self.post(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        }))?;
         // Read before the body is consumed — this is how the session is issued.
         let issued = response
             .headers()
@@ -141,15 +220,7 @@ impl AdsClient {
         let (status, raw) = http::read_body(response);
 
         if !(200..300).contains(&status) {
-            return Err(match status {
-                401 | 403 => AppError::Unauthorized(format!(
-                    "{LABEL} rejected the credentials. The connected Facebook account needs ads \
-                     permissions: set \"Ads access\" to yes in Settings → Platform apps and \
-                     reconnect the Page. {}",
-                    raw.chars().take(200).collect::<String>()
-                )),
-                _ => crate::platforms::meta::map_error(status, &raw, LABEL),
-            });
+            return Err(status_error(status, &raw));
         }
         if let Some(session) = issued {
             self.session = Some(session);
@@ -166,6 +237,20 @@ impl AdsClient {
             )));
         }
         Ok(frame.get("result").cloned().unwrap_or(Value::Null))
+    }
+}
+
+/// What a non-2xx answer means. A credential rejection says how to fix it,
+/// because the likeliest cause is a connection made before Ads access was on.
+fn status_error(status: u16, raw: &str) -> AppError {
+    match status {
+        401 | 403 => AppError::Unauthorized(format!(
+            "{LABEL} rejected the credentials. The connected Facebook account needs ads \
+             permissions: set \"Ads access\" to yes in Settings → Platform apps and \
+             reconnect the Page. {}",
+            raw.chars().take(200).collect::<String>()
+        )),
+        _ => crate::platforms::meta::map_error(status, raw, LABEL),
     }
 }
 
