@@ -453,15 +453,12 @@ pub fn suggest(
         Backend::Off => unreachable!("guarded above"),
     };
 
-    let suggestions = parse_suggestions(&answer);
-    if suggestions.is_empty() {
-        return Err(AppError::Platform(format!(
-            "{} answered, but not with anything Windbag could read as a draft. \
-             Try again, or a different assistant.",
+    parse_suggestions(&answer).map_err(|reason| {
+        AppError::Platform(format!(
+            "{} answered, but {reason}. Try again, or a different assistant.",
             backend.label()
-        )));
-    }
-    Ok(suggestions)
+        ))
+    })
 }
 
 /// The prompt. One string for all three backends: none of them shares a message
@@ -822,30 +819,58 @@ fn last_meaningful_line(stderr: &str) -> String {
 /// handled: the JSON array is located and parsed, and a plain-prose answer
 /// degrades to a single draft rather than to an error — a usable draft the user
 /// can edit beats a failure over formatting.
-pub fn parse_suggestions(answer: &str) -> Vec<Suggestion> {
-    let cleaned = strip_fences(answer);
-
-    // A parsed array is the answer, whatever survives filtering. Falling through
-    // to the prose path here would hand back the raw JSON as a "draft" when the
-    // model returned an array of blanks.
-    if let Some(json) = extract_array(&cleaned)
-        && let Ok(parsed) = serde_json::from_str::<Vec<Suggestion>>(json)
-    {
-        return parsed
-            .into_iter()
-            .filter(|suggestion| !suggestion.body.trim().is_empty())
-            .collect();
+///
+/// Every `[` is a candidate, not just the first: a preamble can hold brackets
+/// of its own ("[as requested]" is not JSON, a "[1]" citation is JSON but not
+/// drafts). The first array of objects that yields a draft with text wins;
+/// objects without a string `body` are skipped. The error completes the
+/// sentence "… answered, but —".
+pub fn parse_suggestions(answer: &str) -> std::result::Result<Vec<Suggestion>, &'static str> {
+    // A draft-shaped array is the answer, whatever survives filtering. Falling
+    // through to the prose path would hand back the raw JSON as a "draft" when
+    // the model returned an array of blanks.
+    let mut drafts_without_text = false;
+    for (start, _) in answer.match_indices('[') {
+        let Some(json) = extract_array(answer, start) else {
+            continue;
+        };
+        let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
+            continue;
+        };
+        if !items.is_empty() && !items.iter().any(serde_json::Value::is_object) {
+            continue;
+        }
+        let drafts: Vec<Suggestion> = items.iter().filter_map(draft_from).collect();
+        if !drafts.is_empty() {
+            return Ok(drafts);
+        }
+        drafts_without_text = true;
+    }
+    if drafts_without_text {
+        return Err("none of its drafts had a `body` with text in it");
     }
 
-    let prose = cleaned.trim();
+    let prose = strip_fences(answer);
     if prose.is_empty() {
-        return Vec::new();
+        return Err("not with anything Windbag could read as a draft");
     }
-    vec![Suggestion {
-        body: prose.to_string(),
+    Ok(vec![Suggestion {
+        body: prose,
         title: None,
         rationale: None,
-    }]
+    }])
+}
+
+/// One draft from one array element: an object whose `body` is a string with
+/// text in it. Optional fields that are not strings are dropped, not fatal.
+fn draft_from(item: &serde_json::Value) -> Option<Suggestion> {
+    let text = |key: &str| item.get(key).and_then(serde_json::Value::as_str);
+    let body = text("body").filter(|body| !body.trim().is_empty())?;
+    Some(Suggestion {
+        body: body.to_string(),
+        title: text("title").map(str::to_string),
+        rationale: text("rationale").map(str::to_string),
+    })
 }
 
 /// Removes a leading fenced-code marker and its closing partner.
@@ -862,16 +887,14 @@ fn strip_fences(text: &str) -> String {
         .to_string()
 }
 
-/// The outermost `[...]` in a string, bracket-counted so an array containing
-/// strings with brackets in them survives. Returns `None` when there is none.
-fn extract_array(text: &str) -> Option<&str> {
-    let bytes = text.as_bytes();
-    let start = text.find('[')?;
+/// The `[...]` opening at byte `start`, bracket-counted so an array containing
+/// strings with brackets in them survives. Returns `None` when it never closes.
+fn extract_array(text: &str, start: usize) -> Option<&str> {
     let mut depth = 0i32;
     let mut in_string = false;
     let mut escaped = false;
 
-    for (index, byte) in bytes.iter().enumerate().skip(start) {
+    for (index, byte) in text.as_bytes().iter().enumerate().skip(start) {
         if escaped {
             escaped = false;
             continue;
@@ -896,10 +919,15 @@ fn extract_array(text: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// The drafts in `answer`, which must parse.
+    fn drafts(answer: &str) -> Vec<Suggestion> {
+        parse_suggestions(answer).expect("the answer holds drafts")
+    }
+
     #[test]
     fn a_bare_json_array_parses() {
         let answer = r#"[{"body":"first","rationale":"the angle"},{"body":"second"}]"#;
-        let parsed = parse_suggestions(answer);
+        let parsed = drafts(answer);
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].body, "first");
         assert_eq!(parsed[0].rationale.as_deref(), Some("the angle"));
@@ -908,21 +936,69 @@ mod tests {
     #[test]
     fn a_fenced_array_parses() {
         let answer = "```json\n[{\"body\":\"inside a fence\"}]\n```";
-        assert_eq!(parse_suggestions(answer)[0].body, "inside a fence");
+        assert_eq!(drafts(answer)[0].body, "inside a fence");
+    }
+
+    #[test]
+    fn a_fenced_array_inside_prose_parses() {
+        let answer = "Sure! Here are your drafts:\n\n```json\n[{\"body\":\"fenced\"}]\n```\n\n\
+                      Let me know if you want changes.";
+        assert_eq!(drafts(answer)[0].body, "fenced");
     }
 
     #[test]
     fn prose_around_the_array_is_ignored() {
         let answer = "Here are two drafts:\n[{\"body\":\"kept\"}]\nHope these help!";
-        let parsed = parse_suggestions(answer);
+        let parsed = drafts(answer);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].body, "kept");
     }
 
     #[test]
+    fn a_bracket_in_the_preamble_does_not_hide_the_array() {
+        let answer = "Here you go [as requested]:\n[{\"body\":\"the real draft\"}]";
+        let parsed = drafts(answer);
+        assert_eq!(parsed.len(), 1, "{parsed:?}");
+        assert_eq!(parsed[0].body, "the real draft");
+    }
+
+    #[test]
+    fn a_citation_before_the_array_is_not_mistaken_for_it() {
+        // `[1]` is valid JSON — an array, just not one of drafts.
+        let answer =
+            "Based on the notes [1], three angles:\n[{\"body\":\"one\"},{\"body\":\"two\"}]";
+        assert_eq!(drafts(answer).len(), 2);
+    }
+
+    #[test]
+    fn drafts_wrapped_in_an_object_are_found() {
+        let answer = r#"{"drafts":[{"body":"wrapped"}]}"#;
+        assert_eq!(drafts(answer)[0].body, "wrapped");
+    }
+
+    #[test]
+    fn a_draft_without_a_body_is_skipped_when_others_have_one() {
+        let answer = r#"[{"title":"only a title"},{"body":"usable","rationale":7}]"#;
+        let parsed = drafts(answer);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].body, "usable");
+        assert!(
+            parsed[0].rationale.is_none(),
+            "a non-string rationale is dropped"
+        );
+    }
+
+    #[test]
+    fn drafts_that_all_lack_a_body_are_an_error_not_a_raw_json_draft() {
+        let reason = parse_suggestions(r#"[{"text":"wrong key"},{"post":"also wrong"}]"#)
+            .expect_err("no draft has a body");
+        assert!(reason.contains("body"), "{reason}");
+    }
+
+    #[test]
     fn brackets_inside_a_draft_do_not_end_the_array_early() {
         let answer = r#"[{"body":"see [1] and [2]"},{"body":"second"}]"#;
-        let parsed = parse_suggestions(answer);
+        let parsed = drafts(answer);
         assert_eq!(
             parsed.len(),
             2,
@@ -934,15 +1010,12 @@ mod tests {
     #[test]
     fn an_escaped_quote_inside_a_draft_survives() {
         let answer = r#"[{"body":"they said \"no\" [twice]"}]"#;
-        assert_eq!(
-            parse_suggestions(answer)[0].body,
-            r#"they said "no" [twice]"#
-        );
+        assert_eq!(drafts(answer)[0].body, r#"they said "no" [twice]"#);
     }
 
     #[test]
     fn a_prose_answer_degrades_to_one_usable_draft() {
-        let parsed = parse_suggestions("Shipping today. No JSON in sight.");
+        let parsed = drafts("Shipping today. No JSON in sight.");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].body, "Shipping today. No JSON in sight.");
         assert!(parsed[0].rationale.is_none());
@@ -950,8 +1023,9 @@ mod tests {
 
     #[test]
     fn an_empty_answer_yields_nothing_rather_than_an_empty_draft() {
-        assert!(parse_suggestions("   \n  ").is_empty());
-        assert!(parse_suggestions(r#"[{"body":"  "}]"#).is_empty());
+        assert!(parse_suggestions("   \n  ").is_err());
+        assert!(parse_suggestions(r#"[{"body":"  "}]"#).is_err());
+        assert!(parse_suggestions("[]").is_err());
     }
 
     #[test]
