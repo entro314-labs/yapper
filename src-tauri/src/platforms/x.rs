@@ -23,6 +23,7 @@
 
 use serde::Deserialize;
 use serde_json::json;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, MediaItem,
@@ -98,6 +99,27 @@ impl Platform for X {
             notes: "Needs your own developer app with Write access. X bills the \
                     app per post — there is no free tier.",
         }
+    }
+
+    /// X's weighted length (twitter-text v3): every URL is 23 whatever its
+    /// length, an emoji sequence is 2 however many scalars build it, and every
+    /// other character is 1 inside X's light ranges (Latin through Hangul Jamo,
+    /// and a few spaces and dashes) and 2 outside them — so CJK halves the
+    /// limit. Counted with `chars()`, a URL-heavy or Japanese post passed here
+    /// and was refused at publish.
+    ///
+    /// `twitter-text` has no maintained Rust port (the crate last shipped in
+    /// 2020), so the rules are implemented here; see [`url_spans`] for where
+    /// URL detection approximates X's. Text is not NFC-normalised first, which
+    /// can only count a decomposed accent high, never low.
+    fn count_body(&self, body: &str) -> usize {
+        let mut total = 0;
+        let mut plain_from = 0;
+        for (start, end) in url_spans(body) {
+            total += weigh(&body[plain_from..start]) + URL_WEIGHT;
+            plain_from = end;
+        }
+        total + weigh(&body[plain_from..])
     }
 
     fn connect(&self, input: &ConnectInput) -> Result<Connected> {
@@ -181,6 +203,105 @@ impl Platform for X {
             remote_url: Some(format!("https://x.com/{handle}/status/{}", created.data.id)),
             remote_id: created.data.id,
         })
+    }
+}
+
+// ─── Weighted length ────────────────────────────────────────────────────────
+
+/// What X charges for any URL: the length of its `t.co` wrapper.
+const URL_WEIGHT: usize = 23;
+
+/// The generic top-level domains X links without a scheme. Country codes are
+/// handled by shape instead (see [`is_bare_url`]); a TLD missing here only
+/// under-counts a scheme-less link on an unusual domain.
+const GENERIC_TLDS: &[&str] = &[
+    "com", "net", "org", "edu", "gov", "mil", "int", "info", "biz", "name", "pro", "mobi", "app",
+    "dev", "page", "blog", "shop", "store", "online", "site", "tech", "xyz", "club", "live",
+    "news", "media", "art", "design", "cloud", "top", "wiki", "link", "email", "social", "space",
+    "world", "today", "network", "group",
+];
+
+/// Byte spans of the URLs X would shorten: anything starting `http://` or
+/// `https://`, and scheme-less domains X links, minus the sentence's trailing
+/// punctuation.
+fn url_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    for token in text.split(char::is_whitespace) {
+        let token_start = cursor;
+        cursor += token.len()
+            + text[cursor + token.len()..]
+                .chars()
+                .next()
+                .map_or(0, char::len_utf8);
+        let trimmed_start = token.trim_start_matches(['(', '"', '\'']);
+        let candidate =
+            trimmed_start.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'']);
+        if candidate.is_empty() {
+            continue;
+        }
+        let start = token_start + (token.len() - trimmed_start.len());
+        let lowered = candidate.to_ascii_lowercase();
+        let schemed = ["https://", "http://"].iter().any(|scheme| {
+            lowered
+                .strip_prefix(scheme)
+                .is_some_and(|rest| !rest.is_empty())
+        });
+        if schemed || is_bare_url(&lowered) {
+            spans.push((start, start + candidate.len()));
+        }
+    }
+    spans
+}
+
+/// Whether a scheme-less token is a link to X: a dotted host of letters,
+/// digits and hyphens ending in a generic TLD, or in a two-letter country code
+/// when there is a path or more than one label before it — `README.md` is a
+/// file name, `www.example.io` and `example.io/x` are links. An `@` makes it an
+/// address, not a link.
+fn is_bare_url(token: &str) -> bool {
+    if token.contains('@') {
+        return false;
+    }
+    let host_end = token.find(['/', '?', '#', ':']).unwrap_or(token.len());
+    let (host, rest) = token.split_at(host_end);
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2
+        || labels.iter().any(|label| {
+            label.is_empty()
+                || !label
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        })
+    {
+        return false;
+    }
+    let tld = labels[labels.len() - 1];
+    if !tld.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return false;
+    }
+    GENERIC_TLDS.contains(&tld) || (tld.len() == 2 && (rest.starts_with('/') || labels.len() > 2))
+}
+
+/// The weight of text with the URLs taken out: 2 per emoji sequence, else 1 or
+/// 2 per character by X's ranges.
+fn weigh(text: &str) -> usize {
+    text.graphemes(true)
+        .map(|grapheme| {
+            if grapheme.chars().any(super::is_pictographic) {
+                2
+            } else {
+                grapheme.chars().map(char_weight).sum()
+            }
+        })
+        .sum()
+}
+
+/// twitter-text v3's ranges: weight 1 inside them, 2 everywhere else.
+fn char_weight(ch: char) -> usize {
+    match ch as u32 {
+        0..=4351 | 8192..=8205 | 8208..=8223 | 8242..=8247 => 1,
+        _ => 2,
     }
 }
 
@@ -507,6 +628,61 @@ mod tests {
             map.insert(*name, value.parse().expect("header value"));
         }
         map
+    }
+
+    #[test]
+    fn latin_text_weighs_one_per_character() {
+        assert_eq!(X.count_body("hello"), 5);
+        assert_eq!(X.count_body(&"a".repeat(280)), 280);
+        assert_eq!(X.count_body("café — ok"), 9, "é and the em dash weigh 1");
+    }
+
+    #[test]
+    fn cjk_and_characters_outside_the_light_ranges_weigh_two() {
+        assert_eq!(X.count_body("日本語"), 6);
+        assert_eq!(
+            X.count_body("…"),
+            2,
+            "U+2026 is outside X's weight-1 ranges"
+        );
+    }
+
+    #[test]
+    fn an_emoji_sequence_weighs_two_however_many_scalars_it_has() {
+        assert_eq!(X.count_body("\u{1F600}"), 2);
+        assert_eq!(
+            X.count_body("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+            2,
+            "family"
+        );
+        assert_eq!(X.count_body("1\u{FE0F}\u{20E3}"), 2, "keycap");
+        assert_eq!(X.count_body("\u{1F1EC}\u{1F1F7}"), 2, "flag");
+        assert_eq!(X.count_body("\u{1F44D}\u{1F3FD}"), 2, "skin tone");
+    }
+
+    #[test]
+    fn every_url_weighs_twenty_three() {
+        assert_eq!(
+            X.count_body("https://example.com/a/very/long/path/that/goes/on"),
+            23
+        );
+        assert_eq!(X.count_body("http://x.co"), 23, "short ones too");
+        assert_eq!(
+            X.count_body("see https://example.com."),
+            4 + 23 + 1,
+            "the full stop is the sentence's"
+        );
+        assert_eq!(X.count_body("see example.com now"), 4 + 23 + 4);
+        assert_eq!(X.count_body("www.example.io"), 23);
+        assert_eq!(X.count_body("example.io/path"), 23);
+    }
+
+    #[test]
+    fn a_file_name_is_not_a_url() {
+        // One label and a country-code ending, with no path: X does not link
+        // it, so neither may the counter.
+        assert_eq!(X.count_body("README.md"), 9);
+        assert_eq!(X.count_body("me@example.com"), 14);
     }
 
     #[test]

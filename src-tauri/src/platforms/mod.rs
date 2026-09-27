@@ -471,6 +471,31 @@ pub trait Platform: Send + Sync {
     }
 }
 
+/// Codepoints that make whatever grapheme holds them an emoji, for the two
+/// platforms that price emoji differently from text (X by sequence, Threads by
+/// byte). A range test rather than Unicode's `Extended_Pictographic` table,
+/// which would be a dependency for two counters. It errs wide: a stray arrow or
+/// `©` counted as emoji makes the counter refuse a post the platform would
+/// take, which is visible and fixable; the opposite fails a scheduled post.
+pub(crate) fn is_pictographic(ch: char) -> bool {
+    matches!(ch as u32,
+        // The emoji planes, regional indicators and skin tones included.
+        0x1F000..=0x1FAFF
+        | 0x2600..=0x27BF // misc symbols and dingbats
+        | 0x2B00..=0x2BFF // arrows and misc symbols (⬛ ⭐)
+        | 0x2300..=0x23FF // misc technical (⌚ ⏰ ⏩)
+        | 0x2190..=0x21FF // arrows (↔ ↩)
+        | 0x25A0..=0x25FF // geometric shapes (▶ ◻)
+        | 0x2934 | 0x2935 // ⤴ ⤵
+        | 0x00A9 | 0x00AE // © ®
+        | 0x203C | 0x2049 // ‼ ⁉
+        | 0x2122 | 0x2139 // ™ ℹ
+        | 0x24C2 // Ⓜ
+        | 0x3030 | 0x303D | 0x3297 | 0x3299 // 〰 〽 ㊗ ㊙
+        | 0x20E3 // the keycap that makes `1` into 1️⃣
+    )
+}
+
 pub fn adapter(id: PlatformId) -> &'static dyn Platform {
     match id {
         PlatformId::Bluesky => &bluesky::Bluesky,
