@@ -256,7 +256,11 @@ impl Session {
             // Stored as the same instant in canonical UTC: the due query
             // compares strings, so `09:00+02:00` kept verbatim would fire at
             // 09:00Z, two hours late.
-            .map(|at| db::parse_rfc3339(at).map(|parsed| parsed.to_rfc3339()))
+            .map(|at| -> Result<String> {
+                let parsed = db::parse_rfc3339(at)?;
+                scheduler::refuse_past(&self.db, parsed)?;
+                Ok(parsed.to_rfc3339())
+            })
             .transpose()?;
 
         let account_ids: Vec<i64> = args
@@ -775,6 +779,32 @@ mod tests {
         // And nothing was queued.
         let listed = text_of(&call(&mut session, "list_posts", json!({})));
         assert_eq!(listed.trim(), "[]");
+    }
+
+    #[test]
+    fn a_time_already_past_is_refused_before_anything_is_written() {
+        // catch_up would mark it missed within one tick while the agent was
+        // told "Scheduled".
+        let (mut session, account) = session();
+        let frame = call(
+            &mut session,
+            "create_post",
+            json!({
+                "body": "too late",
+                "accountIds": [account],
+                "scheduledAt": "2020-01-01T09:00:00Z"
+            }),
+        );
+        assert_eq!(
+            frame.pointer("/result/isError").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            text_of(&frame).contains("already passed"),
+            "{}",
+            text_of(&frame)
+        );
+        assert!(session.db.list_posts().expect("posts").is_empty());
     }
 
     #[test]

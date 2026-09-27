@@ -160,7 +160,12 @@ function ComposeScreen() {
   const save = React.useCallback(
     async (thenPublish: boolean) => {
       try {
-        const savedId = await savePost.mutateAsync(collect())
+        // "Post now" sends at once whatever the time field says, so the time is
+        // not saved with it — a stale past time would otherwise be refused.
+        const input = collect()
+        const savedId = await savePost.mutateAsync(
+          thenPublish ? { ...input, scheduledAt: null } : input,
+        )
         if (thenPublish) {
           await publishNow.mutateAsync(savedId)
           toast.success('Sending now')

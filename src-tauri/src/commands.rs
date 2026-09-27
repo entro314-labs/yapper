@@ -308,9 +308,23 @@ pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInpu
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| db::parse_rfc3339(value).map(|parsed| parsed.to_rfc3339()))
+        .map(|value| -> Result<String> {
+            let parsed = db::parse_rfc3339(value)?;
+            scheduler::refuse_past(&state.db, parsed)?;
+            Ok(parsed.to_rfc3339())
+        })
         .transpose()?;
     let scheduled_at = scheduled_at.as_deref();
+    // A time with nowhere to go would sit as `scheduled` with nothing due and
+    // later show as missed. A draft may stay destination-less while it is
+    // being written.
+    if scheduled_at.is_some() && input.targets.is_empty() {
+        return Err(AppError::InvalidInput(
+            "A scheduled post needs at least one destination. Pick an account, or save it \
+             as a draft without a time."
+                .into(),
+        ));
+    }
 
     let status = if scheduled_at.is_some() {
         db::POST_SCHEDULED
@@ -431,8 +445,9 @@ pub fn reschedule_post(
     id: i64,
     scheduled_at: String,
 ) -> Result<()> {
-    let scheduled_at = db::parse_rfc3339(&scheduled_at)?.to_rfc3339();
-    scheduler::requeue(&state.db, id, &scheduled_at)?;
+    let parsed = db::parse_rfc3339(&scheduled_at)?;
+    scheduler::refuse_past(&state.db, parsed)?;
+    scheduler::requeue(&state.db, id, &parsed.to_rfc3339())?;
     let _ = app.emit(EVENT_QUEUE_CHANGED, id);
     state.scheduler.nudge();
     Ok(())
