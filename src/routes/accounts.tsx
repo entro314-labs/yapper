@@ -20,7 +20,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { brandOf } from '@/lib/platform-brand'
 import { useAccounts, useConnectAccount, useDisconnectAccount, usePlatforms } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
-import type { PlatformInfo } from '@/lib/tauri/types'
+import type { Account, PlatformInfo } from '@/lib/tauri/types'
 import { cn, formatAbsolute, repeatKeys } from '@/lib/utils'
 
 export const Route = createFileRoute('/accounts')({ component: AccountsScreen })
@@ -29,7 +29,12 @@ function AccountsScreen() {
   const accounts = useAccounts()
   const platforms = usePlatforms()
   const disconnect = useDisconnectAccount()
-  const [connecting, setConnecting] = React.useState<PlatformInfo | null>(null)
+  // `account` is set when this is a RE-connect: the dialog then opens on that
+  // account's platform, pre-filled with what identifies it.
+  const [connecting, setConnecting] = React.useState<{
+    info: PlatformInfo
+    account?: Account
+  } | null>(null)
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6 p-4">
@@ -92,10 +97,18 @@ function AccountsScreen() {
                   </div>
 
                   {stale ? (
-                    <span className="flex items-center gap-1 text-xs text-destructive">
-                      <IconAlertTriangle className="size-3.5" />
+                    <Button
+                      size="xs"
+                      variant="destructive"
+                      disabled={!platforms.data}
+                      onClick={() => {
+                        const info = platforms.data?.find((item) => item.id === account.platform)
+                        if (info) setConnecting({ info, account })
+                      }}
+                    >
+                      <IconAlertTriangle data-icon="inline-start" />
                       Reconnect
-                    </span>
+                    </Button>
                   ) : account.tokenExpiresAt ? (
                     <span
                       className="hidden text-xs text-muted-foreground sm:block"
@@ -157,7 +170,7 @@ function AccountsScreen() {
                 key={info.id}
                 type="button"
                 onClick={() => {
-                  setConnecting(info)
+                  setConnecting({ info })
                 }}
                 className="flex items-start gap-3 rounded-lg border border-border/60 bg-card/50 px-3 py-2.5 text-left transition-colors hover:border-border hover:bg-card"
               >
@@ -184,7 +197,8 @@ function AccountsScreen() {
 
       {connecting ? (
         <ConnectDialog
-          info={connecting}
+          info={connecting.info}
+          {...(connecting.account ? { account: connecting.account } : {})}
           onClose={() => {
             setConnecting(null)
           }}
@@ -200,9 +214,23 @@ function AccountsScreen() {
  * Nothing here knows what Bluesky or Reddit needs — Rust says which fields to ask for, so adding an
  * adapter needs no change in this file.
  */
-function ConnectDialog({ info, onClose }: { info: PlatformInfo; onClose: () => void }) {
+function ConnectDialog({
+  info,
+  account,
+  onClose,
+}: {
+  info: PlatformInfo
+  account?: Account
+  onClose: () => void
+}) {
   const connect = useConnectAccount()
-  const [fields, setFields] = React.useState<Record<string, string>>({})
+  // A reconnect starts from the server the account lives on (Mastodon's
+  // instance), so signing in again cannot land on a different one by default.
+  const [fields, setFields] = React.useState((): Record<string, string> =>
+    account?.instance && info.connectFields.some((field) => field.key === 'instance')
+      ? { instance: account.instance.replace(/^https?:\/\//, '') }
+      : {},
+  )
   const [busy, setBusy] = React.useState(false)
 
   const missing = info.connectFields.filter((field) => field.required && !fields[field.key]?.trim())
@@ -242,8 +270,14 @@ function ConnectDialog({ info, onClose }: { info: PlatformInfo; onClose: () => v
     >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Connect {info.name}</DialogTitle>
-          <DialogDescription>{info.notes}</DialogDescription>
+          <DialogTitle>
+            {account ? `Reconnect ${account.handle}` : `Connect ${info.name}`}
+          </DialogTitle>
+          <DialogDescription>
+            {account
+              ? `Sign in to ${info.name} as ${account.handle} again. The account is updated in place, so posts scheduled to it keep their destination.`
+              : info.notes}
+          </DialogDescription>
         </DialogHeader>
 
         {needsDeveloperApp ? (
