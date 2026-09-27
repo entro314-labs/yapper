@@ -35,6 +35,11 @@ function AccountsScreen() {
   const platforms = usePlatforms()
   const disconnect = useDisconnectAccount()
   const [connecting, setConnecting] = React.useState<PlatformInfo | null>(null)
+  // Stable, because a waiting dialog subscribes to the auth event with it: a new
+  // identity on every refetch would resubscribe and could miss the outcome.
+  const closeDialog = React.useCallback(() => {
+    setConnecting(null)
+  }, [])
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6 p-4">
@@ -167,14 +172,7 @@ function AccountsScreen() {
         </div>
       </section>
 
-      {connecting ? (
-        <ConnectDialog
-          info={connecting}
-          onClose={() => {
-            setConnecting(null)
-          }}
-        />
-      ) : null}
+      {connecting ? <ConnectDialog info={connecting} onClose={closeDialog} /> : null}
     </div>
   )
 }
