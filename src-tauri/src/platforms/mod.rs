@@ -147,6 +147,9 @@ pub struct FieldSpec {
     /// Declared here rather than inferred by the renderer from the help string,
     /// which is what it used to do — a sentence is not a schema.
     pub choices: &'static [&'static str],
+    /// A per-destination option the platform bills to the body's character
+    /// budget — Mastodon measures `spoiler_text` and the text together.
+    pub counted: bool,
 }
 
 impl FieldSpec {
@@ -164,6 +167,7 @@ impl FieldSpec {
             secret: false,
             required: true,
             choices: &[],
+            counted: false,
         }
     }
 
@@ -181,6 +185,7 @@ impl FieldSpec {
             secret: true,
             required: true,
             choices: &[],
+            counted: false,
         }
     }
 
@@ -193,16 +198,29 @@ impl FieldSpec {
         self.choices = choices;
         self
     }
+
+    const fn counted(mut self) -> Self {
+        self.counted = true;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
+// Each flag is an independent fact a platform documents, read one at a time by
+// `validate` and the composer — a table of facts, not a state to model.
+#[expect(clippy::struct_excessive_bools)]
 pub struct Limits {
     /// Body length the platform accepts. Counted in Unicode scalar values, which
     /// is what most of them actually measure; Bluesky counts graphemes and
     /// Threads bills emoji by UTF-8 byte, so both override `count_body`.
     pub max_chars: usize,
     pub max_media: usize,
+    /// Every attachment type the ADAPTER can actually post, with the size the
+    /// platform documents for it. A type missing here is refused at compose
+    /// time: an MP4 sent into an image-only upload, or a PNG to a JPEG-only
+    /// API, otherwise fails at 3am with nobody watching.
+    pub accepts: &'static [MediaRule],
     pub supports_alt_text: bool,
     /// Reddit: a submission without a title is not a submission.
     pub requires_title: bool,
@@ -210,6 +228,10 @@ pub struct Limits {
     /// by itself. There is no text-only post to fall back to, so this is refused
     /// at compose time rather than at 3am.
     pub requires_media: bool,
+    /// Reddit and Facebook: a URL with no text is a whole post — a link
+    /// submission, a link share. Everywhere else the link rides along with the
+    /// text (or is ignored), so it cannot stand in for an empty body.
+    pub link_is_content: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -237,6 +259,47 @@ pub struct PlatformInfo {
     pub target_fields: Vec<FieldSpec>,
     /// One line the UI shows under the platform name in the connect dialog.
     pub notes: &'static str,
+}
+
+/// A mebibyte. Platform docs say "MB"; the binary reading is the lenient one,
+/// and a file between the two readings is left for the platform to judge.
+pub const MB: u64 = 1024 * 1024;
+
+/// One attachment type a platform takes.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaRule {
+    pub mime: &'static str,
+    pub max_bytes: u64,
+    /// Must be the only attachment on its post: X takes one video or one GIF,
+    /// Mastodon and Facebook one video, never beside anything else. Refused
+    /// here rather than left to an adapter to pick one and drop the rest.
+    pub alone: bool,
+}
+
+impl MediaRule {
+    const fn up_to(mime: &'static str, max_bytes: u64) -> Self {
+        Self {
+            mime,
+            max_bytes,
+            alone: false,
+        }
+    }
+
+    const fn alone(mut self) -> Self {
+        self.alone = true;
+        self
+    }
+}
+
+/// An attachment as validation sees it — its type and size, not its bytes.
+/// The composer sends these for files it has only resolved; the scheduler
+/// builds them from what it just read off disk.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaSpec {
+    pub mime: String,
+    pub bytes: u64,
 }
 
 /// What the OS credential store holds for one connected account.
@@ -461,17 +524,30 @@ pub fn validate(
     id: PlatformId,
     body: &str,
     title: Option<&str>,
-    media_count: usize,
+    link: Option<&str>,
+    media: &[MediaSpec],
+    options: &serde_json::Value,
     effective_char_limit: usize,
 ) -> Result<()> {
     let platform = adapter(id);
     let info = platform.info();
-    let length = platform.count_body(body);
+    let length = counted_length(id, body, options);
 
-    if body.trim().is_empty() && media_count == 0 {
+    let stands_on_link =
+        info.limits.link_is_content && link.is_some_and(|url| !url.trim().is_empty());
+    if body.trim().is_empty() && media.is_empty() && !stands_on_link {
+        // Only what this platform can actually carry is offered as the fix.
+        let mut options = vec!["text"];
+        if info.limits.max_media > 0 {
+            options.push("an attachment");
+        }
+        if info.limits.link_is_content {
+            options.push("a link");
+        }
         return Err(AppError::InvalidInput(format!(
-            "{} needs text or an attachment.",
-            info.name
+            "{} needs {}.",
+            info.name,
+            options.join(" or ")
         )));
     }
     if length > effective_char_limit {
@@ -486,29 +562,382 @@ pub fn validate(
             info.name
         )));
     }
-    if info.limits.requires_media && media_count == 0 {
+    for field in &info.target_fields {
+        let value = option_value(options, field.key);
+        match value {
+            None if field.required => {
+                return Err(AppError::InvalidInput(format!(
+                    "{} needs a {}.",
+                    info.name,
+                    field.label.to_lowercase()
+                )));
+            }
+            Some(value) if !field.choices.is_empty() && !field.choices.contains(&value) => {
+                return Err(AppError::InvalidInput(format!(
+                    "{}: `{value}` is not a {} option. Pick one of {}.",
+                    info.name,
+                    field.label.to_lowercase(),
+                    field.choices.join(", ")
+                )));
+            }
+            _ => {}
+        }
+    }
+    if info.limits.requires_media && media.is_empty() {
         return Err(AppError::InvalidInput(format!(
             "{} has no text-only post — attach an image or a video.",
             info.name
         )));
     }
-    if media_count > info.limits.max_media {
+    check_media(&info, media)
+}
+
+/// Count, type, size and pairing of the attachments against what this
+/// platform (and its adapter) can carry.
+fn check_media(info: &PlatformInfo, media: &[MediaSpec]) -> Result<()> {
+    if media.len() > info.limits.max_media {
         return Err(AppError::InvalidInput(format!(
-            "{} takes at most {} attachment(s); this has {media_count}.",
-            info.name, info.limits.max_media
+            "{} takes at most {} attachment(s); this has {}.",
+            info.name,
+            info.limits.max_media,
+            media.len()
         )));
     }
+    for item in media {
+        let kind = media_label(&item.mime);
+        let Some(rule) = info
+            .limits
+            .accepts
+            .iter()
+            .find(|rule| rule.mime == item.mime)
+        else {
+            let accepted: Vec<String> = info
+                .limits
+                .accepts
+                .iter()
+                .map(|rule| media_label(rule.mime))
+                .collect();
+            return Err(AppError::InvalidInput(format!(
+                "{} cannot post {kind} files. It takes {}.",
+                info.name,
+                accepted.join(", ")
+            )));
+        };
+        if item.bytes > rule.max_bytes {
+            return Err(AppError::InvalidInput(format!(
+                "{} takes {kind} files up to {}; this one is {}.",
+                info.name,
+                megabytes(rule.max_bytes),
+                megabytes(item.bytes)
+            )));
+        }
+        if rule.alone && media.len() > 1 {
+            return Err(AppError::InvalidInput(format!(
+                "{} posts {kind} files on their own — remove the other attachments.",
+                info.name
+            )));
+        }
+    }
     Ok(())
+}
+
+/// The length a platform holds against its limit: the body, plus any
+/// per-destination option it bills to the same budget (Mastodon's content
+/// warning). Shared with the composer's counter so the two cannot disagree.
+pub fn counted_length(id: PlatformId, body: &str, options: &serde_json::Value) -> usize {
+    let platform = adapter(id);
+    platform
+        .info()
+        .target_fields
+        .iter()
+        .filter(|field| field.counted)
+        .fold(platform.count_body(body), |total, field| {
+            total + option_value(options, field.key).map_or(0, |value| platform.count_body(value))
+        })
+}
+
+/// One per-destination option as the adapter will read it — the same trimming
+/// as [`PublishRequest::option`], so what passes here is what gets sent.
+fn option_value<'a>(options: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    options
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// `image/jpeg` → `JPEG`: the word a person knows the file by.
+fn media_label(mime: &str) -> String {
+    mime.rsplit('/').next().unwrap_or(mime).to_ascii_uppercase()
+}
+
+/// Bytes as megabytes to one decimal place, in the same binary unit as [`MB`].
+fn megabytes(bytes: u64) -> String {
+    let tenths = (bytes.saturating_mul(10) + MB / 2) / MB;
+    if tenths.is_multiple_of(10) {
+        format!("{} MB", tenths / 10)
+    } else {
+        format!("{}.{} MB", tenths / 10, tenths % 10)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn rust() -> serde_json::Value {
+        serde_json::json!({ "subreddit": "rust" })
+    }
+
+    #[test]
+    fn a_required_destination_option_is_enforced() {
+        let none = serde_json::json!({});
+        let blank = serde_json::json!({ "subreddit": "  " });
+        let err =
+            validate(PlatformId::Reddit, "b", Some("T"), None, &[], &none, 40_000).unwrap_err();
+        assert!(err.to_string().contains("subreddit"), "{err}");
+        assert!(
+            validate(
+                PlatformId::Reddit,
+                "b",
+                Some("T"),
+                None,
+                &[],
+                &blank,
+                40_000
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                PlatformId::Reddit,
+                "b",
+                Some("T"),
+                None,
+                &[],
+                &rust(),
+                40_000
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_choice_outside_the_declared_set_is_refused() {
+        let wrong = serde_json::json!({ "visibility": "everyone" });
+        let right = serde_json::json!({ "visibility": "unlisted" });
+        let err = validate(PlatformId::Mastodon, "hi", None, None, &[], &wrong, 500).unwrap_err();
+        assert!(err.to_string().contains("everyone"), "{err}");
+        assert!(validate(PlatformId::Mastodon, "hi", None, None, &[], &right, 500).is_ok());
+    }
+
+    #[test]
+    fn a_mastodon_content_warning_counts_toward_the_limit() {
+        // Mastodon measures spoiler_text and text together against one limit.
+        let body = "x".repeat(490);
+        let long = serde_json::json!({ "spoiler_text": "y".repeat(20) });
+        let short = serde_json::json!({ "spoiler_text": "y".repeat(10) });
+        assert!(validate(PlatformId::Mastodon, &body, None, None, &[], &long, 500).is_err());
+        assert!(validate(PlatformId::Mastodon, &body, None, None, &[], &short, 500).is_ok());
+        assert_eq!(counted_length(PlatformId::Mastodon, &body, &long), 510);
+    }
+
+    fn spec(mime: &str, bytes: u64) -> MediaSpec {
+        MediaSpec {
+            mime: mime.into(),
+            bytes,
+        }
+    }
+
+    #[test]
+    fn bluesky_refuses_a_video_it_would_send_into_an_image_embed() {
+        let video = [spec("video/mp4", 1000)];
+        let err = validate(
+            PlatformId::Bluesky,
+            "hi",
+            None,
+            None,
+            &video,
+            &serde_json::json!({}),
+            300,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("MP4"), "{err}");
+        let image = [spec("image/jpeg", 1000)];
+        assert!(
+            validate(
+                PlatformId::Bluesky,
+                "hi",
+                None,
+                None,
+                &image,
+                &serde_json::json!({}),
+                300
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_image_over_the_platform_cap_is_refused() {
+        // app.bsky.embed.images caps a blob at 2,000,000 bytes.
+        let at_cap = [spec("image/png", 2_000_000)];
+        let over = [spec("image/png", 2_000_001)];
+        assert!(
+            validate(
+                PlatformId::Bluesky,
+                "hi",
+                None,
+                None,
+                &at_cap,
+                &serde_json::json!({}),
+                300
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                PlatformId::Bluesky,
+                "hi",
+                None,
+                None,
+                &over,
+                &serde_json::json!({}),
+                300
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn instagram_takes_jpeg_only() {
+        let png = [spec("image/png", 1000)];
+        let jpeg = [spec("image/jpeg", 1000)];
+        assert!(
+            validate(
+                PlatformId::Instagram,
+                "",
+                None,
+                None,
+                &png,
+                &serde_json::json!({}),
+                2200
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                PlatformId::Instagram,
+                "",
+                None,
+                None,
+                &jpeg,
+                &serde_json::json!({}),
+                2200
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn linkedin_refuses_a_video_it_would_send_to_the_images_api() {
+        let video = [spec("video/mp4", 1000)];
+        assert!(
+            validate(
+                PlatformId::Linkedin,
+                "hi",
+                None,
+                None,
+                &video,
+                &serde_json::json!({}),
+                3000
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn facebook_refuses_a_video_beside_images_instead_of_dropping_them() {
+        let mixed = [spec("image/jpeg", 1000), spec("video/mp4", 1000)];
+        let err = validate(
+            PlatformId::Facebook,
+            "hi",
+            None,
+            None,
+            &mixed,
+            &serde_json::json!({}),
+            63_206,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("on their own"), "{err}");
+        let video = [spec("video/mp4", 1000)];
+        let images = [spec("image/jpeg", 1000), spec("image/png", 1000)];
+        assert!(
+            validate(
+                PlatformId::Facebook,
+                "hi",
+                None,
+                None,
+                &video,
+                &serde_json::json!({}),
+                63_206
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                PlatformId::Facebook,
+                "hi",
+                None,
+                None,
+                &images,
+                &serde_json::json!({}),
+                63_206
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn every_type_the_picker_offers_is_accepted_somewhere() {
+        // A type no adapter accepts would be a picker option that never posts.
+        for mime in [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp",
+            "video/mp4",
+        ] {
+            assert!(
+                all_info().iter().any(|info| info
+                    .limits
+                    .accepts
+                    .iter()
+                    .any(|rule| rule.mime == mime)),
+                "{mime}"
+            );
+        }
+    }
+
+    #[test]
+    fn sizes_read_in_megabytes() {
+        assert_eq!(megabytes(5 * MB), "5 MB");
+        assert_eq!(megabytes(2_000_000), "1.9 MB");
+    }
+
     #[test]
     fn rejects_a_body_over_the_effective_limit() {
         let body = "x".repeat(301);
-        let err = validate(PlatformId::Bluesky, &body, None, 0, 300).unwrap_err();
+        let err = validate(
+            PlatformId::Bluesky,
+            &body,
+            None,
+            None,
+            &[],
+            &serde_json::json!({}),
+            300,
+        )
+        .unwrap_err();
         assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
     }
 
@@ -517,20 +946,141 @@ mod tests {
         // A Mastodon instance raising its own max_characters must let a longer
         // body through even though the platform default is 500.
         let body = "x".repeat(1200);
-        assert!(validate(PlatformId::Mastodon, &body, None, 0, 5000).is_ok());
-        assert!(validate(PlatformId::Mastodon, &body, None, 0, 500).is_err());
+        assert!(
+            validate(
+                PlatformId::Mastodon,
+                &body,
+                None,
+                None,
+                &[],
+                &serde_json::json!({}),
+                5000
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                PlatformId::Mastodon,
+                &body,
+                None,
+                None,
+                &[],
+                &serde_json::json!({}),
+                500
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn reddit_needs_a_title() {
-        assert!(validate(PlatformId::Reddit, "body", None, 0, 40_000).is_err());
-        assert!(validate(PlatformId::Reddit, "body", Some("Title"), 0, 40_000).is_ok());
+        assert!(
+            validate(
+                PlatformId::Reddit,
+                "body",
+                None,
+                None,
+                &[],
+                &serde_json::json!({}),
+                40_000
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                PlatformId::Reddit,
+                "body",
+                Some("Title"),
+                None,
+                &[],
+                &rust(),
+                40_000
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn an_empty_post_with_media_is_allowed() {
-        assert!(validate(PlatformId::Bluesky, "", None, 1, 300).is_ok());
-        assert!(validate(PlatformId::Bluesky, "", None, 0, 300).is_err());
+        assert!(
+            validate(
+                PlatformId::Bluesky,
+                "",
+                None,
+                None,
+                &[spec("image/png", 1)],
+                &serde_json::json!({}),
+                300
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                PlatformId::Bluesky,
+                "",
+                None,
+                None,
+                &[],
+                &serde_json::json!({}),
+                300
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_link_is_content_where_the_platform_posts_one() {
+        // A Reddit link submission is a title and a URL — no body, no media.
+        let link = Some("https://example.com");
+        assert!(
+            validate(
+                PlatformId::Reddit,
+                "",
+                Some("Title"),
+                link,
+                &[],
+                &rust(),
+                40_000
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                PlatformId::Facebook,
+                "",
+                None,
+                link,
+                &[],
+                &serde_json::json!({}),
+                63_206
+            )
+            .is_ok()
+        );
+        // Bluesky ignores the link field, so a link alone would post nothing.
+        assert!(
+            validate(
+                PlatformId::Bluesky,
+                "",
+                None,
+                link,
+                &[],
+                &serde_json::json!({}),
+                300
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                PlatformId::Reddit,
+                "",
+                Some("Title"),
+                None,
+                &[],
+                &serde_json::json!({}),
+                40_000
+            )
+            .is_err()
+        );
     }
 
     #[test]

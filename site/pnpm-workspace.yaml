@@ -1,0 +1,8 @@
+# A workspace of its own. Without this file pnpm walks up to the repo root's
+# pnpm-workspace.yaml, and site/ is deliberately not a member of that one: it
+# deploys to Vercel on its own and shares no packages with the desktop app.
+packages: []
+
+# Same as the root: the global default quarantines packages published in the
+# last 24h, which rejects most of a freshly resolved toolchain.
+minimumReleaseAge: 0

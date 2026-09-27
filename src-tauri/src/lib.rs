@@ -23,22 +23,16 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use tauri::{Manager, WindowEvent};
+use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 use commands::AppState;
 use scheduler::Scheduler;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
-        if cfg!(debug_assertions) {
-            "windbag=debug,warn"
-        } else {
-            "windbag=info,warn"
-        },
-    ))
-    .init();
-
     tauri::Builder::default()
+        // First, so every later plugin's setup is logged.
+        .plugin(logger())
         // A second launch focuses the running window rather than starting a rival
         // scheduler against the same store.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -90,6 +84,7 @@ pub fn run() {
             commands::list_platforms,
             commands::list_accounts,
             commands::connect_account,
+            commands::deliver_auth_callback,
             commands::disconnect_account,
             commands::get_app_credentials,
             commands::save_app_credentials,
@@ -147,6 +142,29 @@ pub fn run() {
         });
 }
 
+/// stderr for `tauri dev`; the log directory (~/Library/Logs/com.entro314.windbag
+/// on macOS) for a bundled build, where stderr goes nowhere. Local time, because
+/// the question these answer is "what happened at 09:00".
+fn logger() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri_plugin_log::Builder::new()
+        .clear_targets()
+        .target(Target::new(TargetKind::Stderr))
+        .target(Target::new(TargetKind::LogDir { file_name: None }))
+        .timezone_strategy(TimezoneStrategy::UseLocal)
+        .max_file_size(5_000_000)
+        .rotation_strategy(RotationStrategy::KeepSome(3))
+        .level(log::LevelFilter::Warn)
+        .level_for(
+            "windbag_lib",
+            if cfg!(debug_assertions) {
+                log::LevelFilter::Debug
+            } else {
+                log::LevelFilter::Info
+            },
+        )
+        .build()
+}
+
 /// Everything the app needs standing up before the first frame: the store, the
 /// login item reconciled against the stored preference, the deep-link route the
 /// Bluesky sign-in comes back on, the scheduler thread, and the window.
@@ -191,6 +209,14 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
     // the way out.
     app.manage(update::PendingUpdate(std::sync::Mutex::new(None)));
 
+    // Windows and Linux: closing the window only hides it, and neither gets
+    // tauri's default app menu, so without a tray there is no way to quit — and
+    // a staged update installs on quit. macOS has the Dock and the app menu.
+    // Gated at runtime rather than by `cfg` so every build compiles this code.
+    if cfg!(not(target_os = "macos")) {
+        install_tray(app)?;
+    }
+
     if let Some(window) = app.get_webview_window("main") {
         windowing::apply_material(&window, "standard");
         // Before the window is shown, so the title bar never jumps.
@@ -203,5 +229,37 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
             let _ = window.show();
         }
     }
+    Ok(())
+}
+
+/// A tray icon whose menu shows the window and quits the app. Quit goes through
+/// `exit`, so it raises `ExitRequested` like any other quit and a staged update
+/// is installed on the way out.
+fn install_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::TrayIconBuilder;
+
+    let show = MenuItem::with_id(app, "show", "Show Windbag", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Windbag", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("Windbag")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
     Ok(())
 }

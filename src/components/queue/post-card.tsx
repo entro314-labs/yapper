@@ -2,6 +2,7 @@ import {
   IconAlertTriangle,
   IconCalendarClock,
   IconChevronDown,
+  IconCopy,
   IconExternalLink,
   IconPencil,
   IconRefresh,
@@ -13,8 +14,9 @@ import { openUrl } from '@tauri-apps/plugin-opener'
 import * as React from 'react'
 import { toast } from 'sonner'
 
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
-import { STATUS_LABEL, StatusDot } from '@/components/ui/status-dot'
+import { STATUS_LABEL, StatusDot, isEditable } from '@/components/ui/status-dot'
 import { brandOf } from '@/lib/platform-brand'
 import { useAttempts, useDeletePost, usePublishNow, useRetryTarget } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
@@ -39,7 +41,7 @@ export function PostCard({ post, accounts }: { post: PostDetail; accounts: Map<n
 
   const needsAttention =
     post.status === 'failed' || post.status === 'partial' || post.status === 'missed'
-  const editable = post.status !== 'published' && post.status !== 'publishing'
+  const editable = isEditable(post.status)
 
   const run = React.useCallback(async (action: Promise<unknown>, success: string) => {
     try {
@@ -80,6 +82,19 @@ export function PostCard({ post, accounts }: { post: PostDetail; accounts: Map<n
               render={<Link to="/compose" search={{ id: post.id }} />}
             >
               <IconPencil />
+            </Button>
+          ) : null}
+          {/* A published post cannot be edited, but it can be the start of the
+              next one: a copy opens as a new draft and the original is never
+              touched. */}
+          {post.status === 'published' ? (
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label="Duplicate as a new draft"
+              render={<Link to="/compose" search={{ from: post.id }} />}
+            >
+              <IconCopy />
             </Button>
           ) : null}
           {editable && post.targets.length > 0 ? (
@@ -262,7 +277,11 @@ function AttemptLog({
         History
       </button>
 
-      {open ? (
+      {open && attempts.isError ? (
+        <QueryErrorState compact what="the history" queries={[attempts]} className="mt-1.5" />
+      ) : null}
+
+      {open && !attempts.isError ? (
         <ol className="mt-1.5 flex flex-col gap-1 border-l border-border/60 pl-2.5">
           {(attempts.data ?? []).map((attempt) => (
             <li key={attempt.id} className="flex gap-2 text-[11px] leading-relaxed">

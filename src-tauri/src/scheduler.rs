@@ -20,7 +20,7 @@ use tauri::{AppHandle, Emitter};
 use crate::db::{self, Db, DueTarget, POST_MISSED, POST_SCHEDULED};
 use crate::error::{AppError, Result};
 use crate::media;
-use crate::platforms::{self, PublishRequest, Published};
+use crate::platforms::{self, MediaSpec, PublishRequest, Published};
 
 /// How often the worker looks for work. Twenty seconds is well inside the
 /// smallest scheduling granularity the UI offers (one minute) while costing a
@@ -195,12 +195,23 @@ fn publish_one(database: &Arc<Db>, item: &DueTarget) -> Result<Published> {
     // Validated again here, not only in the composer: the post may have been
     // edited after it was scheduled, and a limit that was fine then may not be
     // now (a Mastodon instance can lower its own).
+    // Judged on the bytes just read, not the size recorded at save: the file
+    // on disk is what goes out, and it may have been replaced since.
+    let specs: Vec<MediaSpec> = media
+        .iter()
+        .map(|item| MediaSpec {
+            mime: item.mime.clone(),
+            bytes: item.bytes.len() as u64,
+        })
+        .collect();
     let limit = effective_char_limit(account, adapter);
     platforms::validate(
         account.platform,
         &item.post.body,
         item.post.title.as_deref(),
-        media.len(),
+        item.post.link.as_deref(),
+        &specs,
+        &item.target.options,
         limit,
     )?;
 
@@ -303,13 +314,7 @@ pub fn catch_up(database: &Arc<Db>) -> Result<usize> {
     if policy == MissedPolicy::PostLate {
         return Ok(0);
     }
-    let grace = database
-        .get_meta(META_GRACE_MINUTES)?
-        .and_then(|value| value.parse::<i64>().ok())
-        .filter(|value| *value >= 0)
-        .unwrap_or(DEFAULT_GRACE_MINUTES)
-        .max(MIN_GRACE_MINUTES);
-
+    let grace = grace_minutes(database)?;
     let cutoff = Utc::now() - chrono::Duration::minutes(grace);
     let overdue = database.overdue_posts(cutoff)?;
     for post in &overdue {
@@ -321,6 +326,32 @@ pub fn catch_up(database: &Arc<Db>) -> Result<usize> {
         );
     }
     Ok(overdue.len())
+}
+
+/// The missed-post window from Settings, never below [`MIN_GRACE_MINUTES`].
+pub fn grace_minutes(database: &Db) -> Result<i64> {
+    Ok(database
+        .get_meta(META_GRACE_MINUTES)?
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value >= 0)
+        .unwrap_or(DEFAULT_GRACE_MINUTES)
+        .max(MIN_GRACE_MINUTES))
+}
+
+/// Refuses a time further in the past than the grace window. Such a post is
+/// marked missed by the very next pass (or sent hours late under `PostLate`),
+/// so accepting it and answering "Scheduled" would be a lie — almost always
+/// a wrong date or a wrong zone rather than an intent. Inside the window it
+/// is simply due, which is what "Post now" relies on.
+pub fn refuse_past(database: &Db, at: chrono::DateTime<Utc>) -> Result<()> {
+    let grace = grace_minutes(database)?;
+    if at < Utc::now() - chrono::Duration::minutes(grace) {
+        return Err(AppError::InvalidInput(format!(
+            "That time ({}) has already passed. Pick a time in the future.",
+            at.to_rfc3339()
+        )));
+    }
+    Ok(())
 }
 
 /// Fails destinations that were claimed and never settled — a crash, a
@@ -591,6 +622,23 @@ mod tests {
         assert_eq!(backoff(3), chrono::Duration::minutes(15));
         assert_eq!(backoff(4), chrono::Duration::minutes(60));
         assert_eq!(backoff(9), chrono::Duration::minutes(60));
+    }
+
+    #[test]
+    fn a_time_past_the_grace_window_is_refused() {
+        let database = Db::open_in_memory().expect("store");
+        let err = refuse_past(&database, Utc::now() - chrono::Duration::hours(2)).unwrap_err();
+        assert!(err.to_string().contains("already passed"), "{err}");
+        // Inside the window it would simply go out on the next pass.
+        assert!(refuse_past(&database, Utc::now() - chrono::Duration::minutes(3)).is_ok());
+        assert!(refuse_past(&database, Utc::now() + chrono::Duration::hours(2)).is_ok());
+    }
+
+    #[test]
+    fn the_past_time_check_uses_the_configured_grace() {
+        let database = Db::open_in_memory().expect("store");
+        database.set_meta(META_GRACE_MINUTES, "180").expect("grace");
+        assert!(refuse_past(&database, Utc::now() - chrono::Duration::hours(2)).is_ok());
     }
 
     #[test]

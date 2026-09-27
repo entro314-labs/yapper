@@ -8,6 +8,19 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Added
 
+- **Duplicate a post as a new draft.** Sent posts in the queue and published
+  posts on the calendar open as a copy in the composer — text, destinations,
+  options and attachments. Saving creates a new post; the original is never
+  touched.
+- **Keyboard shortcuts.** Cmd/Ctrl+Enter schedules or saves the draft in the
+  composer, Cmd/Ctrl+S saves a note, and Enter submits the connect dialog.
+- **A tray icon on Windows and Linux.** Closing the window only hides Windbag,
+  so the scheduler keeps running — but those platforms have no app menu, which
+  left no way to quit and no way to install a staged update. The tray's menu
+  shows the window or quits.
+- **Reorder attachments.** Move-up and move-down buttons set the order
+  attachments are posted in, which is how a carousel is sequenced.
+
 - **Updates, and the pipeline behind them.** Windbag checks its releases
   repository at launch and once a day after that, and Settings → Updates carries
   the whole flow: the channel to follow (stable, beta, alpha, or matching this
@@ -15,6 +28,12 @@ All notable changes to Windbag are documented here. The format follows
   with a progress bar, and the restart that applies it. The status bar carries
   the ambient half — an available, downloading or staged update stays visible
   without ever interrupting a compose.
+- **Logs you can actually read.** A bundled app has no terminal, so every
+  scheduler and platform error used to vanish. They are now also written to the
+  OS log directory, rotated at 5 MB with three files kept.
+- **An update must name its own version.** The updater refuses a download
+  whose signature does not carry the version it was signed for, which closes the
+  replay of an older signed build as a newer one.
 - **A downloaded update is never installed while the app runs.** Replacing a
   live bundle breaks the running process's code signature, so a verified
   download is staged and swapped in on quit — or immediately, if you ask for the
@@ -116,6 +135,10 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Changed
 
+- **A custom Bluesky client-metadata URL must be hosted on
+  entro314-labs.github.io.** The app registers one callback scheme, derived from
+  that host, so any other host is refused up front with an explanation instead
+  of a sign-in that hangs for five minutes.
 - **Animated icons where a control is live.** The sidebar rows and its collapse
   toggle, New post / Write a post, Post now, Attach, the assistant buttons, the
   stats Refresh, the calendar arrows, the copy chips and the developer-portal
@@ -147,6 +170,66 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Fixed
 
+- **Reddit link posts can be saved.** A post with a title and a link but no body
+  was always refused, although that is exactly how a Reddit link submission
+  works. A link now counts as content on Reddit and Facebook.
+- **Attachments are checked by type and size when you save, not when they
+  publish.** An MP4 is no longer accepted for Bluesky or LinkedIn, a PNG for
+  Instagram, or an image over a platform's limit (Bluesky's 2 MB). A Facebook
+  post with a video and photos is refused instead of quietly losing the photos;
+  X takes one GIF or one video on its own, and so does Mastodon for video.
+- **Required destination options are enforced.** A Reddit destination without a
+  subreddit, or an option outside its allowed values, is an error in the
+  composer and the agent door rather than a failure at publish time. Mastodon's
+  content warning counts toward the character limit.
+- **A scheduled time that has already passed is refused** in the composer, the
+  calendar and the agent door, instead of being accepted as scheduled and marked
+  missed a few seconds later. A scheduled post needs at least one destination;
+  a draft still does not.
+- **Saving a post is all-or-nothing.** The post, its attachments and its
+  destinations are written in one transaction, and the composer and the agent
+  door share that one save path.
+- **Save stays disabled until the check for what is on screen is back**, so an
+  edit that goes over a limit cannot slip through while it runs.
+- **Threads and Instagram attachments over 4.5 MB publish.** The app now uploads
+  the file straight to R2 through a short-lived signed URL from the web
+  deployment, instead of through a Vercel function, which rejects any body over
+  4.5 MB. An attachment the deployment refuses fails at once with its reason
+  rather than after five retries.
+- **A stray sign-in callback no longer cancels the sign-in in progress.** A
+  leftover tab or a foreign `?error=` link is ignored and the app keeps
+  waiting, and a callback macOS could silently drop now gets through.
+- **The Bluesky "paste the link" fallback works.** The connect dialog stays open
+  while the sign-in waits, and pasting the link the browser could not open
+  finishes that same sign-in.
+- **Bluesky token refreshes check who they talk to.** The refresh token is only
+  sent to the server that issued it, and refreshed tokens must belong to the
+  account.
+- **Failed loads are shown as errors, not as empty screens.** A store that
+  cannot be read no longer shows "Nothing queued" or "No accounts yet"; each
+  screen says what failed, with a Retry.
+- **Reconnect actually reconnects.** The marker on an account that needs
+  re-authorising is now a button that opens sign-in for that account and
+  updates it in place.
+- **Calendar posts open when clicked, and published ones cannot be dragged.**
+  Dragging a published post used to put it back in the queue, where it later
+  showed as missed.
+- **Disconnecting, removing a platform app and deleting a note ask first.**
+  Disconnect says it removes that account's destinations, delivery history and
+  stats from Windbag, and that published posts stay on the platform.
+- **Unsaved edits are not lost silently.** Leaving the composer, or switching
+  or starting a note with unsaved changes, asks before discarding; "Draft from
+  this" saves the note first.
+- **Pinning a note no longer saves half-finished edits.**
+- **The assistant Model and Grace window fields no longer drop characters.**
+  They save when you leave the field; an empty or out-of-range grace window
+  reverts instead of saving.
+- **A destination that needs reconnecting can be removed from a post.**
+- **The assistant panel shows every selected note, names its backend, and sits
+  below Destinations**, so drafts are written to the chosen destinations'
+  limits.
+- **Settings controls have accessible names.**
+
 - **The macOS traffic lights sit where macOS puts them.** Their position was
   pinned from `tauri.conf.json`, which macOS 26 stopped honouring vertically —
   leaving the buttons off-centre in a header band sized for coordinates the OS
@@ -156,6 +239,9 @@ All notable changes to Windbag are documented here. The format follows
   span 80px from the window edge, and at 56px the green one straddled the seam
   between the rail and the content pane. In fullscreen, where the OS hides them,
   the wordmark stops reserving the gap.
+- **Changing the window material replaces it instead of layering it.** Each
+  switch on macOS added another frosted layer over the previous one, so moving
+  between Standard and Strong a few times left several materials stacked.
 - **A zero grace window no longer marks every post missed.** The missed-post
   check runs before each publishing pass, so with the window at 0 a post was
   marked missed in the pass that should have sent it — "Post now" included. The

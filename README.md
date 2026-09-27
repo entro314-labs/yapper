@@ -103,7 +103,10 @@ So this repo ships [`site/`](site/): a small Next.js deployment that answers
 both. It serves the legal pages Meta's app review asks for, provides the HTTPS
 redirect at `/oauth/meta` (which bounces straight back to the loopback listener
 the app already has open, storing nothing), and holds attachments in Cloudflare
-R2 for as long as it takes Meta to fetch them.
+R2 for as long as it takes Meta to fetch them. The app never pushes the file
+through the deployment itself — a Vercel function refuses request bodies over
+4.5 MB — so `/api/media` answers with a presigned R2 upload URL, signed for the
+declared type and size, and the app uploads straight to R2.
 
 It deploys to **windbag.social**, which makes the strings each Meta app needs:
 
@@ -159,17 +162,20 @@ web, which the authorization server fetches during sign-in:
 1. **Publish `docs/client-metadata.json`.** Create the GitHub repo, push, and
    enable Pages from `main` / `/docs`, so
    `https://entro314-labs.github.io/yapper/client-metadata.json` resolves.
-   Hosting it anywhere else works too — set the URL in
-   **Settings → Platform apps → Bluesky**, and the redirect scheme is derived
-   from that hostname automatically.
+   The redirect scheme is derived from the document's hostname, and the bundle
+   registers exactly one, so a copy set in **Settings → Platform apps →
+   Bluesky** must live on `entro314-labs.github.io` (any path); Windbag refuses
+   any other host up front. Hosting it elsewhere means a fork that changes
+   `DEFAULT_CLIENT_ID` and `CALLBACK_SCHEME` in `src-tauri/src/atproto.rs` and
+   the `deep-link` scheme in `tauri.conf.json` together, then rebuilds.
 2. **Run a bundled build** (`pnpm tauri:build`). The callback comes back on a
    custom URI scheme (`io.github.entro314-labs:/callback`), which macOS routes
    through the bundle's `Info.plist` — so it cannot work under `tauri dev`.
 
 Until both are done, Windbag says so before opening a browser rather than
 failing halfway through. If a callback ever fails to route, the browser shows a
-link it could not open: paste it into the dialog's **Callback URL** field and
-the same sign-in finishes.
+link it could not open: the connect dialog stays open while the sign-in waits,
+so paste that link there and the same sign-in finishes.
 
 ## The assistant
 
@@ -246,6 +252,12 @@ pnpm check              # lint, format, types, build, clippy, rustfmt, rust test
 Requires Node 24+, Rust 1.98 and pnpm 12 — `mise install` picks all three up
 from `mise.toml` and `rust-toolchain.toml`.
 
+Logs go to stderr under `tauri dev` and, in every build, to the OS log
+directory — `~/Library/Logs/com.entro314.windbag` on macOS,
+`%LOCALAPPDATA%\com.entro314.windbag\logs` on Windows,
+`~/.local/share/com.entro314.windbag/logs` on Linux. They hold scheduler and
+platform errors, never a token.
+
 ### Layout
 
 ```
@@ -254,7 +266,7 @@ src/                    React 19 + TanStack Router + Tailwind 4
   components/shell/     sidebar, pane titlebar, status bar
   lib/tauri/            the IPC contract: command registry, client, types
   lib/query/            TanStack Query keys, hooks, and the Rust event bridge
-  routes/               queue, compose, calendar, accounts, settings
+  routes/               queue, compose, calendar, notes, stats, accounts, settings
 src-tauri/src/
   db.rs                 SQLite + the schema ladder: accounts, posts, targets,
                         media, attempts, notes, metrics
@@ -296,11 +308,15 @@ Posts, schedules and account metadata live in one SQLite file in your app data
 directory. Tokens, app passwords and your developer-app client ids live in the
 OS credential store. Nothing is sent anywhere except to the platform you are
 posting to, and every one of those requests is made from Rust — the webview
-never sees a token, and its CSP allows no outbound connections at all.
+never sees a token, and its CSP gives scripts no network access beyond Tauri's
+own IPC (`connect-src`). The one thing it loads from the web is images over
+HTTPS (`img-src https:`), which is how account avatars display; those are plain
+GETs of the avatar URL and carry no credentials.
 
 The one exception is Meta, and only when you post to Threads or Instagram *with
-an attachment*: that file is uploaded to your own web deployment first, because
-Meta will not accept it any other way. While it is there it is publicly readable
-by anyone holding the URL — it has to be, since Meta fetches it anonymously — so
-the key is 32 random bytes and a bucket lifecycle rule expires it. See
+an attachment*: that file is uploaded to your own web deployment's storage
+first, because Meta will not accept it any other way. While it is there it is
+publicly readable by anyone holding the URL — it has to be, since Meta fetches
+it anonymously — so the key is 32 random bytes and a bucket lifecycle rule
+expires it. See
 [`site/app/legal/privacy/page.mdx`](site/app/legal/privacy/page.mdx).

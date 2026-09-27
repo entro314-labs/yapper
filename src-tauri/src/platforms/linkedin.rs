@@ -23,7 +23,9 @@ use super::{
 };
 use crate::error::{AppError, Result, after_send, from_status, unreadable_after_send};
 use crate::http;
+use crate::media;
 use crate::oauth::{self, OAuthConfig, REDIRECT_URI};
+use crate::platforms::MediaRule;
 
 pub struct Linkedin;
 
@@ -34,6 +36,16 @@ const API_BASE: &str = "https://api.linkedin.com";
 /// install because `LinkedIn` sunsets versions on a rolling schedule.
 const DEFAULT_API_VERSION: &str = "202606";
 const SCOPES: &str = "openid profile w_member_social";
+
+/// The Images API takes JPG, GIF and PNG and documents a pixel cap
+/// (36,152,320) rather than a byte cap, so the app's own ceiling is the size
+/// limit: <https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/images-api>
+/// Video is the separate Videos API, which this adapter does not implement.
+const MEDIA: &[MediaRule] = &[
+    MediaRule::up_to("image/png", media::MAX_BYTES),
+    MediaRule::up_to("image/jpeg", media::MAX_BYTES),
+    MediaRule::up_to("image/gif", media::MAX_BYTES),
+];
 
 impl Platform for Linkedin {
     fn info(&self) -> PlatformInfo {
@@ -46,9 +58,11 @@ impl Platform for Linkedin {
                 // One image per post. Several needs the separate MultiImage API,
                 // which is a different content shape rather than more of this one.
                 max_media: 1,
+                accepts: MEDIA,
                 supports_alt_text: true,
                 requires_title: false,
                 requires_media: false,
+                link_is_content: false,
             },
             connect_fields: Vec::new(),
             app_fields: vec![

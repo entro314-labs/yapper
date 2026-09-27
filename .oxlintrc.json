@@ -8,12 +8,12 @@
 
   "plugins": ["oxc", "typescript", "unicorn", "react", "jsx-a11y", "vitest", "import", "promise"],
 
-  // Vendored shadcn baseline dump under apps/landing (mostly unimported; kept by decision
-  // 2026-07-07). Not our code style — excluded from linting instead of being reworked.
-  // `site/` is a separate Next.js project with its own dependencies; linting it
-  // from here type-checks against packages this workspace never installs.
+  // `site/` is a separate Next.js project with its own dependencies and its own
+  // lint config; linting it from here type-checks against packages this
+  // workspace never installs. The root scripts also pass
+  // `--disable-nested-config`, because oxlint otherwise picks up
+  // site/.oxlintrc.json and lints site/ through it despite this ignore.
   "ignorePatterns": [
-    "apps/landing/src/components/ui/**",
     "site/**",
     "**/*.gen.ts",
     "**/*.gen.tsx"
@@ -522,18 +522,6 @@
           }
         ]
       }
-    },
-    {
-      // Landing/billing web app (apps/landing): the browser console and Vercel
-      // function logs are the legitimate logging channel for this web app, unlike
-      // the packaged Tauri desktop client, which routes through Logger.
-      "files": ["apps/landing/**"],
-      "rules": { "no-console": "off" }
-    },
-    {
-      // CLI maintenance scripts may exit with a status code.
-      "files": ["apps/landing/scripts/**"],
-      "rules": { "unicorn/no-process-exit": "off" }
     },
     {
       // Next.js route files - anonymous default exports required by the framework

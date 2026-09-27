@@ -1,0 +1,22 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+
+  // The repo's rule set, so the site is held to the same standard as the app.
+  // The root config ignores site/ because linting it from there would
+  // type-check against packages only this project installs.
+  "extends": ["../.oxlintrc.json"],
+
+  "ignorePatterns": [".next/**", "next-env.d.ts", "node_modules/**"],
+
+  "env": { "browser": true, "node": true, "es2022": true },
+
+  "overrides": [
+    {
+      // Vercel's function logs are the operator's only view into this
+      // deployment, so a server-side log line is a legitimate channel here —
+      // unlike the packaged desktop client, which routes through its logger.
+      "files": ["**/*.{ts,tsx}"],
+      "rules": { "no-console": "off" }
+    }
+  ]
+}

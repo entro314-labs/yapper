@@ -25,6 +25,7 @@ use crate::platforms::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, MediaItem,
     Platform, PlatformId, PlatformInfo, PublishRequest, Published,
 };
+use crate::platforms::{MB, MediaRule};
 use crate::webhost;
 
 pub struct Threads;
@@ -37,6 +38,14 @@ pub(crate) const API_BASE: &str = "https://graph.threads.net/v1.0";
 const SCOPES: &str = "threads_basic,threads_content_publish";
 const LABEL: &str = "Threads";
 
+/// JPEG and PNG up to 8 MB, MP4 up to 1 GB, mixed freely in a carousel:
+/// <https://developers.facebook.com/docs/threads/overview>
+const MEDIA: &[MediaRule] = &[
+    MediaRule::up_to("image/png", 8 * MB),
+    MediaRule::up_to("image/jpeg", 8 * MB),
+    MediaRule::up_to("video/mp4", 1024 * MB),
+];
+
 impl Platform for Threads {
     fn info(&self) -> PlatformInfo {
         PlatformInfo {
@@ -48,9 +57,11 @@ impl Platform for Threads {
                 // A carousel takes 2–20; a single post takes 1. The cap is the
                 // carousel's, and `publish` picks the shape from the count.
                 max_media: 20,
+                accepts: MEDIA,
                 supports_alt_text: true,
                 requires_title: false,
                 requires_media: false,
+                link_is_content: false,
             },
             connect_fields: Vec::new(),
             app_fields: vec![

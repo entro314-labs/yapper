@@ -45,8 +45,10 @@ use crate::error::{AppError, Result, from_status};
 use crate::http;
 
 /// Where Windbag's own client metadata is published. Overridable per install
-/// (Settings → Platform apps) so a fork, or anyone self-hosting, can point at
-/// their own document without rebuilding.
+/// (Settings → Platform apps), but only with a document on the same host: the
+/// callback scheme is derived from the host and the bundle registers exactly
+/// one (see [`check_callback_routes`]). A fork on another host changes this,
+/// [`CALLBACK_SCHEME`] and `tauri.conf.json` together and rebuilds.
 pub const DEFAULT_CLIENT_ID: &str = "https://entro314-labs.github.io/yapper/client-metadata.json";
 
 /// `atproto` is mandatory for every client. `transition:generic` is what grants
@@ -299,6 +301,31 @@ pub fn redirect_scheme(client_id: &str) -> Result<String> {
     Ok(host.split('.').rev().collect::<Vec<_>>().join("."))
 }
 
+/// Refuses a client id this build cannot receive the callback for.
+///
+/// The redirect scheme is derived from the client id's host, but the OS only
+/// routes the ONE scheme the bundle registers ([`CALLBACK_SCHEME`], fixed in
+/// `tauri.conf.json` and, on macOS, in the signed `Info.plist`). A client id on
+/// any other host would send the browser to a link that opens nothing, and the
+/// sign-in would hang until it timed out — so it is stopped here instead.
+fn check_callback_routes(client_id: &str) -> Result<()> {
+    let scheme = redirect_scheme(client_id)?;
+    if scheme == CALLBACK_SCHEME {
+        return Ok(());
+    }
+    let host = CALLBACK_SCHEME
+        .split('.')
+        .rev()
+        .collect::<Vec<_>>()
+        .join(".");
+    Err(AppError::InvalidInput(format!(
+        "`{client_id}` would send the sign-in back to `{scheme}:/callback`, but this build of \
+         Windbag only receives `{CALLBACK_SCHEME}:/callback`. Host the client metadata on \
+         {host} (any path), or clear the override in Settings → Platform apps to use the \
+         default."
+    )))
+}
+
 /// Checks the client metadata is actually published before starting a flow.
 ///
 /// Without this the first failure is a `PAR` rejection reading
@@ -357,6 +384,7 @@ pub struct Session {
 
 /// Runs the whole browser handoff. Blocks; call it from a worker thread.
 pub fn authorize(client_id: &str, handle_or_did: &str) -> Result<Session> {
+    check_callback_routes(client_id)?;
     preflight_client_metadata(client_id)?;
 
     let identity = resolve_identity(handle_or_did)?;
@@ -392,7 +420,7 @@ pub fn authorize(client_id: &str, handle_or_did: &str) -> Result<Session> {
         .append_pair("client_id", client_id)
         .append_pair("request_uri", &request_uri);
 
-    let listener = CallbackListener::arm();
+    let listener = CallbackListener::arm(&state);
     opener::open_browser(authorize_url.as_str())
         .map_err(|e| AppError::Internal(format!("Could not open the browser: {e}")))?;
 
@@ -457,6 +485,33 @@ pub fn refresh(
         ],
         true,
     )
+}
+
+/// Checked BEFORE a refresh token is sent. The token endpoint is rediscovered
+/// from the account's `PDS` on every refresh, so a `PDS` that now names another
+/// authorization server — moved, or taken over — would otherwise be handed a
+/// refresh token it never issued.
+pub fn check_refresh_issuer(stored: &str, discovered: &str) -> Result<()> {
+    if stored.trim_end_matches('/') == discovered.trim_end_matches('/') {
+        return Ok(());
+    }
+    Err(AppError::Unauthorized(format!(
+        "This Bluesky account's server now names {discovered} as its sign-in server, not \
+         {stored}, which issued this connection. Nothing was sent to it; reconnect the account."
+    )))
+}
+
+/// Refreshed tokens are only this account's if they say so. The same check a
+/// fresh sign-in makes, repeated because a refresh is a new grant.
+pub fn check_refresh_subject(did: &str, sub: &str) -> Result<()> {
+    if sub == did {
+        return Ok(());
+    }
+    Err(AppError::Unauthorized(format!(
+        "Bluesky refreshed this connection as {} rather than {did}. The tokens were discarded; \
+         reconnect the account.",
+        if sub.is_empty() { "nobody" } else { sub }
+    )))
 }
 
 fn push_authorization_request(
@@ -568,24 +623,42 @@ fn exchange(
 
 // ─── The callback ───────────────────────────────────────────────────────────
 
+/// The flow a deep link can be delivered to: where to send it, and the state
+/// it must carry to belong there.
+struct Pending {
+    sender: mpsc::Sender<String>,
+    state: String,
+}
+
 /// Where a deep link lands while a flow is waiting for one.
 ///
 /// A single slot rather than a queue: only one sign-in runs at a time (the
 /// connect command already enforces that), and a stray link arriving with no
 /// flow in progress should be dropped rather than queued for the next one.
-fn pending() -> &'static Mutex<Option<mpsc::Sender<String>>> {
-    static PENDING: OnceLock<Mutex<Option<mpsc::Sender<String>>>> = OnceLock::new();
+fn pending() -> &'static Mutex<Option<Pending>> {
+    static PENDING: OnceLock<Mutex<Option<Pending>>> = OnceLock::new();
     PENDING.get_or_init(|| Mutex::new(None))
 }
 
 /// Hands a callback URL to a waiting flow. Called by the deep-link handler and
-/// by the manual paste fallback alike. Returns whether anything was waiting.
+/// by the manual paste fallback alike. Returns whether it was taken.
+///
+/// Only a URL carrying the waiting flow's own `state` is delivered. Anything
+/// else — a stale link from an abandoned attempt, a crafted `?error=` — is not
+/// part of this sign-in, so it is dropped here and the flow keeps waiting
+/// rather than being aborted by it.
 pub fn deliver_callback(url: &str) -> bool {
     let Ok(slot) = pending().lock() else {
         return false;
     };
-    slot.as_ref()
-        .is_some_and(|sender| sender.send(url.to_string()).is_ok())
+    let Some(pending) = slot.as_ref() else {
+        return false;
+    };
+    let belongs = callback_query(url)
+        .ok()
+        .and_then(|query| query_param(&query, "state"))
+        .is_some_and(|state| state == pending.state);
+    belongs && pending.sender.send(url.to_string()).is_ok()
 }
 
 struct CallbackListener {
@@ -595,10 +668,13 @@ struct CallbackListener {
 impl CallbackListener {
     /// Armed BEFORE the browser opens, so a callback that arrives immediately
     /// cannot be missed.
-    fn arm() -> Self {
+    fn arm(state: &str) -> Self {
         let (sender, receiver) = mpsc::channel();
         if let Ok(mut slot) = pending().lock() {
-            *slot = Some(sender);
+            *slot = Some(Pending {
+                sender,
+                state: state.to_string(),
+            });
         }
         Self { receiver }
     }
@@ -627,17 +703,8 @@ impl Drop for CallbackListener {
 /// Reads the authorization code out of a callback URL, checking everything that
 /// makes it trustworthy: the state we generated, and the issuer that answered.
 pub fn read_callback(url: &str, expected_state: &str, expected_issuer: &str) -> Result<String> {
-    // A custom-scheme URL (`io.github.x:/callback?...`) is not a hierarchical
-    // URL, so it is normalised to one before parsing — only the query matters.
-    let query = url.split_once('?').map_or("", |(_, query)| query);
-    let parsed = url::Url::parse(&format!("https://callback.invalid/?{query}"))
-        .map_err(|e| AppError::InvalidInput(format!("That is not a callback URL: {e}")))?;
-    let param = |name: &str| {
-        parsed
-            .query_pairs()
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value.into_owned())
-    };
+    let parsed = callback_query(url)?;
+    let param = |name: &str| query_param(&parsed, name);
 
     if let Some(error) = param("error") {
         let description = param("error_description").unwrap_or_default();
@@ -671,6 +738,21 @@ pub fn read_callback(url: &str, expected_state: &str, expected_issuer: &str) -> 
     param("code").ok_or_else(|| {
         AppError::Unauthorized("The callback arrived without an authorization code.".into())
     })
+}
+
+/// A custom-scheme URL (`io.github.x:/callback?...`) is not a hierarchical
+/// URL, so it is normalised to one before parsing — only the query matters.
+fn callback_query(url: &str) -> Result<url::Url> {
+    let query = url.split_once('?').map_or("", |(_, query)| query);
+    url::Url::parse(&format!("https://callback.invalid/?{query}"))
+        .map_err(|e| AppError::InvalidInput(format!("That is not a callback URL: {e}")))
+}
+
+fn query_param(parsed: &url::Url, name: &str) -> Option<String> {
+    parsed
+        .query_pairs()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.into_owned())
 }
 
 #[cfg(test)]
@@ -739,6 +821,23 @@ mod tests {
                 "the document must declare the {grant} grant"
             );
         }
+    }
+
+    #[test]
+    fn a_client_id_on_another_host_is_refused_before_the_browser_opens() {
+        // Its redirect scheme would be `com.example`, which the bundle does not
+        // register: the browser would open a link the OS routes nowhere.
+        let err = check_callback_routes("https://example.com/client-metadata.json")
+            .expect_err("unroutable");
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
+        let message = err.to_string();
+        assert!(message.contains("com.example:/callback"), "{message}");
+        assert!(message.contains("entro314-labs.github.io"), "{message}");
+
+        // Another path on the registered host routes fine.
+        check_callback_routes(DEFAULT_CLIENT_ID).expect("default");
+        check_callback_routes("https://entro314-labs.github.io/fork/client-metadata.json")
+            .expect("same host");
     }
 
     #[test]
@@ -887,6 +986,26 @@ mod tests {
     }
 
     #[test]
+    fn a_refresh_goes_only_to_the_server_that_issued_the_tokens() {
+        check_refresh_issuer("https://bsky.social", "https://bsky.social/").expect("same");
+        let err =
+            check_refresh_issuer("https://bsky.social", "https://evil.test").expect_err("moved");
+        assert!(matches!(err, AppError::Unauthorized(_)), "{err}");
+        assert!(err.to_string().contains("evil.test"), "{err}");
+    }
+
+    #[test]
+    fn refreshed_tokens_must_belong_to_the_account() {
+        check_refresh_subject("did:plc:me", "did:plc:me").expect("same");
+        let err = check_refresh_subject("did:plc:me", "did:plc:someone").expect_err("other");
+        assert!(matches!(err, AppError::Unauthorized(_)), "{err}");
+        assert!(
+            check_refresh_subject("did:plc:me", "").is_err(),
+            "a response naming nobody is not this account"
+        );
+    }
+
+    #[test]
     fn an_expiry_is_computed_only_when_the_server_gave_a_lifetime() {
         let with = TokenResponse {
             access_token: "a".into(),
@@ -904,11 +1023,34 @@ mod tests {
         assert!(without.expires_at().is_none());
     }
 
+    /// One test for the process-wide pending slot: tests run in parallel, and
+    /// two of them arming and disarming it would race each other.
     #[test]
-    fn a_callback_delivered_with_nothing_waiting_is_dropped() {
+    fn only_a_callback_for_the_waiting_sign_in_is_delivered() {
         assert!(
-            !deliver_callback("io.github.x:/callback?code=stray"),
+            !deliver_callback("io.github.x:/callback?code=stray&state=s1"),
             "a link arriving outside a flow must not be queued for the next one"
+        );
+
+        let listener = CallbackListener::arm("s1");
+        assert!(
+            !deliver_callback("io.github.x:/callback?error=access_denied&state=other"),
+            "a callback for another sign-in must not be able to cancel this one"
+        );
+        assert!(!deliver_callback("io.github.x:/callback?code=abc"));
+        assert!(
+            listener.receiver.try_recv().is_err(),
+            "nothing foreign reaches the flow"
+        );
+
+        let ours = "io.github.x:/callback?code=abc&state=s1&iss=https://bsky.social";
+        assert!(deliver_callback(ours));
+        assert_eq!(listener.wait(Duration::from_secs(1)).expect("ours"), ours);
+
+        drop(listener);
+        assert!(
+            !deliver_callback(ours),
+            "a finished flow is disarmed, so a replay goes nowhere"
         );
     }
 

@@ -6,6 +6,7 @@ import * as React from 'react'
 import { MessageSquarePlusIcon } from '@/components/icons/message-square-plus'
 import { PostCard } from '@/components/queue/post-card'
 import { EmptyState } from '@/components/shell/empty-state'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useAnimatedIcon } from '@/lib/animated-icon'
@@ -71,6 +72,12 @@ function QueueScreen() {
       ),
     })).filter((band) => band.posts.length > 0)
   }, [posts.data])
+
+  // Accounts too: without them every card silently drops its destinations,
+  // which reads as posts that go nowhere.
+  if (posts.isError || accounts.isError) {
+    return <QueryErrorState what="the queue" queries={[posts, accounts]} />
+  }
 
   if (posts.isLoading) {
     return (

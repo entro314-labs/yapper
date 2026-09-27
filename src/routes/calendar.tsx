@@ -6,8 +6,10 @@ import { toast } from 'sonner'
 import { ChevronLeftIcon } from '@/components/icons/chevron-left'
 import { ChevronRightIcon } from '@/components/icons/chevron-right'
 import { EmptyState } from '@/components/shell/empty-state'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
-import { STATUS_LABEL, StatusDot } from '@/components/ui/status-dot'
+import { Skeleton } from '@/components/ui/skeleton'
+import { STATUS_LABEL, StatusDot, isEditable } from '@/components/ui/status-dot'
 import { useAnimatedIcon } from '@/lib/animated-icon'
 import { brandOf } from '@/lib/platform-brand'
 import { useAccounts, usePosts, useReschedulePost } from '@/lib/query'
@@ -56,6 +58,20 @@ function CalendarScreen() {
   )
 
   const days = React.useMemo(() => buildGrid(monthStart, scheduled), [monthStart, scheduled])
+
+  if (posts.isError || accounts.isError) {
+    return <QueryErrorState what="the calendar" queries={[posts, accounts]} />
+  }
+
+  // Loading is not "nothing on the calendar": the empty state would flash on
+  // every visit before the queue arrived.
+  if (posts.isLoading) {
+    return (
+      <div className="p-4">
+        <Skeleton className="h-[36rem] w-full rounded-lg" />
+      </div>
+    )
+  }
 
   if (scheduled.length === 0) {
     return (
@@ -165,44 +181,79 @@ function CalendarScreen() {
             </span>
 
             <div className="mt-1 flex flex-col gap-1">
-              {day.posts.map((post) => (
-                <button
-                  key={post.id}
-                  type="button"
-                  draggable
-                  onDragStart={(event) => {
-                    event.dataTransfer.setData('text/windbag-post', String(post.id))
-                    event.dataTransfer.setData('text/windbag-at', post.scheduledAt ?? '')
-                    event.dataTransfer.effectAllowed = 'move'
-                  }}
-                  title={`${STATUS_LABEL[post.status]} · ${post.body.slice(0, 120)}`}
-                  className="flex w-full items-center gap-1 rounded border border-border/50 bg-background/50 px-1 py-0.5 text-left text-[11px] hover:border-border"
-                >
-                  <StatusDot status={post.status} />
-                  <span className="shrink-0 whitespace-nowrap tabular-nums text-muted-foreground">
-                    {TIME.format(new Date(post.scheduledAt ?? ''))}
-                  </span>
-                  <span className="flex -space-x-0.5">
-                    {post.targets.slice(0, 3).map((target) => {
-                      const account = byId.get(target.accountId)
-                      if (!account) return null
-                      const brand = brandOf(account.platform)
-                      const Icon = brand.icon
-                      return (
-                        <Icon key={target.id} className="size-2.5" style={{ color: brand.tone }} />
-                      )
-                    })}
-                  </span>
-                  <span className="truncate">{post.body}</span>
-                </button>
-              ))}
+              {day.posts.map((post) => {
+                const editable = isEditable(post.status)
+                const entry = (
+                  <>
+                    <StatusDot status={post.status} />
+                    <span className="shrink-0 whitespace-nowrap tabular-nums text-muted-foreground">
+                      {TIME.format(new Date(post.scheduledAt ?? ''))}
+                    </span>
+                    <span className="flex -space-x-0.5">
+                      {post.targets.slice(0, 3).map((target) => {
+                        const account = byId.get(target.accountId)
+                        if (!account) return null
+                        const brand = brandOf(account.platform)
+                        const Icon = brand.icon
+                        return (
+                          <Icon
+                            key={target.id}
+                            className="size-2.5"
+                            style={{ color: brand.tone }}
+                          />
+                        )
+                      })}
+                    </span>
+                    <span className="truncate">{post.body}</span>
+                  </>
+                )
+                const className =
+                  'flex w-full items-center gap-1 rounded border border-border/50 bg-background/50 px-1 py-0.5 text-left text-[11px] hover:border-border'
+                const title = `${STATUS_LABEL[post.status]} · ${post.body.slice(0, 120)}`
+                // One in flight is neither editable nor finished yet, so it
+                // opens nothing and cannot be moved.
+                if (post.status === 'publishing') {
+                  return (
+                    <div key={post.id} title={title} className={className}>
+                      {entry}
+                    </div>
+                  )
+                }
+                // Clicking opens the post: to edit when it can still change,
+                // as a copy for a new draft once it is published. Only an
+                // editable post drags — moving a published one would put
+                // history back in the queue, where it would later read as
+                // missed. Anchors drag by default, hence the explicit false.
+                return (
+                  <Link
+                    key={post.id}
+                    to="/compose"
+                    search={editable ? { id: post.id } : { from: post.id }}
+                    draggable={editable}
+                    onDragStart={
+                      editable
+                        ? (event) => {
+                            event.dataTransfer.setData('text/windbag-post', String(post.id))
+                            event.dataTransfer.setData('text/windbag-at', post.scheduledAt ?? '')
+                            event.dataTransfer.effectAllowed = 'move'
+                          }
+                        : undefined
+                    }
+                    title={editable ? title : `${title} — opens a copy as a new draft`}
+                    className={className}
+                  >
+                    {entry}
+                  </Link>
+                )
+              })}
             </div>
           </div>
         ))}
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Drag a post to another day to move it. It keeps its time of day.
+        Click a post to open it; a published one opens as a copy. Drag a scheduled post to another
+        day to move it — it keeps its time of day.
       </p>
     </div>
   )

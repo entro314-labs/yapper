@@ -26,6 +26,10 @@ pub fn apply_material(window: &WebviewWindow, requested: &str) -> String {
             "strong" => Some(NSVisualEffectMaterial::UnderWindowBackground),
             _ => None,
         };
+        // Cleared first on every change: `apply_vibrancy` inserts a NEW effect
+        // view each call rather than replacing the last one, so standard → strong
+        // would stack a second material over the first.
+        let _ = clear_vibrancy(window);
         if let Some(material) = material {
             if apply_vibrancy(window, material, None, None).is_ok() {
                 requested.to_string()
@@ -33,7 +37,6 @@ pub fn apply_material(window: &WebviewWindow, requested: &str) -> String {
                 "off".to_string()
             }
         } else {
-            let _ = clear_vibrancy(window);
             "off".to_string()
         }
     }
