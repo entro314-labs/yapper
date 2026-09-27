@@ -17,7 +17,9 @@
 
 use serde_json::json;
 
-use super::{ContainerBuild, Containers, Grant, get_json, id_of, post_form, token_get};
+use super::{
+    ContainerBuild, Containers, GRAPH_VERSION, Grant, get_json, id_of, post_form, token_get,
+};
 use crate::error::{AppError, Result};
 use crate::platforms::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, MediaItem,
@@ -32,7 +34,11 @@ const AUTHORIZE_URL: &str = "https://www.instagram.com/oauth/authorize";
 const TOKEN_URL: &str = "https://api.instagram.com/oauth/access_token";
 const EXCHANGE_URL: &str = "https://graph.instagram.com/access_token";
 const REFRESH_URL: &str = "https://graph.instagram.com/refresh_access_token";
-pub(crate) const API_BASE: &str = "https://graph.instagram.com/v23.0";
+/// On the same [`GRAPH_VERSION`] as every other Meta call, so the bump stays one
+/// edit and Instagram cannot quietly sit on a version nearer its sunset.
+pub(crate) fn api_base() -> String {
+    format!("https://graph.instagram.com/{GRAPH_VERSION}")
+}
 const SCOPES: &str = "instagram_business_basic,instagram_business_content_publish";
 const LABEL: &str = "Instagram";
 
@@ -135,7 +141,7 @@ impl Platform for Instagram {
         )?;
 
         let me = get_json(
-            &format!("{API_BASE}/me"),
+            &format!("{}/me", api_base()),
             &[
                 ("fields", "user_id,username,name,profile_picture_url"),
                 ("access_token", &long.access_token),
@@ -215,7 +221,7 @@ impl Platform for Instagram {
 
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published> {
         let token = &request.secret.access_token;
-        let containers = format!("{API_BASE}/{}/media", request.account.remote_id);
+        let containers = format!("{}/{}/media", api_base(), request.account.remote_id);
 
         // `platforms::validate` has already refused an empty one, but this is the
         // call that would otherwise build a meaningless container.
@@ -318,7 +324,7 @@ fn create_container(url: &str, form: &[(String, String)]) -> Result<String> {
 fn containers_api() -> Containers {
     Containers {
         label: LABEL,
-        api_base: API_BASE.to_string(),
+        api_base: api_base(),
         state_field: "status_code",
         detail_field: "status",
         publish_edge: "media_publish",
@@ -329,7 +335,7 @@ fn containers_api() -> Containers {
 
 fn permalink(media_id: &str, token: &str) -> Option<String> {
     get_json(
-        &format!("{API_BASE}/{media_id}"),
+        &format!("{}/{media_id}", api_base()),
         &[("fields", "permalink"), ("access_token", token)],
         LABEL,
     )

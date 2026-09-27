@@ -885,7 +885,7 @@ fn refresh_instagram(
             continue;
         };
         let reply = meta::get_json(
-            &format!("{}/{id}/insights", instagram::API_BASE),
+            &format!("{}/{id}/insights", instagram::api_base()),
             &[
                 ("metric", "likes,comments,saved,shares,views,reach"),
                 ("access_token", &secret.access_token),
