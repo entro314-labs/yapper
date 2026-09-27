@@ -48,8 +48,8 @@ jobs:
 
       - name: Install Linux system dependencies
         # clippy and cargo test compile the tauri crate, which links
-        # webkit2gtk/soup/gtk — and, because tauri is taken with the `tray-icon`
-        # feature, libappindicator too, whether or not Windbag draws a tray icon.
+        # webkit2gtk/soup/gtk — and libappindicator for the `tray-icon` feature:
+        # the Show/Quit tray is the only way to quit Windbag on Linux.
         # Ayatana only: libappindicator3-dev Conflicts: with it on ubuntu-24.04.
         run: |
           sudo apt-get update

@@ -206,6 +206,14 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
     // the way out.
     app.manage(update::PendingUpdate(std::sync::Mutex::new(None)));
 
+    // Windows and Linux: closing the window only hides it, and neither gets
+    // tauri's default app menu, so without a tray there is no way to quit — and
+    // a staged update installs on quit. macOS has the Dock and the app menu.
+    // Gated at runtime rather than by `cfg` so every build compiles this code.
+    if cfg!(not(target_os = "macos")) {
+        install_tray(app)?;
+    }
+
     if let Some(window) = app.get_webview_window("main") {
         windowing::apply_material(&window, "standard");
         // Before the window is shown, so the title bar never jumps.
@@ -218,5 +226,37 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
             let _ = window.show();
         }
     }
+    Ok(())
+}
+
+/// A tray icon whose menu shows the window and quits the app. Quit goes through
+/// `exit`, so it raises `ExitRequested` like any other quit and a staged update
+/// is installed on the way out.
+fn install_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::TrayIconBuilder;
+
+    let show = MenuItem::with_id(app, "show", "Show Windbag", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Windbag", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("Windbag")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
     Ok(())
 }

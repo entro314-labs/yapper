@@ -14,6 +14,10 @@ All notable changes to Windbag are documented here. The format follows
   touched.
 - **Keyboard shortcuts.** Cmd/Ctrl+Enter schedules or saves the draft in the
   composer, Cmd/Ctrl+S saves a note, and Enter submits the connect dialog.
+- **A tray icon on Windows and Linux.** Closing the window only hides Windbag,
+  so the scheduler keeps running — but those platforms have no app menu, which
+  left no way to quit and no way to install a staged update. The tray's menu
+  shows the window or quits.
 - **Reorder attachments.** Move-up and move-down buttons set the order
   attachments are posted in, which is how a carousel is sequenced.
 
