@@ -30,16 +30,42 @@ export interface FieldSpec {
   required: boolean
   /** A closed set of allowed values, drawn as a picker. Empty means free text. */
   choices: string[]
+  /** Billed to the body's character budget (Mastodon's content warning). */
+  counted: boolean
+}
+
+/** `platforms::MediaRule` — one attachment type a platform takes. */
+export interface MediaRule {
+  mime: string
+  maxBytes: number
+  /** Must be the only attachment on its post (a video on X, Mastodon or Facebook; a GIF on X). */
+  alone: boolean
+}
+
+/** `platforms::MediaSpec` — an attachment as validation sees it: its type and size. */
+export interface MediaSpec {
+  mime: string
+  bytes: number
+}
+
+/** `commands::TargetInput` — one destination and its per-destination options. */
+export interface TargetInput {
+  accountId: number
+  options: Record<string, string>
 }
 
 /** `platforms::Limits` */
 export interface Limits {
   maxChars: number
   maxMedia: number
+  /** Every attachment type the adapter can post, with the platform's documented size cap. */
+  accepts: MediaRule[]
   supportsAltText: boolean
   requiresTitle: boolean
   /** Instagram: a caption is never a post by itself, so the composer refuses one with no media. */
   requiresMedia: boolean
+  /** Reddit and Facebook: a URL with no text is a whole post (a link submission, a link share). */
+  linkIsContent: boolean
 }
 
 /** `platforms::PlatformInfo` */
@@ -226,7 +252,7 @@ export interface SavePostInput {
   title: string | null
   link: string | null
   scheduledAt: string | null
-  targets: Array<{ accountId: number; options: Record<string, string> }>
+  targets: TargetInput[]
   media: Array<{ path: string; altText: string | null }>
 }
 

@@ -11,8 +11,8 @@ import type { MetadataRoute } from 'next'
  * fetch attachments from there, and whether that fetcher consults robots.txt is not something this
  * repo can know. The two outcomes are wildly asymmetric: disallowing it risks every Threads and
  * Instagram post with media failing at the fetch — the core feature — while allowing it risks a
- * crawler indexing a random-keyed image that the bucket lifecycle rule deletes within two days.
- * The second is not a real cost.
+ * crawler indexing a random-keyed image that the bucket lifecycle rule deletes within two days. The
+ * second is not a real cost.
  */
 export default function robots(): MetadataRoute.Robots {
   return {

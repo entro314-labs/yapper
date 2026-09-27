@@ -12,7 +12,7 @@ use crate::platforms::MediaItem;
 /// 40 MB. Above the largest single-image limit any of the five accepts, so the
 /// platform's own rejection is what the user reads for anything smaller — this
 /// only stops the app from trying to hold something absurd in memory.
-const MAX_BYTES: u64 = 40 * 1024 * 1024;
+pub const MAX_BYTES: u64 = 40 * 1024 * 1024;
 
 /// What the picker resolved a chosen file to, before it goes into the store.
 #[derive(Debug)]

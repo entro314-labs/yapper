@@ -19,9 +19,16 @@ import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { brandOf } from '@/lib/platform-brand'
-import { useAccounts, useConnectAccount, useDisconnectAccount, usePlatforms } from '@/lib/query'
-import { humanMessage } from '@/lib/tauri/client'
-import type { Account, PlatformInfo } from '@/lib/tauri/types'
+import {
+  useAccounts,
+  useConnectAccount,
+  useDeliverAuthCallback,
+  useDisconnectAccount,
+  usePlatforms,
+} from '@/lib/query'
+import { humanMessage, subscribeEvent } from '@/lib/tauri/client'
+import { IPC_EVENTS } from '@/lib/tauri/ipc'
+import type { Account, AuthOutcome, PlatformInfo } from '@/lib/tauri/types'
 import { cn, formatAbsolute, repeatKeys } from '@/lib/utils'
 
 export const Route = createFileRoute('/accounts')({ component: AccountsScreen })
@@ -36,6 +43,11 @@ function AccountsScreen() {
     info: PlatformInfo
     account?: Account
   } | null>(null)
+  // Stable, because a waiting dialog subscribes to the auth event with it: a new
+  // identity on every refetch would resubscribe and could miss the outcome.
+  const closeDialog = React.useCallback(() => {
+    setConnecting(null)
+  }, [])
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6 p-4">
@@ -216,9 +228,7 @@ function AccountsScreen() {
         <ConnectDialog
           info={connecting.info}
           {...(connecting.account ? { account: connecting.account } : {})}
-          onClose={() => {
-            setConnecting(null)
-          }}
+          onClose={closeDialog}
         />
       ) : null}
     </div>
@@ -241,6 +251,7 @@ function ConnectDialog({
   onClose: () => void
 }) {
   const connect = useConnectAccount()
+  const deliverCallback = useDeliverAuthCallback()
   // A reconnect starts from the server the account lives on (Mastodon's
   // instance), so signing in again cannot land on a different one by default.
   const [fields, setFields] = React.useState((): Record<string, string> =>
@@ -249,6 +260,9 @@ function ConnectDialog({
       : {},
   )
   const [busy, setBusy] = React.useState(false)
+  // Set once a deep-link sign-in is under way, until its outcome arrives.
+  const [waiting, setWaiting] = React.useState(false)
+  const [callbackUrl, setCallbackUrl] = React.useState('')
 
   const missing = info.connectFields.filter((field) => field.required && !fields[field.key]?.trim())
 
@@ -257,6 +271,11 @@ function ConnectDialog({
   // nominal auth kind.
   const method = fields.method ?? info.connectFields.find((f) => f.key === 'method')?.placeholder
   const opensBrowser = info.auth === 'oAuth2' || method === 'oauth'
+  // Bluesky's OAuth is the one flow that comes back on a custom URI scheme
+  // rather than the loopback, and that route can fail (a dev build, a broken
+  // scheme registration) — so the dialog stays open with somewhere to paste
+  // the link the browser could not open.
+  const returnsByDeepLink = method === 'oauth'
 
   // Only a REQUIRED app field is a precondition — the same rule the backend
   // applies. Bluesky's optional client-metadata override must not make it look
@@ -270,13 +289,44 @@ function ConnectDialog({
       if (opensBrowser) {
         toast.info(`Finish signing in to ${info.name} in your browser`)
       }
-      onClose()
+      if (returnsByDeepLink) {
+        setWaiting(true)
+      } else {
+        onClose()
+      }
     } catch (err) {
       toast.error(humanMessage(err))
     } finally {
       setBusy(false)
     }
-  }, [connect, info, fields, onClose])
+  }, [connect, info, fields, onClose, opensBrowser, returnsByDeepLink])
+
+  const finishWithPaste = React.useCallback(async () => {
+    try {
+      await deliverCallback.mutateAsync(callbackUrl)
+    } catch (err) {
+      toast.error(humanMessage(err))
+    }
+  }, [deliverCallback, callbackUrl])
+
+  // The outcome toast is the root AuthListener's job; this only closes the
+  // dialog once the sign-in it is waiting on has finished, either way.
+  React.useEffect(() => {
+    if (!waiting) return
+    let detach: (() => void) | null = null
+    let cancelled = false
+    void (async () => {
+      const unsubscribe = await subscribeEvent<AuthOutcome>(IPC_EVENTS.auth, (outcome) => {
+        if (outcome.platform === info.id) onClose()
+      })
+      if (cancelled) unsubscribe()
+      else detach = unsubscribe
+    })()
+    return () => {
+      cancelled = true
+      detach?.()
+    }
+  }, [waiting, info.id, onClose])
 
   return (
     <Dialog
@@ -313,7 +363,7 @@ function ConnectDialog({
           className="flex flex-col gap-4"
           onSubmit={(event) => {
             event.preventDefault()
-            if (missing.length > 0 || busy) return
+            if (missing.length > 0 || busy || waiting) return
             void submit()
           }}
         >
@@ -370,12 +420,41 @@ function ConnectDialog({
               type="submit"
               className="ml-auto"
               size="sm"
-              disabled={missing.length > 0 || busy}
+              disabled={missing.length > 0 || busy || waiting}
             >
               {opensBrowser ? 'Continue in browser' : 'Connect'}
             </Button>
           </div>
         </form>
+
+        {waiting ? (
+          <div className="flex flex-col gap-2 rounded-md bg-muted/60 px-3 py-2 text-xs">
+            <p className="leading-relaxed text-muted-foreground">
+              Waiting for {info.name} to send you back. If your browser showed a link it could not
+              open, paste the whole link here.
+            </p>
+            <div className="flex items-center gap-2">
+              <Input
+                value={callbackUrl}
+                placeholder="io.github.entro314-labs:/callback?…"
+                aria-label="Callback URL"
+                autoComplete="off"
+                onChange={(event) => {
+                  setCallbackUrl(event.target.value)
+                }}
+              />
+              <Button
+                size="sm"
+                disabled={!callbackUrl.trim() || deliverCallback.isPending}
+                onClick={() => {
+                  void finishWithPaste()
+                }}
+              >
+                Finish sign-in
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </DialogContent>
     </Dialog>
   )

@@ -48,8 +48,8 @@ jobs:
 
       - name: Install Linux system dependencies
         # clippy and cargo test compile the tauri crate, which links
-        # webkit2gtk/soup/gtk — and, because tauri is taken with the `tray-icon`
-        # feature, libappindicator too, whether or not Windbag draws a tray icon.
+        # webkit2gtk/soup/gtk — and libappindicator for the `tray-icon` feature:
+        # the Show/Quit tray is the only way to quit Windbag on Linux.
         # Ayatana only: libappindicator3-dev Conflicts: with it on ubuntu-24.04.
         run: |
           sudo apt-get update
@@ -99,12 +99,17 @@ jobs:
     # `contents: write` and the RELEASES_TOKEN secret, so a mutable external ref
     # would let any push to the kit's default branch publish releases here. Bump
     # deliberately after reviewing the diff.
-    # 95a417e = kit tip 2026-09-08: asserts the tag matches the app version and
-    # gates channel pointers on it, both of which a first release wants.
-    uses: entro314-labs/tauri-release-kit/.github/workflows/release.yml@95a417eb6fabbb19f1dc4777537110f34a7873ec
+    # f92737e = kit v1.3.0 (2026-09-26): SHA256SUMS, SBOMs and a build
+    # provenance attestation on every release, an asset allow-list and
+    # signature check before publishing, and channel pointers that never move
+    # to an older version. The attestation is why the two extra permissions
+    # below exist — without them GitHub rejects the run before any job starts.
+    uses: entro314-labs/tauri-release-kit/.github/workflows/release.yml@f92737ef5990171065aca347a2e223012d867046
     permissions:
       contents: write
       pull-requests: write
+      id-token: write
+      attestations: write
     with:
       app_display_name: 'Windbag'
       project_path: '.'

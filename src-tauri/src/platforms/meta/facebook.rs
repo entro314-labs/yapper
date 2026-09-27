@@ -21,10 +21,12 @@ use serde_json::json;
 use super::{GRAPH_VERSION, get_json, id_of, map_error, token_get};
 use crate::error::{AppError, Result};
 use crate::http;
+use crate::media;
 use crate::platforms::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, MediaItem,
     Platform, PlatformId, PlatformInfo, PublishRequest, Published,
 };
+use crate::platforms::{MB, MediaRule};
 use crate::webhost;
 
 pub struct Facebook;
@@ -40,6 +42,18 @@ pub(crate) fn api_base() -> String {
     format!("https://graph.facebook.com/{GRAPH_VERSION}")
 }
 
+/// Page photos take JPEG, PNG and GIF up to 10 MB
+/// (<https://developers.facebook.com/docs/graph-api/reference/page/photos/>).
+/// A video is its own endpoint and cannot share a post with photos, so it goes
+/// alone; Meta documents no cap for a single-request upload below the app's
+/// own ceiling.
+const MEDIA: &[MediaRule] = &[
+    MediaRule::up_to("image/png", 10 * MB),
+    MediaRule::up_to("image/jpeg", 10 * MB),
+    MediaRule::up_to("image/gif", 10 * MB),
+    MediaRule::up_to("video/mp4", media::MAX_BYTES).alone(),
+];
+
 impl Platform for Facebook {
     fn info(&self) -> PlatformInfo {
         PlatformInfo {
@@ -49,9 +63,11 @@ impl Platform for Facebook {
             limits: Limits {
                 max_chars: 63_206,
                 max_media: 10,
+                accepts: MEDIA,
                 supports_alt_text: true,
                 requires_title: false,
                 requires_media: false,
+                link_is_content: true,
             },
             connect_fields: vec![
                 FieldSpec::text(

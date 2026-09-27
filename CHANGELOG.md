@@ -14,6 +14,10 @@ All notable changes to Windbag are documented here. The format follows
   touched.
 - **Keyboard shortcuts.** Cmd/Ctrl+Enter schedules or saves the draft in the
   composer, Cmd/Ctrl+S saves a note, and Enter submits the connect dialog.
+- **A tray icon on Windows and Linux.** Closing the window only hides Windbag,
+  so the scheduler keeps running — but those platforms have no app menu, which
+  left no way to quit and no way to install a staged update. The tray's menu
+  shows the window or quits.
 - **Reorder attachments.** Move-up and move-down buttons set the order
   attachments are posted in, which is how a carousel is sequenced.
 
@@ -131,6 +135,10 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Changed
 
+- **A custom Bluesky client-metadata URL must be hosted on
+  entro314-labs.github.io.** The app registers one callback scheme, derived from
+  that host, so any other host is refused up front with an explanation instead
+  of a sign-in that hangs for five minutes.
 - **Animated icons where a control is live.** The sidebar rows and its collapse
   toggle, New post / Write a post, Post now, Attach, the assistant buttons, the
   stats Refresh, the calendar arrows, the copy chips and the developer-portal
@@ -162,6 +170,41 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Fixed
 
+- **Reddit link posts can be saved.** A post with a title and a link but no body
+  was always refused, although that is exactly how a Reddit link submission
+  works. A link now counts as content on Reddit and Facebook.
+- **Attachments are checked by type and size when you save, not when they
+  publish.** An MP4 is no longer accepted for Bluesky or LinkedIn, a PNG for
+  Instagram, or an image over a platform's limit (Bluesky's 2 MB). A Facebook
+  post with a video and photos is refused instead of quietly losing the photos;
+  X takes one GIF or one video on its own, and so does Mastodon for video.
+- **Required destination options are enforced.** A Reddit destination without a
+  subreddit, or an option outside its allowed values, is an error in the
+  composer and the agent door rather than a failure at publish time. Mastodon's
+  content warning counts toward the character limit.
+- **A scheduled time that has already passed is refused** in the composer, the
+  calendar and the agent door, instead of being accepted as scheduled and marked
+  missed a few seconds later. A scheduled post needs at least one destination;
+  a draft still does not.
+- **Saving a post is all-or-nothing.** The post, its attachments and its
+  destinations are written in one transaction, and the composer and the agent
+  door share that one save path.
+- **Save stays disabled until the check for what is on screen is back**, so an
+  edit that goes over a limit cannot slip through while it runs.
+- **Threads and Instagram attachments over 4.5 MB publish.** The app now uploads
+  the file straight to R2 through a short-lived signed URL from the web
+  deployment, instead of through a Vercel function, which rejects any body over
+  4.5 MB. An attachment the deployment refuses fails at once with its reason
+  rather than after five retries.
+- **A stray sign-in callback no longer cancels the sign-in in progress.** A
+  leftover tab or a foreign `?error=` link is ignored and the app keeps
+  waiting, and a callback macOS could silently drop now gets through.
+- **The Bluesky "paste the link" fallback works.** The connect dialog stays open
+  while the sign-in waits, and pasting the link the browser could not open
+  finishes that same sign-in.
+- **Bluesky token refreshes check who they talk to.** The refresh token is only
+  sent to the server that issued it, and refreshed tokens must belong to the
+  account.
 - **Failed loads are shown as errors, not as empty screens.** A store that
   cannot be read no longer shows "Nothing queued" or "No accounts yet"; each
   screen says what failed, with a Retry.

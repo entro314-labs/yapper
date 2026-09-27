@@ -7,6 +7,7 @@ export const IPC_COMMANDS = {
   listPlatforms: 'list_platforms',
   listAccounts: 'list_accounts',
   connectAccount: 'connect_account',
+  deliverAuthCallback: 'deliver_auth_callback',
   disconnectAccount: 'disconnect_account',
   getAppCredentials: 'get_app_credentials',
   saveAppCredentials: 'save_app_credentials',
