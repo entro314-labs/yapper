@@ -428,10 +428,7 @@ fn post_form_at(url: &str, form: &[(&str, &str)]) -> Result<serde_json::Value> {
 /// the default connection is exactly what posting to a Page needs and nothing
 /// more — see [`crate::metaads`] for what the extra half unlocks.
 fn scopes_for(app: &AppCredentials) -> String {
-    if app
-        .extra("ads_access")
-        .is_some_and(|value| value.eq_ignore_ascii_case("yes"))
-    {
+    if crate::metaads::ads_access(app) {
         format!("{SCOPES},ads_read,ads_management")
     } else {
         SCOPES.to_string()

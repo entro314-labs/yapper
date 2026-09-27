@@ -61,20 +61,14 @@ pub struct StatsFilter {
 }
 
 impl StatsFilter {
-    /// Whether one destination is in scope.
-    ///
-    /// `fallback_at` is the POST's own time, and it is load-bearing: a FAILED
-    /// destination has no `published_at`, so dating it by that alone drops every
-    /// failure out of any range — which would leave "why things failed" silently
-    /// empty exactly when it matters most.
-    fn matches(&self, target: &PostTarget, account: &db::Account, fallback_at: &str) -> bool {
+    /// Whether one destination, dated `at` by [`dated_at`], is in scope.
+    fn matches(&self, account: &db::Account, at: &str) -> bool {
         if !self.platforms.is_empty() && !self.platforms.contains(&account.platform) {
             return false;
         }
         if !self.account_ids.is_empty() && !self.account_ids.contains(&account.id) {
             return false;
         }
-        let at = target.published_at.as_deref().unwrap_or(fallback_at);
         if self.since.as_deref().is_some_and(|since| at < since) {
             return false;
         }
@@ -82,7 +76,24 @@ impl StatsFilter {
     }
 }
 
-/// One row of a breakdown: a label, what it counts, and the ids behind it.
+/// When a destination happened — the one date both the filter and the delivery
+/// chart use, so a destination counted in range is also drawn on a day.
+///
+/// The fallback to the POST's own time is load-bearing: a FAILED destination has
+/// no `published_at`, so dating it by that alone drops every failure out of any
+/// range — which would leave "why things failed" silently empty exactly when it
+/// matters most. A post is dated by when it was meant to go out, falling back to
+/// when it was last touched — the only timestamps a never-published destination
+/// has.
+fn dated_at<'a>(target: &'a PostTarget, post: &'a db::Post) -> &'a str {
+    target
+        .published_at
+        .as_deref()
+        .or(post.scheduled_at.as_deref())
+        .unwrap_or(&post.updated_at)
+}
+
+/// One row of a breakdown:a label, what it counts, and the ids behind it.
 ///
 /// `target_ids` is what makes a chart a drilldown rather than a picture — the
 /// UI hands them straight back to filter the queue.
@@ -96,14 +107,18 @@ pub struct Bucket {
     pub post_ids: Vec<i64>,
 }
 
+/// Every engagement dimension is `None` when no measured destination in the set
+/// reports it — Bluesky and Mastodon publish no impressions, Instagram no
+/// reposts — because a summed zero would claim "nobody saw it" where the truth
+/// is "the platform does not say".
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngagementTotals {
-    pub likes: i64,
-    pub reposts: i64,
-    pub replies: i64,
+    pub likes: Option<i64>,
+    pub reposts: Option<i64>,
+    pub replies: Option<i64>,
     /// Impressions, where the platform reports them — Threads, Instagram and X.
-    pub views: i64,
+    pub views: Option<i64>,
     /// How many destinations these totals are summed from — without it, "0
     /// likes" and "nothing fetched yet" look the same.
     pub measured: i64,
@@ -120,13 +135,17 @@ pub struct EngagementTotals {
 pub struct EngagementRow {
     pub platform: PlatformId,
     pub label: &'static str,
-    pub likes: i64,
-    pub reposts: i64,
-    pub replies: i64,
-    pub views: i64,
+    /// `None` per dimension on the same terms as [`EngagementTotals`].
+    pub likes: Option<i64>,
+    pub reposts: Option<i64>,
+    pub replies: Option<i64>,
+    pub views: Option<i64>,
     /// How many destinations these came from — without it, a platform with one
     /// measured post and one with fifty look comparable.
     pub measured: i64,
+    /// The posts behind the row, so a bar in the engagement chart is a
+    /// drilldown like every other bar.
+    pub post_ids: Vec<i64>,
 }
 
 /// A published destination that earned something, for the leaderboard.
@@ -140,13 +159,14 @@ pub struct TopPost {
     pub excerpt: String,
     pub published_at: Option<String>,
     pub remote_url: Option<String>,
-    pub likes: i64,
-    pub reposts: i64,
-    pub replies: i64,
-    pub views: i64,
-    /// Likes + reposts + replies. What the list is ranked by, and deliberately
-    /// not including views: impressions are a reach number, not an earned one,
-    /// and only three platforms report them at all.
+    /// `None` where the platform did not report that dimension for this post.
+    pub likes: Option<i64>,
+    pub reposts: Option<i64>,
+    pub replies: Option<i64>,
+    pub views: Option<i64>,
+    /// Likes + reposts + replies, over the ones reported. What the list is
+    /// ranked by, and deliberately not including views: impressions are a reach
+    /// number, not an earned one, and only three platforms report them at all.
     pub interactions: i64,
     pub fetched_at: String,
 }
@@ -164,11 +184,10 @@ pub struct Stats {
     pub by_account: Vec<Bucket>,
     /// Local hour of day, 0–23, over published destinations only.
     pub by_hour: Vec<Bucket>,
-    pub by_weekday: Vec<Bucket>,
     pub by_day: Vec<Bucket>,
     /// Weekday × hour, keyed `"{weekday}-{hour}"` with both zero-padded. The
-    /// punch card: `by_hour` and `by_weekday` each collapse one axis of it, and
-    /// "Tuesday at 09:00" is not recoverable from the two of them.
+    /// punch card: "Tuesday at 09:00" is not recoverable from an hour and a
+    /// weekday breakdown, each of which collapses one axis of it.
     pub by_slot: Vec<Bucket>,
     /// Failures grouped by their error code — the taxonomy that says whether a
     /// platform is flaky or the posts are wrong.
@@ -184,22 +203,27 @@ pub struct Stats {
     pub engagement_gaps: Vec<(PlatformId, String)>,
 }
 
-/// The seven breakdowns, filled together as destinations are walked.
+/// The six breakdowns, filled together as destinations are walked.
 #[derive(Default)]
 struct Groupers {
     platform: Grouper,
     account: Grouper,
     hour: Grouper,
-    weekday: Grouper,
     day: Grouper,
     slot: Grouper,
     failure: Grouper,
 }
 
 impl Groupers {
-    /// Records one settled destination. Returns whether it published — the
-    /// caller needs that to decide whether to look for engagement.
-    fn add(&mut self, post_id: i64, target: &PostTarget, account: &db::Account, ok: bool) {
+    /// Records one settled destination, dated `at` by [`dated_at`].
+    fn add(
+        &mut self,
+        post_id: i64,
+        target: &PostTarget,
+        account: &db::Account,
+        at: &str,
+        ok: bool,
+    ) {
         self.platform.add(
             account.platform.as_str(),
             account.platform.label(),
@@ -209,41 +233,41 @@ impl Groupers {
         self.account
             .add(&account.id.to_string(), &account.handle, post_id, ok);
 
-        if ok && let Some(at) = target.published_at.as_deref() {
-            // Local time, because "when do I post" is a question about the
-            // person's day, not about UTC.
-            if let Ok(at) = db::parse_rfc3339(at) {
-                let local = at.with_timezone(&chrono::Local);
-                self.hour.add(
-                    &format!("{:02}", local.hour()),
-                    &format!("{:02}:00", local.hour()),
-                    post_id,
-                    true,
-                );
-                self.weekday.add(
-                    &local.weekday().number_from_monday().to_string(),
-                    &local.format("%a").to_string(),
-                    post_id,
-                    true,
-                );
-                let key = local.format("%Y-%m-%d").to_string();
-                self.day.add(&key, &key, post_id, true);
-                self.slot.add(
-                    &format!(
-                        "{}-{:02}",
-                        local.weekday().number_from_monday(),
-                        local.hour()
-                    ),
-                    &local.format("%a %H:00").to_string(),
-                    post_id,
-                    true,
-                );
-            }
-        }
-
         if !ok && let Some(error) = target.error.as_deref() {
             let code = error_code(error);
             self.failure.add(code, failure_label(code), post_id, false);
+        }
+
+        // Local time, because "when do I post" is a question about the person's
+        // day, not about UTC.
+        let Ok(local) = db::parse_rfc3339(at).map(|at| at.with_timezone(&chrono::Local)) else {
+            return;
+        };
+
+        // Delivery over time carries both outcomes — its "Failed" series is half
+        // the point of drawing it — each on the day the filter dated it by.
+        let day = local.format("%Y-%m-%d").to_string();
+        self.day.add(&day, &day, post_id, ok);
+
+        // "When do I post" is about what went out, so these count published
+        // destinations only.
+        if ok {
+            self.hour.add(
+                &format!("{:02}", local.hour()),
+                &format!("{:02}:00", local.hour()),
+                post_id,
+                true,
+            );
+            self.slot.add(
+                &format!(
+                    "{}-{:02}",
+                    local.weekday().number_from_monday(),
+                    local.hour()
+                ),
+                &local.format("%a %H:00").to_string(),
+                post_id,
+                true,
+            );
         }
     }
 }
@@ -283,15 +307,8 @@ pub fn compute(database: &Db, filter: &StatsFilter) -> Result<Stats> {
             let Some(account) = accounts.get(&target.account_id) else {
                 continue;
             };
-            // A post is dated by when it was meant to go out, falling back to
-            // when it was last touched — the only timestamps a never-published
-            // destination has.
-            let fallback = detail
-                .post
-                .scheduled_at
-                .as_deref()
-                .unwrap_or(&detail.post.updated_at);
-            if !filter.matches(target, account, fallback) {
+            let at = dated_at(target, &detail.post);
+            if !filter.matches(account, at) {
                 continue;
             }
             if !accounts_in_scope.contains(&account.id) {
@@ -307,7 +324,7 @@ pub fn compute(database: &Db, filter: &StatsFilter) -> Result<Stats> {
             } else {
                 totals.failed += 1;
             }
-            groupers.add(detail.post.id, target, account, ok);
+            groupers.add(detail.post.id, target, account, at, ok);
 
             if ok && let Some(row) = metrics.get(&target.id) {
                 engagement.add(row, &detail.post, target, account);
@@ -324,7 +341,6 @@ pub fn compute(database: &Db, filter: &StatsFilter) -> Result<Stats> {
         by_platform: groupers.platform.finish(Sort::Count),
         by_account: groupers.account.finish(Sort::Count),
         by_hour: groupers.hour.finish(Sort::Key),
-        by_weekday: groupers.weekday.finish(Sort::Key),
         by_day: groupers.day.finish(Sort::Key),
         by_slot: groupers.slot.finish(Sort::Key),
         failures: groupers.failure.finish(Sort::Count),
@@ -392,17 +408,12 @@ impl Engagement {
     /// rather than a zero, and the oldest fetch wins — the totals are only as
     /// fresh as their stalest part.
     fn add(&mut self, row: &Metrics, post: &db::Post, target: &PostTarget, account: &db::Account) {
-        let (likes, reposts, replies, views) = (
-            row.likes.unwrap_or(0),
-            row.reposts.unwrap_or(0),
-            row.replies.unwrap_or(0),
-            row.views.unwrap_or(0),
-        );
+        let (likes, reposts, replies, views) = (row.likes, row.reposts, row.replies, row.views);
 
-        self.totals.likes += likes;
-        self.totals.reposts += reposts;
-        self.totals.replies += replies;
-        self.totals.views += views;
+        fold(&mut self.totals.likes, likes);
+        fold(&mut self.totals.reposts, reposts);
+        fold(&mut self.totals.replies, replies);
+        fold(&mut self.totals.views, views);
         self.totals.measured += 1;
         if self
             .totals
@@ -420,17 +431,21 @@ impl Engagement {
             .or_insert_with(|| EngagementRow {
                 platform,
                 label: platform.label(),
-                likes: 0,
-                reposts: 0,
-                replies: 0,
-                views: 0,
+                likes: None,
+                reposts: None,
+                replies: None,
+                views: None,
                 measured: 0,
+                post_ids: Vec::new(),
             });
-        entry.likes += likes;
-        entry.reposts += reposts;
-        entry.replies += replies;
-        entry.views += views;
+        fold(&mut entry.likes, likes);
+        fold(&mut entry.reposts, reposts);
+        fold(&mut entry.replies, replies);
+        fold(&mut entry.views, views);
         entry.measured += 1;
+        if !entry.post_ids.contains(&post.id) {
+            entry.post_ids.push(post.id);
+        }
 
         self.leaderboard.push(TopPost {
             post_id: post.id,
@@ -443,7 +458,7 @@ impl Engagement {
             reposts,
             replies,
             views,
-            interactions: likes + reposts + replies,
+            interactions: earned(likes, reposts, replies),
             fetched_at: row.fetched_at.clone(),
         });
     }
@@ -453,8 +468,8 @@ impl Engagement {
     fn by_platform(&self) -> Vec<EngagementRow> {
         let mut rows: Vec<EngagementRow> = self.per_platform.values().cloned().collect();
         rows.sort_by(|a, b| {
-            (b.likes + b.reposts + b.replies)
-                .cmp(&(a.likes + a.reposts + a.replies))
+            earned(b.likes, b.reposts, b.replies)
+                .cmp(&earned(a.likes, a.reposts, a.replies))
                 .then_with(|| a.label.cmp(b.label))
         });
         rows
@@ -471,6 +486,20 @@ impl Engagement {
         rows.truncate(TOP_POSTS);
         rows
     }
+}
+
+/// Adds a reported value to a sum that stays `None` until something reports —
+/// so "no row says" and "the rows say zero" never collapse into one another.
+fn fold(sum: &mut Option<i64>, value: Option<i64>) {
+    if let Some(value) = value {
+        *sum = Some(sum.unwrap_or(0) + value);
+    }
+}
+
+/// Likes + reposts + replies over the ones reported: what a ranking can sort by
+/// when some dimensions are unknown.
+fn earned(likes: Option<i64>, reposts: Option<i64>, replies: Option<i64>) -> i64 {
+    [likes, reposts, replies].into_iter().flatten().sum()
 }
 
 /// Why this account's engagement is not shown. `None` means it is readable.
@@ -609,13 +638,54 @@ impl Grouper {
 
 /// What one refresh did. Reported rather than silently absorbed: a refresh that
 /// updated three of eleven destinations needs to say so.
+///
+/// `updated + skipped + failed` is every published destination, so nothing a
+/// refresh touched goes unaccounted for.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshReport {
+    /// Destinations whose counts were written — including those an account's
+    /// pass wrote before it stopped on an error.
     pub updated: usize,
+    /// Destinations not read: accounts Windbag cannot read engagement for, and
+    /// posts that no longer exist on the platform.
     pub skipped: usize,
+    /// Destinations an account's pass had not reached when it stopped on an
+    /// error.
+    pub failed: usize,
+    /// X ids sent in lookups X answered successfully. Each is billed against the
+    /// app's credits whether or not the refresh finished, so it is reported even
+    /// when the pass then failed.
+    pub billed_reads: usize,
     /// One line per platform or account that could not be read.
     pub problems: Vec<String>,
+}
+
+/// What one account's pass got through, filled as it goes so an error midway
+/// cannot erase the rows already written.
+#[derive(Default)]
+struct Tally {
+    updated: usize,
+    billed: usize,
+}
+
+impl RefreshReport {
+    /// Folds one account's pass in: what it wrote counts as updated whether or
+    /// not it finished, and the rest of its destinations count as failed if it
+    /// stopped on an error, or as skipped if it finished without them (a post
+    /// deleted on the platform).
+    fn record(&mut self, handle: &str, total: usize, tally: &Tally, outcome: Result<()>) {
+        self.updated += tally.updated;
+        self.billed_reads += tally.billed;
+        let rest = total.saturating_sub(tally.updated);
+        match outcome {
+            Ok(()) => self.skipped += rest,
+            Err(err) => {
+                self.failed += rest;
+                self.problems.push(format!("{handle}: {err}"));
+            }
+        }
+    }
 }
 
 /// What a refresh would read, before it runs.
@@ -687,24 +757,19 @@ pub fn refresh_engagement(database: &Db) -> Result<RefreshReport> {
     }
 
     for (account, targets) in by_account.into_values() {
+        let mut tally = Tally::default();
         let outcome = match account.platform {
-            PlatformId::Bluesky => refresh_bluesky(database, &targets),
-            PlatformId::Mastodon => refresh_mastodon(database, &account, &targets),
-            PlatformId::Threads => refresh_threads(database, &account, &targets),
-            PlatformId::Instagram => refresh_instagram(database, &account, &targets),
-            PlatformId::Facebook => refresh_facebook(database, &account, &targets),
-            PlatformId::X => refresh_x(database, &account, &targets),
-            // Gated above; a new variant lands here rather than silently
-            // counting as a success.
-            PlatformId::Reddit | PlatformId::Linkedin => Ok(0),
+            PlatformId::Bluesky => refresh_bluesky(database, &targets, &mut tally),
+            PlatformId::Mastodon => refresh_mastodon(database, &account, &targets, &mut tally),
+            PlatformId::Threads => refresh_threads(database, &account, &targets, &mut tally),
+            PlatformId::Instagram => refresh_instagram(database, &account, &targets, &mut tally),
+            PlatformId::Facebook => refresh_facebook(database, &account, &targets, &mut tally),
+            PlatformId::X => refresh_x(database, &account, &targets, &mut tally),
+            // Gated above; a new variant lands here and is reported as skipped
+            // rather than silently counting as updated.
+            PlatformId::Reddit | PlatformId::Linkedin => Ok(()),
         };
-        match outcome {
-            Ok(count) => report.updated += count,
-            Err(err) => {
-                report.skipped += targets.len();
-                report.problems.push(format!("{}: {err}", account.handle));
-            }
-        }
+        report.record(&account.handle, targets.len(), &tally, outcome);
     }
     Ok(report)
 }
@@ -716,9 +781,8 @@ pub fn refresh_engagement(database: &Db) -> Result<RefreshReport> {
 /// no reason — and once "Sign in with Bluesky" became the default there IS no
 /// stored app password, which would have failed the refresh for every new
 /// account with a message about a credential the user never created.
-fn refresh_bluesky(database: &Db, targets: &[PostTarget]) -> Result<usize> {
+fn refresh_bluesky(database: &Db, targets: &[PostTarget], tally: &mut Tally) -> Result<()> {
     let now = db::now_rfc3339();
-    let mut updated = 0usize;
 
     for chunk in targets.chunks(BLUESKY_LOOKUP_BATCH) {
         let query: Vec<(&str, &str)> = chunk
@@ -769,10 +833,10 @@ fn refresh_bluesky(database: &Db, targets: &[PostTarget]) -> Result<usize> {
                 // Bluesky publishes no impression count.
                 views: None,
             })?;
-            updated += 1;
+            tally.updated += 1;
         }
     }
-    Ok(updated)
+    Ok(())
 }
 
 /// The unauthenticated `AppView`. Not the account's PDS: a PDS serves the
@@ -784,7 +848,12 @@ const BLUESKY_LOOKUP_BATCH: usize = 25;
 
 /// Mastodon's per-status counts. One call each; a deleted status 404s and is
 /// skipped rather than failing the account.
-fn refresh_mastodon(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Result<usize> {
+fn refresh_mastodon(
+    database: &Db,
+    account: &db::Account,
+    targets: &[PostTarget],
+    tally: &mut Tally,
+) -> Result<()> {
     let instance = account
         .instance
         .as_deref()
@@ -792,7 +861,6 @@ fn refresh_mastodon(database: &Db, account: &db::Account, targets: &[PostTarget]
     let secret = secrets::load_account_secret(account.platform, &account.remote_id)?;
 
     let now = db::now_rfc3339();
-    let mut updated = 0usize;
     for target in targets {
         let Some(id) = target.remote_id.as_deref() else {
             continue;
@@ -822,19 +890,23 @@ fn refresh_mastodon(database: &Db, account: &db::Account, targets: &[PostTarget]
             // Mastodon publishes no impression count.
             views: None,
         })?;
-        updated += 1;
+        tally.updated += 1;
     }
-    Ok(updated)
+    Ok(())
 }
 
 /// Threads' per-media `/insights`, one call per post.
 ///
 /// Requires `threads_manage_insights`, which [`engagement_gap`] has already
 /// checked was granted before this runs.
-fn refresh_threads(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Result<usize> {
+fn refresh_threads(
+    database: &Db,
+    account: &db::Account,
+    targets: &[PostTarget],
+    tally: &mut Tally,
+) -> Result<()> {
     let secret = platforms::live_secret(database, account)?;
     let now = db::now_rfc3339();
-    let mut updated = 0usize;
 
     for target in targets {
         let Some(id) = target.remote_id.as_deref() else {
@@ -860,9 +932,9 @@ fn refresh_threads(database: &Db, account: &db::Account, targets: &[PostTarget])
             quotes: named.get("quotes").copied(),
             views: named.get("views").copied(),
         })?;
-        updated += 1;
+        tally.updated += 1;
     }
-    Ok(updated)
+    Ok(())
 }
 
 /// Instagram's per-media `/insights`.
@@ -875,10 +947,10 @@ fn refresh_instagram(
     database: &Db,
     account: &db::Account,
     targets: &[PostTarget],
-) -> Result<usize> {
+    tally: &mut Tally,
+) -> Result<()> {
     let secret = platforms::live_secret(database, account)?;
     let now = db::now_rfc3339();
-    let mut updated = 0usize;
 
     for target in targets {
         let Some(id) = target.remote_id.as_deref() else {
@@ -904,9 +976,9 @@ fn refresh_instagram(
             quotes: None,
             views: named.get("views").copied(),
         })?;
-        updated += 1;
+        tally.updated += 1;
     }
-    Ok(updated)
+    Ok(())
 }
 
 /// A Page post's own summary counts.
@@ -915,7 +987,12 @@ fn refresh_instagram(
 /// already holds, where Page-level insights would need `read_insights` and the
 /// App Review that permission carries. `shares` is Facebook's nearest thing to
 /// a repost; it publishes no impression count on a post without insights.
-fn refresh_facebook(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Result<usize> {
+fn refresh_facebook(
+    database: &Db,
+    account: &db::Account,
+    targets: &[PostTarget],
+    tally: &mut Tally,
+) -> Result<()> {
     // The Page token IS the stored `access_token` — `connect` swaps the user
     // token for the Page's own one and keeps the user token in `extra`. So the
     // post reads back on exactly the credential that wrote it.
@@ -923,7 +1000,6 @@ fn refresh_facebook(database: &Db, account: &db::Account, targets: &[PostTarget]
     let token = secret.access_token.clone();
 
     let now = db::now_rfc3339();
-    let mut updated = 0usize;
     for target in targets {
         let Some(id) = target.remote_id.as_deref() else {
             continue;
@@ -954,19 +1030,23 @@ fn refresh_facebook(database: &Db, account: &db::Account, targets: &[PostTarget]
             quotes: None,
             views: None,
         })?;
-        updated += 1;
+        tally.updated += 1;
     }
-    Ok(updated)
+    Ok(())
 }
 
 /// X's `public_metrics`, 100 ids per call.
 ///
 /// Every id in the request is a billed read, which is why this is only ever
 /// reached from a manual refresh the user confirmed the cost of.
-fn refresh_x(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Result<usize> {
+fn refresh_x(
+    database: &Db,
+    account: &db::Account,
+    targets: &[PostTarget],
+    tally: &mut Tally,
+) -> Result<()> {
     let secret = platforms::live_secret(database, account)?;
     let now = db::now_rfc3339();
-    let mut updated = 0usize;
 
     for chunk in targets.chunks(X_LOOKUP_BATCH) {
         let ids: Vec<&str> = chunk
@@ -990,6 +1070,9 @@ fn refresh_x(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Re
         if !(200..300).contains(&status) {
             return Err(from_status(status, &body, "X"));
         }
+        // Counted the moment X answers, before anything below can fail: this
+        // lookup is on the bill whether or not its rows get written.
+        tally.billed += ids.len();
         let parsed: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| AppError::Platform(format!("X returned unreadable posts: {e}")))?;
         let Some(posts) = parsed.get("data").and_then(serde_json::Value::as_array) else {
@@ -1023,10 +1106,10 @@ fn refresh_x(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Re
                 quotes: count(m, "quote_count"),
                 views: count(m, "impression_count"),
             })?;
-            updated += 1;
+            tally.updated += 1;
         }
     }
-    Ok(updated)
+    Ok(())
 }
 
 /// How many ids one `GET /2/tweets` accepts.
@@ -1383,16 +1466,76 @@ mod tests {
         .expect("metrics");
 
         let stats = compute(&db, &StatsFilter::default()).expect("stats");
-        assert_eq!(stats.engagement.likes, 7);
+        assert_eq!(stats.engagement.likes, Some(7));
         assert_eq!(
-            stats.engagement.replies, 0,
-            "an unreported count adds nothing"
+            stats.engagement.replies, None,
+            "a dimension no measured row reports is unknown, not zero"
         );
+        assert_eq!(stats.engagement.views, None);
         assert_eq!(stats.engagement.measured, 1);
+
+        let row = &stats.engagement_by_platform[0];
+        assert_eq!((row.likes, row.replies, row.views), (Some(7), None, None));
+        assert_eq!(
+            row.post_ids,
+            vec![stats.top_posts[0].post_id],
+            "the engagement bar drills down to the measured post"
+        );
+        let top = &stats.top_posts[0];
+        assert_eq!((top.likes, top.replies, top.views), (Some(7), None, None));
+        assert_eq!(top.interactions, 9, "ranked on what was reported");
         assert_eq!(
             stats.engagement.oldest_fetch.as_deref(),
             Some("2026-01-01T00:00:00+00:00")
         );
+    }
+
+    #[test]
+    fn a_pass_that_fails_midway_still_reports_what_it_wrote_and_billed() {
+        // The regression this guards: an error after 150 billed X reads used to
+        // report "updated 0, skipped 250", discarding rows already written and
+        // hiding money already spent.
+        let mut report = RefreshReport::default();
+        let tally = Tally {
+            updated: 150,
+            billed: 200,
+        };
+        report.record(
+            "@me",
+            250,
+            &tally,
+            Err(AppError::Platform("rate limited".into())),
+        );
+        assert_eq!(report.updated, 150);
+        assert_eq!(report.failed, 100, "the destinations it never reached");
+        assert_eq!(report.skipped, 0);
+        assert_eq!(report.billed_reads, 200);
+        assert_eq!(report.problems.len(), 1);
+        assert!(report.problems[0].starts_with("@me: "));
+    }
+
+    #[test]
+    fn a_finished_pass_counts_what_it_could_not_find_as_skipped() {
+        let mut report = RefreshReport::default();
+        let tally = Tally {
+            updated: 9,
+            billed: 0,
+        };
+        report.record("me.bsky.social", 10, &tally, Ok(()));
+        assert_eq!((report.updated, report.skipped, report.failed), (9, 1, 0));
+        assert!(report.problems.is_empty());
+    }
+
+    #[test]
+    fn a_dimension_is_summed_over_the_rows_that_report_it() {
+        let mut sum = None;
+        fold(&mut sum, None);
+        assert_eq!(sum, None, "nothing reported yet");
+        fold(&mut sum, Some(0));
+        assert_eq!(sum, Some(0), "a reported zero is a zero");
+        fold(&mut sum, Some(5));
+        fold(&mut sum, None);
+        assert_eq!(sum, Some(5));
     }
 
     #[test]
@@ -1411,6 +1554,18 @@ mod tests {
         .expect("stats");
         assert_eq!(stats.failed, 1, "a failure must survive a date filter");
         assert_eq!(stats.failures.len(), 1);
+    }
+
+    #[test]
+    fn a_failure_is_drawn_on_the_day_the_filter_dated_it() {
+        // The regression this guards: `by_day` was filled only for published
+        // destinations, so the delivery chart's "Failed" series was always zero.
+        let (db, _, _) = seeded();
+        let stats = compute(&db, &StatsFilter::default()).expect("stats");
+        let failed: i64 = stats.by_day.iter().map(|day| day.failed).sum();
+        let published: i64 = stats.by_day.iter().map(|day| day.published).sum();
+        assert_eq!(failed, 1, "the failure is on the chart: {:?}", stats.by_day);
+        assert_eq!(published, 1);
     }
 
     #[test]

@@ -35,14 +35,29 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::commands::{self, SavePostInput, TargetInput};
-use crate::db::Db;
-use crate::error::Result;
+use crate::db::{self, Db};
+use crate::error::{AppError, Result};
 use crate::platforms::{self, PlatformId};
 use crate::scheduler;
 use crate::stats::{self, StatsFilter};
 
-/// The spec revision this server implements, echoed back on `initialize`.
-const PROTOCOL_VERSION: &str = "2026-07-28";
+/// The latest revision this server speaks, and its answer to a client that
+/// asks for one it does not know.
+///
+/// Not `2026-07-28`, the spec's current revision: that one has no `initialize`
+/// at all — version and capabilities ride on every request, and
+/// `server/discover` is mandatory. A client that opens with `initialize` has
+/// chosen the handshake-based protocol, so the answer must be a handshake-era
+/// revision; a newer client probing with `server/discover` gets `-32601`, which
+/// the spec defines as its cue to fall back to `initialize`. [`crate::metaads`]
+/// asks for the same revision when Windbag is the client.
+pub(crate) const PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Every handshake-era revision the spec has published. For a tools-only stdio
+/// server they behave alike, so a client asking for any of them gets it back —
+/// and, as a client, Windbag accepts a server choosing any of them.
+pub(crate) const SUPPORTED_VERSIONS: [&str; 4] =
+    [PROTOCOL_VERSION, "2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// One request/response cycle over the shared store.
 pub struct Session {
@@ -76,9 +91,28 @@ impl Session {
         let id = id.unwrap_or(Value::Null);
 
         let outcome = match method {
-            "initialize" => Ok(Self::initialize()),
-            "tools/list" => Ok(json!({ "tools": tool_definitions() })),
-            "tools/call" => self.call(&params),
+            "initialize" => Ok(Self::initialize(&params)),
+            "tools/list" => match self.tool_definitions() {
+                Ok(tools) => Ok(json!({ "tools": tools })),
+                // Only the credential store can fail here. That is not a tool's
+                // failure to report as a result, so it is an internal error.
+                Err(err) => return Some(error_frame(&id, -32603, &err.to_string())),
+            },
+            "tools/call" => {
+                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+                let args = params.get("arguments").cloned().unwrap_or(json!({}));
+                match self.call(name, &args) {
+                    Some(outcome) => {
+                        outcome.map(|text| json!({ "content": [{ "type": "text", "text": text }] }))
+                    }
+                    // A name that is not a tool at all is the caller's mistake
+                    // about the protocol, which the spec answers with -32602 —
+                    // unlike a tool that ran and failed, below.
+                    None => {
+                        return Some(error_frame(&id, -32602, &format!("Unknown tool: {name}")));
+                    }
+                }
+            }
             // `ping` is the host's liveness check and must answer even before
             // initialize completes.
             "ping" => Ok(json!({})),
@@ -107,9 +141,17 @@ impl Session {
         })
     }
 
-    fn initialize() -> Value {
+    /// Negotiates the revision as the handshake-era spec requires: the client's
+    /// own version when this server supports it, otherwise the latest this
+    /// server does — and the client decides whether it can live with that.
+    fn initialize(params: &Value) -> Value {
+        let version = params
+            .get("protocolVersion")
+            .and_then(Value::as_str)
+            .and_then(|asked| SUPPORTED_VERSIONS.into_iter().find(|known| *known == asked))
+            .unwrap_or(PROTOCOL_VERSION);
         json!({
-            "protocolVersion": PROTOCOL_VERSION,
+            "protocolVersion": version,
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "windbag", "version": env!("CARGO_PKG_VERSION") },
             "instructions":
@@ -122,26 +164,41 @@ impl Session {
         })
     }
 
-    fn call(&self, params: &Value) -> Result<Value> {
-        let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-        let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    /// The tool catalogue. Descriptions are written for a model deciding
+    /// whether to call something, so each says what it is FOR and what it
+    /// costs, not just what it does.
+    ///
+    /// Two halves, because they answer to different owners: [`store_tools`] is
+    /// this store, [`ads_tools`] a passthrough to a server somebody else runs
+    /// against live ad accounts. The ads half is listed only while it can work
+    /// — a Facebook Page is connected and its Meta app has Ads access on, the
+    /// same setting that makes the connection ask for the ads scopes. Listing
+    /// it otherwise invites a model to plan around tools that can only fail.
+    fn tool_definitions(&self) -> Result<Vec<Value>> {
+        let mut tools = store_tools();
+        if crate::metaads::available(&self.db)? {
+            tools.extend(ads_tools());
+        }
+        Ok(tools)
+    }
 
-        let text = match name {
-            "list_accounts" => self.list_accounts()?,
-            "list_posts" => self.list_posts()?,
-            "list_notes" => self.list_notes()?,
-            "create_note" => self.create_note(&args)?,
-            "create_post" => self.create_post(&args)?,
-            "get_stats" => self.get_stats(&args)?,
-            "meta_ads_tools" => self.meta_ads_tools()?,
-            "meta_ads_call" => self.meta_ads_call(&args)?,
-            other => {
-                return Err(crate::error::AppError::NotFound(format!(
-                    "No tool named `{other}`."
-                )));
-            }
-        };
-        Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+    /// Runs one tool. `None` means no tool has that name.
+    ///
+    /// The ads tools are routed whether or not `tools/list` currently offers
+    /// them: an agent holding an older catalogue should get their own message
+    /// about what is missing, not a protocol error.
+    fn call(&self, name: &str, args: &Value) -> Option<Result<String>> {
+        Some(match name {
+            "list_accounts" => self.list_accounts(),
+            "list_posts" => self.list_posts(),
+            "list_notes" => self.list_notes(),
+            "create_note" => self.create_note(args),
+            "create_post" => self.create_post(args),
+            "get_stats" => self.get_stats(args),
+            "meta_ads_tools" => self.meta_ads_tools(),
+            "meta_ads_call" => self.meta_ads_call(args),
+            _ => return None,
+        })
     }
 
     // ─── Tools ──────────────────────────────────────────────────────────────
@@ -177,10 +234,24 @@ impl Session {
         Ok(serde_json::to_string_pretty(&rows)?)
     }
 
+    /// What an agent asks the queue: what is about to go out, then what just
+    /// happened. Every post still waiting (scheduled or sending) comes first,
+    /// soonest first; then everything else, newest first; 100 in all.
+    ///
+    /// Reordered here rather than in the store query, which the app's own queue
+    /// shares — newest-first is right for a screen and wrong for "what's next",
+    /// where it put a post a month out ahead of tomorrow's.
     fn list_posts(&self) -> Result<String> {
-        let posts = self.db.list_posts()?;
-        let rows: Vec<Value> = posts
+        let (mut waiting, done): (Vec<_>, Vec<_>) =
+            self.db.list_posts()?.into_iter().partition(|detail| {
+                detail.post.status == db::POST_SCHEDULED
+                    || detail.post.status == db::POST_PUBLISHING
+            });
+        // Stored times are canonical UTC, so the strings sort as the instants.
+        waiting.sort_by(|a, b| a.post.scheduled_at.cmp(&b.post.scheduled_at));
+        let rows: Vec<Value> = waiting
             .iter()
+            .chain(done.iter())
             .take(100)
             .map(|detail| {
                 json!({
@@ -317,26 +388,42 @@ impl Session {
         Ok(serde_json::to_string_pretty(&result)?)
     }
 
+    /// Every argument is checked rather than dropped when it does not parse: a
+    /// filter that silently ignores a typo answers a different question than
+    /// the one asked, and the model reports those numbers as the answer.
     fn get_stats(&self, args: &Value) -> Result<String> {
-        let filter = StatsFilter {
-            since: args
-                .get("since")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| Some(stats::default_since())),
-            until: args.get("until").and_then(Value::as_str).map(str::to_owned),
-            platforms: args
-                .get("platforms")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .filter_map(|value| PlatformId::parse(value).ok())
-                        .collect()
+        let platforms = array(args, "platforms")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .and_then(|name| PlatformId::parse(name).ok())
+                    .ok_or_else(|| {
+                        let valid: Vec<&str> =
+                            PlatformId::ALL.iter().map(|id| id.as_str()).collect();
+                        AppError::InvalidInput(format!(
+                            "`platforms` has {value}, which is not a platform. Valid: {}.",
+                            valid.join(", ")
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let account_ids = array(args, "accountIds")?
+            .iter()
+            .map(|value| {
+                value.as_i64().ok_or_else(|| {
+                    AppError::InvalidInput(format!(
+                        "`accountIds` has {value}, which is not an integer account id from \
+                         list_accounts."
+                    ))
                 })
-                .unwrap_or_default(),
-            account_ids: Vec::new(),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let filter = StatsFilter {
+            since: Some(bound(args, "since")?.unwrap_or_else(stats::default_since)),
+            until: bound(args, "until")?,
+            platforms,
+            account_ids,
         };
         let computed = stats::compute(&self.db, &filter)?;
         Ok(serde_json::to_string_pretty(&json!({
@@ -387,26 +474,75 @@ impl Session {
                 "views": post.views,
                 "interactions": post.interactions,
             })).collect::<Vec<_>>(),
-            // Named so a model does not read a missing platform as a zero.
-            "unreadable": computed.engagement_gaps.iter().map(|(platform, reason)| json!({
-                "platform": platform,
-                "reason": reason,
-            })).collect::<Vec<_>>(),
+            // Named so a model does not read a missing platform, or a count a
+            // platform never reports, as a zero.
+            "unreadable": unreadable(&computed),
         }))?)
     }
 }
 
-/// The tool catalogue. Descriptions are written for a model deciding whether to
-/// call something, so each says what it is FOR and what it costs, not just what
-/// it does.
+/// A `get_stats` date bound, in the store's canonical UTC form.
 ///
-/// Split in two because the halves answer to different owners: [`store_tools`]
-/// is this store, [`ads_tools`] is a passthrough to a server somebody else runs
-/// against live ad accounts.
-fn tool_definitions() -> Vec<Value> {
-    let mut tools = store_tools();
-    tools.extend(ads_tools());
-    tools
+/// The stats filter compares timestamps as strings, which orders correctly only
+/// when both sides share one form — `2026-09-01T00:00:00+02:00` kept verbatim
+/// would sort two hours away from the instant it names. So the bound goes
+/// through the same parse the app's own stats command uses and comes out as
+/// `to_rfc3339` in UTC, exactly as every stored timestamp was written.
+fn bound(args: &Value, key: &str) -> Result<Option<String>> {
+    let raw = match args.get(key) {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(raw)) => raw.as_str(),
+        Some(other) => {
+            return Err(AppError::InvalidInput(format!(
+                "`{key}` must be an RFC 3339 timestamp string, not {other}."
+            )));
+        }
+    };
+    Ok(stats::parse_bound(Some(raw))?.map(|at| at.to_rfc3339()))
+}
+
+/// An optional array argument. Absent is empty; present but not an array is
+/// refused rather than read as "no filter".
+fn array<'a>(args: &'a Value, key: &str) -> Result<&'a [Value]> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(&[]),
+        Some(Value::Array(values)) => Ok(values),
+        Some(other) => Err(AppError::InvalidInput(format!(
+            "`{key}` must be an array, not {other}."
+        ))),
+    }
+}
+
+/// Everything `get_stats` cannot see, in two kinds a model must not conflate:
+/// an ACCOUNT whose engagement Windbag cannot read at all, and a DIMENSION a
+/// measured platform does not report (Bluesky has no impressions, Instagram no
+/// reposts) — which is why that figure is `null` rather than `0`.
+fn unreadable(computed: &stats::Stats) -> Vec<Value> {
+    let mut rows: Vec<Value> = computed
+        .engagement_gaps
+        .iter()
+        .map(|(platform, reason)| json!({ "platform": platform, "reason": reason }))
+        .collect();
+    for row in &computed.engagement_by_platform {
+        for (dimension, value) in [
+            ("likes", row.likes),
+            ("reposts", row.reposts),
+            ("replies", row.replies),
+            ("views", row.views),
+        ] {
+            if value.is_none() {
+                rows.push(json!({
+                    "platform": row.platform,
+                    "dimension": dimension,
+                    "reason": format!(
+                        "{} reports no {dimension} for the posts measured, so it is null, not 0.",
+                        row.label
+                    ),
+                }));
+            }
+        }
+    }
+    rows
 }
 
 /// Everything backed by the local store.
@@ -421,8 +557,10 @@ fn store_tools() -> Vec<Value> {
         ),
         tool(
             "list_posts",
-            "List the 100 most recent posts with their status and per-destination outcome, \
-             including any error. Use it to see what is queued or what went wrong.",
+            "List posts with their status and per-destination outcome, including any error: \
+             first every post still waiting to go out (scheduled or sending), soonest first, \
+             then the most recent of the rest, newest first — 100 posts at most. Use it to \
+             see what is coming up next or what went wrong.",
             json!({ "type": "object", "properties": {} }),
         ),
         tool(
@@ -484,39 +622,58 @@ fn store_tools() -> Vec<Value> {
                 "required": ["body", "accountIds"]
             }),
         ),
-        tool(
-            "get_stats",
-            "Publishing statistics from Windbag's own records: how much published, what \
-             failed and why, which hours the user posts at, the best-performing posts, and \
-             engagement counts per platform as of the last refresh. Engagement is read from \
-             Bluesky, Mastodon, Threads, Instagram, Facebook and X; Reddit and LinkedIn come \
-             back under `unreadable` with a reason rather than as zero. Reads only the local \
-             store — it never calls a platform, so the numbers are as of the user's last \
-             refresh (`engagement.asOf`).",
-            json!({
-                "type": "object",
-                "properties": {
-                    "since": { "type": "string", "description": "RFC 3339 lower bound. Defaults to 30 days ago." },
-                    "until": { "type": "string", "description": "RFC 3339 upper bound." },
-                    "platforms": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description":
-                            "bluesky | mastodon | reddit | x | linkedin | threads | \
-                             instagram | facebook"
-                    }
-                }
-            }),
-        ),
+        stats_tool(),
     ]
 }
 
-/// The passthrough to Meta's hosted ads MCP server.
-///
-/// Advertised unconditionally rather than only when a Facebook Page is
-/// connected: `tools/list` is answered before any credential is read, and a
-/// catalogue that changes shape depending on stored state is harder for a model
-/// to reason about than one whose tools state their own preconditions.
+/// `get_stats`, apart from [`store_tools`] only because its filter schema is the
+/// longest in the catalogue.
+fn stats_tool() -> Value {
+    tool(
+        "get_stats",
+        "Publishing statistics from Windbag's own records: how much published, what \
+         failed and why, which hours the user posts at, the best-performing posts, and \
+         engagement counts per platform as of the last refresh. Engagement is read from \
+         Bluesky, Mastodon, Threads, Instagram, Facebook and X; Reddit and LinkedIn come \
+         back under `unreadable` with a reason rather than as zero. A count a platform \
+         does not report (impressions on Bluesky, reposts on Instagram) is null, never 0, \
+         and is listed under `unreadable` with its `dimension`. Reads only the local \
+         store — it never calls a platform, so the numbers are as of the user's last \
+         refresh (`engagement.asOf`).",
+        json!({
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "description":
+                        "Inclusive lower bound, RFC 3339 with an offset, e.g. \
+                         2026-09-01T00:00:00Z or 2026-09-01T00:00:00+02:00; compared as \
+                         the same instant in UTC. Defaults to 30 days ago. An unparseable \
+                         value is refused."
+                },
+                "until": {
+                    "type": "string",
+                    "description": "Exclusive upper bound, in the same form as `since`."
+                },
+                "platforms": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description":
+                        "Only these platforms: bluesky | mastodon | reddit | x | linkedin | \
+                         threads | instagram | facebook. An unknown name is refused."
+                },
+                "accountIds": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "description": "Only these account ids, from list_accounts."
+                }
+            }
+        }),
+    )
+}
+
+/// The passthrough to Meta's hosted ads MCP server. Listed only when
+/// [`crate::metaads::available`] says it can work.
 fn ads_tools() -> Vec<Value> {
     vec![
         tool(
@@ -566,6 +723,7 @@ fn error_frame(id: &Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db;
     use crate::platforms::{AccountSecret, Connected};
 
     fn session() -> (Session, i64) {
@@ -605,16 +763,41 @@ mod tests {
             .to_string()
     }
 
-    #[test]
-    fn initialize_answers_with_the_protocol_version() {
+    fn negotiated(params: Value) -> Option<String> {
         let (mut session, _) = session();
-        let reply = session
-            .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }))
-            .expect("reply");
+        session
+            .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params }))
+            .expect("reply")
+            .pointer("/result/protocolVersion")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn initialize_echoes_a_supported_version_the_client_asked_for() {
+        // The regression this guards: every client was told the one version
+        // this server preferred, whatever it had asked for.
         assert_eq!(
-            reply
-                .pointer("/result/protocolVersion")
-                .and_then(Value::as_str),
+            negotiated(json!({ "protocolVersion": "2025-06-18" })).as_deref(),
+            Some("2025-06-18")
+        );
+        assert_eq!(
+            negotiated(json!({ "protocolVersion": "2025-03-26" })).as_deref(),
+            Some("2025-03-26")
+        );
+    }
+
+    #[test]
+    fn initialize_answers_the_latest_it_knows_otherwise() {
+        assert_eq!(
+            negotiated(json!({ "protocolVersion": "1900-01-01" })).as_deref(),
+            Some(PROTOCOL_VERSION)
+        );
+        assert_eq!(negotiated(json!({})).as_deref(), Some(PROTOCOL_VERSION));
+        // The spec's current revision has no handshake, so a client that sent
+        // `initialize` is answered in a handshake-era revision.
+        assert_eq!(
+            negotiated(json!({ "protocolVersion": "2026-07-28" })).as_deref(),
             Some(PROTOCOL_VERSION)
         );
     }
@@ -648,10 +831,86 @@ mod tests {
             let frame = call(&mut session, name, json!({}));
             // Missing required arguments is a fine answer; "no such tool" is not.
             assert!(
-                !text_of(&frame).contains("No tool named"),
+                frame.get("error").is_none(),
                 "{name} is advertised but not routed"
             );
         }
+    }
+
+    #[test]
+    fn the_ads_tools_are_not_listed_without_a_facebook_page_with_ads_access() {
+        // The regression this guards: the ads tools were always listed, so a
+        // model planned around a passthrough that could only fail.
+        let (mut session, _) = session();
+        let listed = session
+            .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+            .expect("reply");
+        let names: Vec<&str> = listed
+            .pointer("/result/tools")
+            .and_then(Value::as_array)
+            .expect("tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(names.contains(&"get_stats"));
+        assert!(
+            !names.iter().any(|name| name.starts_with("meta_ads_")),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn an_unlisted_ads_tool_still_answers_with_what_is_missing() {
+        // Routed even when unlisted: an agent with an older catalogue gets told
+        // to connect a Page, not a protocol error.
+        let (mut session, _) = session();
+        for name in ["meta_ads_tools", "meta_ads_call"] {
+            let frame = call(&mut session, name, json!({ "tool": "list_campaigns" }));
+            assert!(frame.get("error").is_none(), "{name}: {frame}");
+            assert_eq!(
+                frame.pointer("/result/isError").and_then(Value::as_bool),
+                Some(true)
+            );
+            assert!(text_of(&frame).contains("Facebook Page"), "{name}: {frame}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_tool_is_a_jsonrpc_invalid_params_error() {
+        // Per the spec's tools error handling: an unknown tool is a protocol
+        // error, while a tool that runs and fails stays an `isError` result.
+        let (mut session, _) = session();
+        let frame = call(&mut session, "delete_everything", json!({}));
+        assert_eq!(
+            frame.pointer("/error/code").and_then(Value::as_i64),
+            Some(-32602)
+        );
+        assert!(frame.get("result").is_none());
+    }
+
+    #[test]
+    fn list_posts_puts_what_is_waiting_first_soonest_first() {
+        // The regression this guards: the list ran newest-scheduled first, so a
+        // post a month out came before tomorrow's.
+        let (mut session, account) = session();
+        publish_one(&session, account);
+        for (body, days) in [("next month", 30), ("tomorrow", 1)] {
+            let at = (chrono::Utc::now() + chrono::Duration::days(days)).to_rfc3339();
+            session
+                .db
+                .create_post(body, None, None, Some(&at), db::POST_SCHEDULED)
+                .expect("post");
+        }
+        let listed: Value =
+            serde_json::from_str(&text_of(&call(&mut session, "list_posts", json!({}))))
+                .expect("json");
+        let bodies: Vec<&str> = listed
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter_map(|post| post["body"].as_str())
+            .collect();
+        assert_eq!(bodies, ["tomorrow", "next month", "sent"]);
     }
 
     #[test]
@@ -804,6 +1063,140 @@ mod tests {
             json!({ "body": "body only", "accountIds": [reddit] }),
         );
         assert!(text_of(&frame).contains("title"));
+    }
+
+    /// One post published to `account` just now. Returns the destination id.
+    fn publish_one(session: &Session, account: i64) -> i64 {
+        let post = session
+            .db
+            .create_post(
+                "sent",
+                None,
+                None,
+                Some(&db::now_rfc3339()),
+                db::POST_SCHEDULED,
+            )
+            .expect("post");
+        session
+            .db
+            .set_targets(post, &[(account, json!({}))])
+            .expect("targets");
+        let target = session.db.list_targets(post).expect("targets")[0].id;
+        session
+            .db
+            .finish_target_ok(target, "at://1", None)
+            .expect("ok");
+        session.db.reconcile_post_status(post).expect("status");
+        target
+    }
+
+    fn published_in(session: &mut Session, args: Value) -> i64 {
+        let text = text_of(&call(session, "get_stats", args));
+        serde_json::from_str::<Value>(&text)
+            .unwrap_or_else(|_| panic!("not stats: {text}"))["published"]
+            .as_i64()
+            .expect("published")
+    }
+
+    #[test]
+    fn a_stats_bound_with_an_offset_is_compared_as_the_same_instant() {
+        // The regression this guards: bounds were compared verbatim, so half an
+        // hour ago written at +05:00 sorted after a destination stored in UTC
+        // and excluded it.
+        let (mut session, account) = session();
+        publish_one(&session, account);
+        let offset = chrono::FixedOffset::east_opt(5 * 3600).expect("offset");
+        let since = (chrono::Utc::now() - chrono::Duration::minutes(30))
+            .with_timezone(&offset)
+            .to_rfc3339();
+        assert_eq!(published_in(&mut session, json!({ "since": since })), 1);
+    }
+
+    #[test]
+    fn an_unparseable_stats_bound_is_refused() {
+        let (mut session, _) = session();
+        let frame = call(&mut session, "get_stats", json!({ "since": "last week" }));
+        assert_eq!(
+            frame.pointer("/result/isError").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(text_of(&frame).contains("RFC 3339"), "{}", text_of(&frame));
+    }
+
+    #[test]
+    fn an_unknown_stats_platform_is_refused_with_the_valid_names() {
+        let (mut session, _) = session();
+        let frame = call(
+            &mut session,
+            "get_stats",
+            json!({ "platforms": ["bluesky", "twitter"] }),
+        );
+        let text = text_of(&frame);
+        assert_eq!(
+            frame.pointer("/result/isError").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(text.contains("twitter"), "{text}");
+        assert!(
+            text.contains("mastodon") && text.contains("facebook"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn stats_honour_account_ids_and_refuse_non_integer_ones() {
+        let (mut session, account) = session();
+        publish_one(&session, account);
+        assert_eq!(
+            published_in(&mut session, json!({ "accountIds": [account] })),
+            1
+        );
+        assert_eq!(
+            published_in(&mut session, json!({ "accountIds": [account + 1] })),
+            0,
+            "another account's view is empty"
+        );
+        let frame = call(
+            &mut session,
+            "get_stats",
+            json!({ "accountIds": [account.to_string()] }),
+        );
+        assert_eq!(
+            frame.pointer("/result/isError").and_then(Value::as_bool),
+            Some(true),
+            "a string id is refused, not dropped"
+        );
+    }
+
+    #[test]
+    fn an_unreported_engagement_count_is_null_and_explained_not_zero() {
+        let (mut session, account) = session();
+        let target = publish_one(&session, account);
+        session
+            .db
+            .save_metrics(&db::Metrics {
+                target_id: target,
+                fetched_at: db::now_rfc3339(),
+                likes: Some(3),
+                reposts: Some(0),
+                replies: Some(1),
+                quotes: None,
+                // Bluesky publishes no impression count.
+                views: None,
+            })
+            .expect("metrics");
+
+        let text = text_of(&call(&mut session, "get_stats", json!({})));
+        let reply: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(reply.pointer("/engagement/views"), Some(&Value::Null));
+        assert_eq!(reply.pointer("/engagement/reposts"), Some(&json!(0)));
+        assert_eq!(reply.pointer("/topPosts/0/views"), Some(&Value::Null));
+        let explained = reply["unreadable"]
+            .as_array()
+            .expect("unreadable")
+            .iter()
+            .any(|row| row["platform"] == "bluesky" && row["dimension"] == "views");
+        assert!(explained, "{text}");
     }
 
     #[test]
