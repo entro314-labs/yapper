@@ -325,6 +325,21 @@ pub fn list_attempts(state: State<'_, AppState>, post_id: i64) -> Result<Vec<Att
 /// written — then the post, its media and its targets in one transaction.
 /// Two copies of this drifted before (only one refused a post with no
 /// destinations), which is why there is one.
+/// The accounts a post has already gone out to. They are never sent to again,
+/// so an edit is not judged against them: text that no longer fits a platform
+/// the post already reached must not block re-queueing the rest.
+fn published_accounts(database: &Db, post_id: Option<i64>) -> Result<Vec<i64>> {
+    let Some(id) = post_id else {
+        return Ok(Vec::new());
+    };
+    Ok(database
+        .list_targets(id)?
+        .into_iter()
+        .filter(|target| target.status == db::TARGET_PUBLISHED)
+        .map(|target| target.account_id)
+        .collect())
+}
+
 pub fn store_post(database: &Db, input: &SavePostInput) -> Result<i64> {
     // Parsed rather than trusted, and stored as canonical UTC: a value the store
     // cannot read back would make the post invisible to the due query, and one
@@ -402,7 +417,11 @@ pub fn store_post(database: &Db, input: &SavePostInput) -> Result<i64> {
             bytes: item.bytes.unsigned_abs(),
         })
         .collect();
+    let published = published_accounts(database, input.id)?;
     for target in &input.targets {
+        if published.contains(&target.account_id) {
+            continue;
+        }
         let account = database.get_account(target.account_id)?;
         let adapter = platforms::adapter(account.platform);
         platforms::validate(
@@ -1136,6 +1155,19 @@ mod tests {
             database.get_post(id).expect("post").status,
             db::POST_SCHEDULED
         );
+    }
+
+    #[test]
+    fn an_edit_is_not_judged_against_a_destination_that_already_published() {
+        // 400 characters: over Bluesky's 300, which this post already went out
+        // to and will never be sent to again; inside Mastodon's 500.
+        let (database, first) = store();
+        let (id, second, _) = partial_post(&database, first);
+
+        let mut edit = input(Some("2099-02-01T09:00:00Z"), &[first, second]);
+        edit.id = Some(id);
+        edit.body = "a".repeat(400);
+        store_post(&database, &edit).expect("the Mastodon half is re-queued");
     }
 
     #[test]

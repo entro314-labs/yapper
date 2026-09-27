@@ -211,7 +211,21 @@ function ComposeScreen() {
     [platforms.data],
   )
 
-  const blocking = checks.data?.filter((check) => check.error) ?? []
+  // A destination that already published is never sent again (saving re-queues
+  // only the rest), so its verdict on the edited text cannot block the save.
+  const publishedTo = React.useMemo(
+    () =>
+      new Set(
+        id !== undefined && source
+          ? source.targets
+              .filter((target) => target.status === 'published')
+              .map((target) => target.accountId)
+          : [],
+      ),
+    [id, source],
+  )
+  const blocking =
+    checks.data?.filter((check) => check.error && !publishedTo.has(check.accountId)) ?? []
   // Only a verdict on what is on screen NOW can unlock saving. While a new
   // check runs, the previous one is kept as placeholder data for the counters —
   // and its "fits" must not let an edit that does not fit through.
