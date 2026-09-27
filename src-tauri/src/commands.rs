@@ -290,16 +290,18 @@ pub fn list_attempts(state: State<'_, AppState>, post_id: i64) -> Result<Vec<Att
 
 #[tauri::command]
 pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInput) -> Result<i64> {
+    // Parsed rather than trusted, and stored as canonical UTC: a value the store
+    // cannot read back would make the post invisible to the due query, and one
+    // kept with its offset would be compared as a string and fire at the wrong
+    // hour.
     let scheduled_at = input
         .scheduled_at
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty());
-    // Parsed rather than trusted: a value the store cannot read back would make
-    // the post invisible to the due query and it would simply never fire.
-    if let Some(value) = scheduled_at {
-        db::parse_rfc3339(value)?;
-    }
+        .filter(|value| !value.is_empty())
+        .map(|value| db::parse_rfc3339(value).map(|parsed| parsed.to_rfc3339()))
+        .transpose()?;
+    let scheduled_at = scheduled_at.as_deref();
 
     let status = if scheduled_at.is_some() {
         db::POST_SCHEDULED
@@ -409,7 +411,7 @@ pub fn reschedule_post(
     id: i64,
     scheduled_at: String,
 ) -> Result<()> {
-    db::parse_rfc3339(&scheduled_at)?;
+    let scheduled_at = db::parse_rfc3339(&scheduled_at)?.to_rfc3339();
     scheduler::requeue(&state.db, id, &scheduled_at)?;
     let _ = app.emit(EVENT_QUEUE_CHANGED, id);
     state.scheduler.nudge();

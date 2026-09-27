@@ -252,10 +252,12 @@ impl Session {
             .get("scheduledAt")
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|value| !value.is_empty());
-        if let Some(at) = scheduled_at {
-            db::parse_rfc3339(at)?;
-        }
+            .filter(|value| !value.is_empty())
+            // Stored as the same instant in canonical UTC: the due query
+            // compares strings, so `09:00+02:00` kept verbatim would fire at
+            // 09:00Z, two hours late.
+            .map(|at| db::parse_rfc3339(at).map(|parsed| parsed.to_rfc3339()))
+            .transpose()?;
 
         let account_ids: Vec<i64> = args
             .get("accountIds")
@@ -290,7 +292,7 @@ impl Session {
         };
         let post_id = self
             .db
-            .create_post(&body, title, link, scheduled_at, status)?;
+            .create_post(&body, title, link, scheduled_at.as_deref(), status)?;
 
         let targets: Vec<(i64, Value)> = account_ids
             .iter()
@@ -706,6 +708,27 @@ mod tests {
             Some(true)
         );
         assert!(text_of(&frame).contains("accountIds"));
+    }
+
+    #[test]
+    fn a_time_with_an_offset_is_stored_as_the_same_instant_in_utc() {
+        // The due query compares stored strings, so only one canonical UTC form
+        // orders correctly: 09:00+02:00 is 07:00Z and must fire at 07:00Z.
+        let (mut session, account) = session();
+        call(
+            &mut session,
+            "create_post",
+            json!({
+                "body": "offset",
+                "accountIds": [account],
+                "scheduledAt": "2026-12-01T09:00:00+02:00"
+            }),
+        );
+        let stored = session.db.list_posts().expect("posts")[0]
+            .post
+            .scheduled_at
+            .clone();
+        assert_eq!(stored.as_deref(), Some("2026-12-01T07:00:00+00:00"));
     }
 
     #[test]

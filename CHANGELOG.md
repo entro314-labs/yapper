@@ -166,6 +166,11 @@ All notable changes to Windbag are documented here. The format follows
   which could send a second copy. At launch such destinations are now failed
   with a message saying to check the platform before retrying, and the attempt
   is logged.
+- **A time with a UTC offset fires at the right moment.** The agent door (and
+  any caller of `save_post` or `reschedule_post`) stored `scheduledAt` exactly
+  as sent, and the due query compares stored strings — so `09:00+02:00` went
+  out at 09:00 UTC, two hours late. Every writer now stores the same instant in
+  canonical UTC.
 
 ### Activation
 
