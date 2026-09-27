@@ -181,10 +181,17 @@ impl Platform for Facebook {
         })
     }
 
+    /// A `/feed` post takes the link as a real link share; a photo or a video
+    /// has no such field, so there the link goes in the text.
+    fn posts_link_natively(&self, _body: &str, media_count: usize) -> bool {
+        media_count == 0
+    }
+
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published> {
         let token = &request.secret.access_token;
         let page = &request.account.remote_id;
         let base = api_base();
+        let text = request.text();
 
         // A video is its own endpoint and cannot share a post with photos;
         // `validate` admits one only on its own (see `MEDIA`), so a post here
@@ -197,10 +204,7 @@ impl Platform for Facebook {
             let response = upload_bytes(
                 &format!("{base}/{page}/videos"),
                 item,
-                &[
-                    ("description", request.body),
-                    ("access_token", token.as_str()),
-                ],
+                &[("description", &text), ("access_token", token.as_str())],
                 true,
             )?;
             let id = published_id(&response, "id")?;
@@ -212,7 +216,7 @@ impl Platform for Facebook {
 
         match request.media.len() {
             0 => {
-                let mut form = vec![("message", request.body), ("access_token", token.as_str())];
+                let mut form = vec![("message", &*text), ("access_token", token.as_str())];
                 if let Some(link) = request.link {
                     form.push(("link", link));
                 }
@@ -224,14 +228,8 @@ impl Platform for Facebook {
                 })
             }
             1 => {
-                let response = upload_photo(
-                    &base,
-                    page,
-                    token,
-                    &request.media[0],
-                    Some(request.body),
-                    true,
-                )?;
+                let response =
+                    upload_photo(&base, page, token, &request.media[0], Some(&text), true)?;
                 // A published photo answers with both its own id and the id of
                 // the post wrapping it; the post is what a permalink addresses.
                 let id = response
@@ -253,7 +251,7 @@ impl Platform for Facebook {
                     attached.push(id_of(&response, LABEL, "photo")?);
                 }
                 let mut form: Vec<(String, String)> = vec![
-                    ("message".to_string(), request.body.to_string()),
+                    ("message".to_string(), text.to_string()),
                     ("access_token".to_string(), token.clone()),
                 ];
                 for (index, media_fbid) in attached.iter().enumerate() {

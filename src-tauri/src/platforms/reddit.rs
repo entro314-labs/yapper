@@ -109,6 +109,12 @@ impl Platform for Reddit {
         Ok(Some(oauth::refresh(&config_for(app), refresh_token)?))
     }
 
+    /// Only an empty body makes a link submission; a self post has no link
+    /// field.
+    fn posts_link_natively(&self, body: &str, _media_count: usize) -> bool {
+        body.trim().is_empty()
+    }
+
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published> {
         let subreddit = request.option("subreddit").ok_or_else(|| {
             AppError::InvalidInput("Pick a subreddit for this Reddit destination.".into())
@@ -117,8 +123,11 @@ impl Platform for Reddit {
         let title = request.title.unwrap_or_default();
 
         // A link submission when the post carries a URL and no body, a self post
-        // otherwise: Reddit rejects `url` and `text` together.
-        let is_link = request.link.is_some() && request.body.trim().is_empty();
+        // otherwise: Reddit rejects `url` and `text` together, so a self post
+        // carries the link in its text (see `posts_link_natively`).
+        let is_link =
+            request.link.is_some() && self.posts_link_natively(request.body, request.media.len());
+        let text = request.text();
         let mut form: Vec<(&str, &str)> = vec![
             ("api_type", "json"),
             ("sr", subreddit),
@@ -131,7 +140,7 @@ impl Platform for Reddit {
         if is_link {
             form.push(("url", request.link.unwrap_or_default()));
         } else {
-            form.push(("text", request.body));
+            form.push(("text", &text));
         }
         if let Some(flair) = request.option("flair_id") {
             form.push(("flair_id", flair));

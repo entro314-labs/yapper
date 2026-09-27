@@ -229,8 +229,9 @@ pub struct Limits {
     /// at compose time rather than at 3am.
     pub requires_media: bool,
     /// Reddit and Facebook: a URL with no text is a whole post — a link
-    /// submission, a link share. Everywhere else the link rides along with the
-    /// text (or is ignored), so it cannot stand in for an empty body.
+    /// submission, a link share. Everywhere else the link is a card beside the
+    /// text or is appended to it (see [`outgoing_text`]); where it is only a
+    /// card it cannot stand in for an empty body.
     pub link_is_content: bool,
 }
 
@@ -438,6 +439,17 @@ impl PublishRequest<'_> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
     }
+
+    /// The text to send — the body with the link appended where the platform
+    /// would otherwise drop it. See [`outgoing_text`].
+    pub fn text(&self) -> std::borrow::Cow<'_, str> {
+        outgoing_text(
+            self.account.platform,
+            self.body,
+            self.link,
+            self.media.len(),
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -469,6 +481,41 @@ pub trait Platform: Send + Sync {
     fn count_body(&self, body: &str) -> usize {
         body.chars().count()
     }
+
+    /// Whether this adapter posts the post's link as a link of its own — a
+    /// link submission, an article card, a link share — for this body and this
+    /// many attachments. Where it does not, [`outgoing_text`] puts the link in
+    /// the text so it is never silently dropped.
+    fn posts_link_natively(&self, _body: &str, _media_count: usize) -> bool {
+        false
+    }
+}
+
+/// The text an adapter actually sends: the body, plus the post's link on a
+/// line of its own wherever the platform has no native place for it in the
+/// shape being posted (see [`Platform::posts_link_natively`]). A link the body
+/// already carries is not repeated.
+///
+/// Both the adapters and [`counted_length`] go through here, so the appended
+/// link is counted against the limit exactly as it will be sent.
+pub fn outgoing_text<'a>(
+    id: PlatformId,
+    body: &'a str,
+    link: Option<&str>,
+    media_count: usize,
+) -> std::borrow::Cow<'a, str> {
+    let Some(link) = link.map(str::trim).filter(|value| !value.is_empty()) else {
+        return std::borrow::Cow::Borrowed(body);
+    };
+    if body.contains(link) || adapter(id).posts_link_natively(body, media_count) {
+        return std::borrow::Cow::Borrowed(body);
+    }
+    let body = body.trim_end();
+    std::borrow::Cow::Owned(if body.is_empty() {
+        link.to_string()
+    } else {
+        format!("{body}\n{link}")
+    })
 }
 
 /// Codepoints that make whatever grapheme holds them an emoji, for the two
@@ -579,11 +626,15 @@ pub fn validate(
 ) -> Result<()> {
     let platform = adapter(id);
     let info = platform.info();
-    let length = counted_length(id, body, options);
+    let length = counted_length(id, body, link, media.len(), options);
 
     let stands_on_link =
         info.limits.link_is_content && link.is_some_and(|url| !url.trim().is_empty());
-    if body.trim().is_empty() && media.is_empty() && !stands_on_link {
+    // Judged on what will be sent: where the link is appended it is text.
+    if outgoing_text(id, body, link, media.len()).trim().is_empty()
+        && media.is_empty()
+        && !stands_on_link
+    {
         // Only what this platform can actually carry is offered as the fix.
         let mut options = vec!["text"];
         if info.limits.max_media > 0 {
@@ -689,17 +740,25 @@ fn check_media(info: &PlatformInfo, media: &[MediaSpec]) -> Result<()> {
     Ok(())
 }
 
-/// The length a platform holds against its limit: the body, plus any
-/// per-destination option it bills to the same budget (Mastodon's content
+/// The length a platform holds against its limit: the text as it will be sent
+/// (the body, with the link appended where [`outgoing_text`] appends it), plus
+/// any per-destination option it bills to the same budget (Mastodon's content
 /// warning). Shared with the composer's counter so the two cannot disagree.
-pub fn counted_length(id: PlatformId, body: &str, options: &serde_json::Value) -> usize {
+pub fn counted_length(
+    id: PlatformId,
+    body: &str,
+    link: Option<&str>,
+    media_count: usize,
+    options: &serde_json::Value,
+) -> usize {
     let platform = adapter(id);
+    let text = outgoing_text(id, body, link, media_count);
     platform
         .info()
         .target_fields
         .iter()
         .filter(|field| field.counted)
-        .fold(platform.count_body(body), |total, field| {
+        .fold(platform.count_body(&text), |total, field| {
             total + option_value(options, field.key).map_or(0, |value| platform.count_body(value))
         })
 }
@@ -787,7 +846,10 @@ mod tests {
         let short = serde_json::json!({ "spoiler_text": "y".repeat(10) });
         assert!(validate(PlatformId::Mastodon, &body, None, None, &[], &long, 500).is_err());
         assert!(validate(PlatformId::Mastodon, &body, None, None, &[], &short, 500).is_ok());
-        assert_eq!(counted_length(PlatformId::Mastodon, &body, &long), 510);
+        assert_eq!(
+            counted_length(PlatformId::Mastodon, &body, None, 0, &long),
+            510
+        );
     }
 
     fn spec(mime: &str, bytes: u64) -> MediaSpec {
@@ -1104,7 +1166,8 @@ mod tests {
             )
             .is_ok()
         );
-        // Bluesky ignores the link field, so a link alone would post nothing.
+        // Bluesky has no link field, so the link is sent as the text — and a
+        // link alone is therefore a post there too.
         assert!(
             validate(
                 PlatformId::Bluesky,
@@ -1115,7 +1178,7 @@ mod tests {
                 &serde_json::json!({}),
                 300
             )
-            .is_err()
+            .is_ok()
         );
         assert!(
             validate(
@@ -1137,6 +1200,79 @@ mod tests {
         let flag = "\u{1F1EC}\u{1F1E7}";
         assert_eq!(bluesky::Bluesky.count_body(flag), 1);
         assert_eq!(flag.chars().count(), 2);
+    }
+
+    const LINK: Option<&str> = Some("https://example.com/post");
+
+    #[test]
+    fn a_link_with_nowhere_native_to_go_is_appended_on_its_own_line() {
+        for id in [PlatformId::Bluesky, PlatformId::X, PlatformId::Mastodon] {
+            assert_eq!(
+                outgoing_text(id, "hello", LINK, 0),
+                "hello\nhttps://example.com/post",
+                "{id}"
+            );
+        }
+        assert_eq!(
+            outgoing_text(PlatformId::Bluesky, "", LINK, 0),
+            "https://example.com/post"
+        );
+    }
+
+    #[test]
+    fn a_link_the_platform_posts_itself_is_not_repeated_in_the_text() {
+        // Link share, article card, link attachment, link submission.
+        for id in [
+            PlatformId::Facebook,
+            PlatformId::Linkedin,
+            PlatformId::Threads,
+        ] {
+            assert_eq!(outgoing_text(id, "hello", LINK, 0), "hello", "{id}");
+        }
+        assert_eq!(outgoing_text(PlatformId::Reddit, "", LINK, 0), "");
+    }
+
+    #[test]
+    fn a_link_those_platforms_cannot_attach_beside_media_goes_in_the_text() {
+        for id in [
+            PlatformId::Facebook,
+            PlatformId::Linkedin,
+            PlatformId::Threads,
+            PlatformId::Instagram,
+        ] {
+            assert!(
+                outgoing_text(id, "hello", LINK, 1).ends_with("\nhttps://example.com/post"),
+                "{id}"
+            );
+        }
+        // A Reddit self post has no link field either.
+        assert!(outgoing_text(PlatformId::Reddit, "body", LINK, 0).ends_with("/post"));
+    }
+
+    #[test]
+    fn a_link_already_in_the_body_is_not_added_twice() {
+        let body = "read https://example.com/post today";
+        assert_eq!(outgoing_text(PlatformId::X, body, LINK, 0), body);
+    }
+
+    #[test]
+    fn the_appended_link_counts_against_the_limit() {
+        let body = "x".repeat(290);
+        assert_eq!(
+            counted_length(PlatformId::Bluesky, &body, LINK, 0, &serde_json::json!({})),
+            290 + 1 + LINK.map_or(0, str::len)
+        );
+        let err = validate(
+            PlatformId::Bluesky,
+            &body,
+            None,
+            LINK,
+            &[],
+            &serde_json::json!({}),
+            300,
+        )
+        .expect_err("over once the link is in");
+        assert!(err.to_string().contains("300"), "{err}");
     }
 
     #[test]

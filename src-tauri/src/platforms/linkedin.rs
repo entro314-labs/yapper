@@ -158,6 +158,12 @@ impl Platform for Linkedin {
         Ok(Some(refreshed))
     }
 
+    /// With no image the link becomes an article card; beside an image there
+    /// is no field for it, so it goes in the commentary.
+    fn posts_link_natively(&self, _body: &str, media_count: usize) -> bool {
+        media_count == 0
+    }
+
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published> {
         let token = &request.secret.access_token;
         let version = request
@@ -169,7 +175,7 @@ impl Platform for Linkedin {
 
         let mut payload = json!({
             "author": author,
-            "commentary": escape_commentary(request.body),
+            "commentary": escape_commentary(&request.text()),
             "visibility": request.option("visibility").unwrap_or("PUBLIC"),
             "distribution": {
                 "feedDistribution": "MAIN_FEED",

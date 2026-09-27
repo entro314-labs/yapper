@@ -455,7 +455,7 @@ function ComposeScreen() {
         onChange={(event) => {
           setLink(event.target.value)
         }}
-        placeholder="Link (optional) — becomes a card on LinkedIn and a link post on Reddit"
+        placeholder="Link (optional) — a card or link post where the platform has one, otherwise added to the text"
         aria-label="Link"
       />
 

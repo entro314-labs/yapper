@@ -190,7 +190,7 @@ impl Platform for Bluesky {
 
         let session = create_session(&pds, &request.account.remote_id, app_password)?;
 
-        let mut record = post_record(request.body);
+        let mut record = post_record(&request.text());
 
         if !request.media.is_empty() {
             let images = request
@@ -377,7 +377,7 @@ fn publish_oauth(request: &PublishRequest<'_>) -> Result<Published> {
     }
     let rkey = record_key(request)?;
 
-    let mut record = post_record(request.body);
+    let mut record = post_record(&request.text());
     if !request.media.is_empty() {
         let images = request
             .media

@@ -550,7 +550,13 @@ pub fn check_post(
                 account_id: target.account_id,
                 platform: account.platform,
                 handle: account.handle,
-                used: platforms::counted_length(account.platform, &body, &target.options),
+                used: platforms::counted_length(
+                    account.platform,
+                    &body,
+                    link,
+                    media.len(),
+                    &target.options,
+                ),
                 limit,
                 error,
             })

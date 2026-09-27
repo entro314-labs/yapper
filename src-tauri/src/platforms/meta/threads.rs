@@ -228,6 +228,12 @@ impl Platform for Threads {
         }))
     }
 
+    /// `link_attachment` exists only on a text-only container; with media the
+    /// link goes in the text.
+    fn posts_link_natively(&self, _body: &str, media_count: usize) -> bool {
+        media_count == 0
+    }
+
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published> {
         let token = &request.secret.access_token;
         let containers = format!("{API_BASE}/{}/threads", request.account.remote_id);
@@ -274,7 +280,7 @@ impl Platform for Threads {
                 }
                 form
             };
-            form.push(("text".into(), request.body.to_string()));
+            form.push(("text".into(), request.text().into_owned()));
             push_options(&mut form, request);
             create_container(&containers, &form)
         };

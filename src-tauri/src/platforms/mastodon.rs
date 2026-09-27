@@ -137,7 +137,7 @@ impl Platform for Mastodon {
             .map(|item| upload_media(instance, &request.secret.access_token, item))
             .collect::<Result<Vec<_>>>()?;
 
-        let mut payload = json!({ "status": request.body });
+        let mut payload = json!({ "status": request.text() });
         if let Some(visibility) = request.option("visibility") {
             payload["visibility"] = json!(visibility);
         }

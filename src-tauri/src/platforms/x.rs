@@ -177,7 +177,7 @@ impl Platform for X {
             .map(|item| upload_media(token, item))
             .collect::<Result<Vec<_>>>()?;
 
-        let mut payload = json!({ "text": request.body });
+        let mut payload = json!({ "text": request.text() });
         if !media_ids.is_empty() {
             payload["media"] = json!({ "media_ids": media_ids });
         }

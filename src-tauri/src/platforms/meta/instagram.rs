@@ -262,7 +262,7 @@ impl Platform for Instagram {
                     ("access_token".to_string(), token.clone()),
                 ]
             };
-            form.push(("caption".into(), request.body.to_string()));
+            form.push(("caption".into(), request.text().into_owned()));
             create_container(&containers, &form)
         };
 
