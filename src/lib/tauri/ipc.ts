@@ -59,8 +59,6 @@ export const IPC_EVENTS = {
   /** A post or one of its destinations changed. Payload: the post id, or nothing. */
   queueChanged: 'windbag://queue-changed',
   accountsChanged: 'windbag://accounts-changed',
-  /** A destination is being sent right now. Payload: the target id. */
-  publishing: 'windbag://publishing',
   /** A connect flow finished, either way. Payload: `AuthOutcome`. */
   auth: 'windbag://auth',
   notesChanged: 'windbag://notes-changed',

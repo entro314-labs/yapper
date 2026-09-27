@@ -40,7 +40,6 @@ const BATCH: usize = 8;
 
 pub const EVENT_QUEUE_CHANGED: &str = "windbag://queue-changed";
 pub const EVENT_ACCOUNTS_CHANGED: &str = "windbag://accounts-changed";
-pub const EVENT_PUBLISHING: &str = "windbag://publishing";
 
 /// What to do with a post whose time passed while Windbag was not running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,7 +190,6 @@ fn pass(app: &AppHandle, database: &Arc<Db>) -> Result<usize> {
         let post_id = item.post.id;
         let attempts = item.target.attempts + 1;
 
-        let _ = app.emit(EVENT_PUBLISHING, target_id);
         let outcome = publish_one(database, &item);
         settle(database, target_id, post_id, attempts, outcome)?;
         settled += 1;
