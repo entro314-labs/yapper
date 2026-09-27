@@ -614,9 +614,6 @@ mod tests {
         // scheduler is mid-way through: only `scheduled` posts are candidates,
         // and a claimed one has moved to `publishing`.
         let (database, _, post, target) = store();
-        database
-            .set_post_status(post, POST_PUBLISHING)
-            .expect("in flight");
         assert!(database.claim_target(target).expect("claim"));
 
         assert_eq!(catch_up(&database).expect("catch up"), 0);
