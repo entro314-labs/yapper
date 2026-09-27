@@ -5,13 +5,17 @@ import { toast } from 'sonner'
 
 import { SparklesIcon } from '@/components/icons/sparkles'
 import { EmptyState } from '@/components/shell/empty-state'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Kbd } from '@/components/ui/kbd'
 import { Textarea } from '@/components/ui/textarea'
 import { useAnimatedIcon } from '@/lib/animated-icon'
+import { IS_MACOS } from '@/lib/chrome'
 import { useDeleteNote, useNotes, useSaveNote, useSettings } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
 import type { Note } from '@/lib/tauri/types'
+import { useUnsavedGuard } from '@/lib/unsaved'
 import { cn, formatRelative } from '@/lib/utils'
 
 export const Route = createFileRoute('/notes')({ component: NotesScreen })
@@ -38,6 +42,7 @@ function NotesScreen() {
   const [title, setTitle] = React.useState('')
   const [body, setBody] = React.useState('')
   const [loaded, setLoaded] = React.useState<number | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = React.useState(false)
 
   const current = React.useMemo(
     () => notes.data?.find((note) => note.id === selected),
@@ -53,36 +58,96 @@ function NotesScreen() {
     setLoaded(current.id)
   }, [current, loaded])
 
-  const startNew = React.useCallback(() => {
+  // Compared trimmed, the way Rust stores a note, so a trailing newline left
+  // after saving does not read as an unsaved edit.
+  const dirty = current
+    ? title.trim() !== current.title || body.trim() !== current.body
+    : selected === null && (title.trim() !== '' || body.trim() !== '')
+  const { confirmDiscard, allowNextNavigation } = useUnsavedGuard(dirty, 'this note')
+
+  const resetEditor = React.useCallback(() => {
+    setConfirmingDelete(false)
     setSelected(null)
     setLoaded(null)
     setTitle('')
     setBody('')
   }, [])
 
-  const save = React.useCallback(
-    async (pinned?: boolean) => {
-      if (!body.trim()) {
-        toast.error('A note needs some text.')
-        return
-      }
+  const startNew = React.useCallback(async () => {
+    if (await confirmDiscard()) resetEditor()
+  }, [confirmDiscard, resetEditor])
+
+  const openNote = React.useCallback(
+    async (id: number) => {
+      if (id === selected || !(await confirmDiscard())) return
+      // An armed delete belongs to the note it was armed on.
+      setConfirmingDelete(false)
+      setSelected(id)
+    },
+    [selected, confirmDiscard],
+  )
+
+  /** Resolves to whether the note was saved, so a caller can go on only after it was. */
+  const save = React.useCallback(async (): Promise<boolean> => {
+    if (!body.trim()) {
+      toast.error('A note needs some text.')
+      return false
+    }
+    try {
+      const id = await saveNote.mutateAsync({
+        id: selected,
+        title,
+        body,
+        pinned: current?.pinned ?? false,
+      })
+      setSelected(id)
+      setLoaded(id)
+      return true
+    } catch (err) {
+      toast.error(humanMessage(err))
+      return false
+    }
+  }, [body, title, selected, current, saveNote])
+
+  // Pinning sends the STORED title and body: it is a flag on the note, and
+  // using it must not also save whatever half-edit is in the editor.
+  const togglePin = React.useCallback(
+    async (note: Note) => {
       try {
-        const id = await saveNote.mutateAsync({
-          id: selected,
-          title,
-          body,
-          pinned: pinned ?? current?.pinned ?? false,
+        await saveNote.mutateAsync({
+          id: note.id,
+          title: note.title,
+          body: note.body,
+          pinned: !note.pinned,
         })
-        setSelected(id)
-        setLoaded(id)
       } catch (err) {
         toast.error(humanMessage(err))
       }
     },
-    [body, title, selected, current, saveNote],
+    [saveNote],
   )
 
+  // Cmd/Ctrl+S saves, behind the same guard as the Save button. Default
+  // prevented even when there is nothing to save, so the keystroke never falls
+  // through to the webview.
+  const canSave = !saveNote.isPending && body.trim() !== ''
+  React.useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() !== 's' || !(event.metaKey || event.ctrlKey)) return
+      event.preventDefault()
+      if (canSave) void save()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [canSave, save])
+
   const aiOn = settings.data ? settings.data.aiBackend !== 'off' : false
+
+  if (notes.isError) {
+    return <QueryErrorState what="your notes" queries={[notes]} />
+  }
 
   return (
     <div className="grid h-full grid-cols-[minmax(200px,280px)_1fr] overflow-hidden">
@@ -91,7 +156,14 @@ function NotesScreen() {
           <h2 className="font-display text-xs font-semibold tracking-wide text-muted-foreground uppercase">
             Notes
           </h2>
-          <Button size="xs" variant="outline" className="ml-auto" onClick={startNew}>
+          <Button
+            size="xs"
+            variant="outline"
+            className="ml-auto"
+            onClick={() => {
+              void startNew()
+            }}
+          >
             New
           </Button>
         </div>
@@ -102,7 +174,7 @@ function NotesScreen() {
               <button
                 type="button"
                 onClick={() => {
-                  setSelected(note.id)
+                  void openNote(note.id)
                 }}
                 className={cn(
                   'flex w-full flex-col gap-0.5 rounded-md px-2.5 py-2 text-left transition-colors',
@@ -130,7 +202,7 @@ function NotesScreen() {
             icon={IconNotebook}
             title="No notes yet"
             description="Park a thought, a link, a half-formed argument. Notes are also what the assistant reads when it drafts a post for you."
-            action={<Button onClick={startNew}>Write one</Button>}
+            action={<Button onClick={resetEditor}>Write one</Button>}
           />
         ) : (
           <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
@@ -151,20 +223,29 @@ function NotesScreen() {
                     variant="ghost"
                     aria-label={current.pinned ? 'Unpin' : 'Pin'}
                     onClick={() => {
-                      void save(!current.pinned)
+                      void togglePin(current)
                     }}
                   >
                     {current.pinned ? <IconPinFilled className="text-primary" /> : <IconPin />}
                   </Button>
                   <Button
                     size="icon-sm"
-                    variant="ghost"
-                    aria-label="Delete note"
+                    variant={confirmingDelete ? 'destructive' : 'ghost'}
+                    aria-label={confirmingDelete ? 'Confirm delete' : 'Delete note'}
+                    // Two-step, the same as deleting a post from the queue.
                     onClick={() => {
+                      if (!confirmingDelete) {
+                        setConfirmingDelete(true)
+                        window.setTimeout(() => {
+                          setConfirmingDelete(false)
+                        }, 3000)
+                        return
+                      }
+                      setConfirmingDelete(false)
                       void (async () => {
                         try {
                           await deleteNote.mutateAsync(current.id)
-                          startNew()
+                          resetEditor()
                           toast.success('Deleted')
                         } catch (err) {
                           toast.error(humanMessage(err))
@@ -199,10 +280,17 @@ function NotesScreen() {
                   <Button
                     variant="outline"
                     onClick={() => {
-                      void navigate({
-                        to: '/compose',
-                        search: aiOn ? { noteId: selected, suggest: true } : { noteId: selected },
-                      })
+                      void (async () => {
+                        // Saved first rather than asked about: the composer and
+                        // the assistant read the STORED note, and this click
+                        // asks for what is on screen to become a post.
+                        if (dirty && !(await save())) return
+                        allowNextNavigation()
+                        void navigate({
+                          to: '/compose',
+                          search: aiOn ? { noteId: selected, suggest: true } : { noteId: selected },
+                        })
+                      })()
                     }}
                     {...draftHover}
                   >
@@ -210,8 +298,10 @@ function NotesScreen() {
                     {aiOn ? 'Draft from this' : 'Turn into a post'}
                   </Button>
                 ) : null}
+                <Kbd aria-hidden>{IS_MACOS ? '⌘S' : 'Ctrl+S'}</Kbd>
                 <Button
-                  disabled={saveNote.isPending || !body.trim()}
+                  disabled={!canSave}
+                  aria-keyshortcuts={IS_MACOS ? 'Meta+S' : 'Control+S'}
                   onClick={() => {
                     void save()
                   }}
