@@ -438,7 +438,7 @@ fn run_cli(cli: &Cli, prompt: &str, model: Option<&str>, effort: Option<&str>) -
 
     let mut command = Command::new(cli.command);
     command.args(&args);
-    let output = run_with_timeout(command, prompt.as_bytes(), TIMEOUT)
+    let finished = run_with_timeout(command, prompt.as_bytes(), TIMEOUT)
         .map_err(|err| {
             AppError::InvalidInput(format!(
                 "Could not run `{}` ({err}). Install it, or pick a different assistant \
@@ -453,29 +453,61 @@ fn run_cli(cli: &Cli, prompt: &str, model: Option<&str>, effort: Option<&str>) -
                 TIMEOUT.as_secs()
             ))
         })?;
+    check_finished(cli.command, &finished)?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let answer = match &answer_file {
+        Some(path) => std::fs::read_to_string(path).map_err(|err| {
+            AppError::Platform(format!(
+                "`{}` finished without writing an answer: {err}",
+                cli.command
+            ))
+        }),
+        None => Ok(String::from_utf8_lossy(&finished.output.stdout).to_string()),
+    };
+    if let Some(path) = answer_file
+        && let Err(err) = std::fs::remove_file(&path)
+    {
+        log::warn!(
+            "could not remove the draft scratch file {}: {err}",
+            path.display()
+        );
+    }
+    answer
+}
+
+/// Whether a CLI that exited in time produced an answer worth reading.
+///
+/// A non-zero exit reports the tool's own last words, even when handing it the
+/// prompt also failed: a CLI that quits before reading stdin (not signed in,
+/// unknown flag) breaks the pipe as a side effect, and "broken pipe" tells the
+/// user nothing the CLI's message does not. A zero exit with the prompt only
+/// partly delivered is refused — that answer is to a question nobody asked.
+fn check_finished(command: &str, finished: &Finished) -> Result<()> {
+    if !finished.output.status.success() {
+        let stderr = String::from_utf8_lossy(&finished.output.stderr);
         return Err(AppError::Platform(format!(
-            "`{}` failed: {}",
-            cli.command,
+            "`{command}` failed: {}",
             last_meaningful_line(&stderr)
         )));
     }
-
-    let answer = match &answer_file {
-        Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
-        None => String::from_utf8_lossy(&output.stdout).to_string(),
-    };
-    if let Some(path) = answer_file {
-        let _ = std::fs::remove_file(path);
+    if let Err(err) = &finished.input {
+        return Err(AppError::Platform(format!(
+            "`{command}` exited before reading the whole prompt: {err}"
+        )));
     }
-    Ok(answer)
+    Ok(())
 }
 
 /// How often [`run_with_timeout`] looks at the child. Short enough that a fast
 /// answer is not held back noticeably, long enough to cost nothing over 180 s.
 const POLL: Duration = Duration::from_millis(50);
+
+/// A child that exited within its deadline, with everything it wrote.
+struct Finished {
+    output: Output,
+    /// Whether all of the input reached the child's stdin.
+    input: std::io::Result<()>,
+}
 
 /// Runs `command` with `input` on stdin, killing it at the deadline.
 ///
@@ -495,7 +527,7 @@ fn run_with_timeout(
     mut command: Command,
     input: &[u8],
     timeout: Duration,
-) -> std::io::Result<Option<Output>> {
+) -> std::io::Result<Option<Finished>> {
     let deadline = Instant::now() + timeout;
     let mut child = command
         .stdin(Stdio::piped())
@@ -503,14 +535,12 @@ fn run_with_timeout(
         .stderr(Stdio::piped())
         .spawn()?;
 
-    if let Some(mut stdin) = child.stdin.take() {
+    let written = child.stdin.take().map(|mut stdin| {
         let input = input.to_vec();
-        // A broken pipe here means the child exited before reading the prompt;
-        // its own error message is the useful one, so this is not raised.
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(&input);
-        });
-    }
+        // Dropping `stdin` when the write ends closes the pipe: the EOF that
+        // tells the CLI the prompt is complete.
+        in_background(move || stdin.write_all(&input))
+    });
     let stdout = child
         .stdout
         .take()
@@ -541,11 +571,23 @@ fn run_with_timeout(
             Err(_) => return Ok(None),
         }
     }
+    let input = match written {
+        Some(written) => {
+            match written.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(result) => result,
+                Err(_) => return Ok(None),
+            }
+        }
+        None => Ok(()),
+    };
     let [stdout, stderr] = captured;
-    Ok(Some(Output {
-        status,
-        stdout,
-        stderr,
+    Ok(Some(Finished {
+        output: Output {
+            status,
+            stdout,
+            stderr,
+        },
+        input,
     }))
 }
 
@@ -811,9 +853,61 @@ mod tests {
         let finished = run_with_timeout(command, b"the prompt", Duration::from_secs(10))
             .expect("spawns")
             .expect("finishes in time");
-        assert!(finished.status.success());
-        assert_eq!(finished.stdout, b"the prompt");
-        assert_eq!(finished.stderr, b"oops\n");
+        assert!(finished.output.status.success());
+        assert!(finished.input.is_ok());
+        assert_eq!(finished.output.stdout, b"the prompt");
+        assert_eq!(finished.output.stderr, b"oops\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_the_child_never_read_is_reported_not_dropped() {
+        // More than any pipe buffer holds, to a child that exits without reading.
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("echo 'Error: not signed in' >&2; exit 3");
+
+        let finished = run_with_timeout(command, &vec![b'x'; 1 << 20], Duration::from_secs(10))
+            .expect("spawns")
+            .expect("finishes in time");
+        assert_eq!(finished.output.status.code(), Some(3));
+        assert!(finished.input.is_err(), "the broken pipe was swallowed");
+    }
+
+    #[cfg(unix)]
+    fn finished(code: i32, input: std::io::Result<()>, stderr: &str) -> Finished {
+        use std::os::unix::process::ExitStatusExt;
+        Finished {
+            output: Output {
+                // A wait status carries the exit code in its second byte.
+                status: std::process::ExitStatus::from_raw(code << 8),
+                stdout: Vec::new(),
+                stderr: stderr.as_bytes().to_vec(),
+            },
+            input,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_cli_reports_its_own_words_over_the_broken_pipe() {
+        let broken = Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        let err = check_finished("claude", &finished(1, broken, "Error: not signed in\n"))
+            .expect_err("a non-zero exit fails");
+        let message = err.to_string();
+        assert!(message.contains("not signed in"), "{message}");
+        assert!(!message.to_lowercase().contains("broken pipe"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_succeeded_without_the_whole_prompt_is_not_trusted() {
+        let broken = Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        let err = check_finished("codex", &finished(0, broken, ""))
+            .expect_err("an answer to half a prompt is not an answer");
+        assert!(err.to_string().contains("prompt"), "{err}");
+        assert!(check_finished("codex", &finished(0, Ok(()), "")).is_ok());
     }
 
     #[test]
