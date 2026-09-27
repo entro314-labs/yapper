@@ -31,13 +31,27 @@ export async function resolveUpdateChannel(pref: string): Promise<UpdateChannel>
 
 /**
  * The releases host itself did not answer. Rust's `check_channel` (`src-tauri/src/update.rs`)
- * re-asks the releases repository whenever the updater plugin reports an unreadable manifest, and
- * stamps this marker when the repo is missing, private or unreachable — the plugin flattens both
- * cases into the same "Could not fetch a valid release JSON" string. A dead pipeline is NOT a
+ * re-asks the releases host whenever the updater plugin reports an unreadable manifest, and stamps
+ * this marker when the repo is missing, private or unreachable — the plugin flattens every non-2xx
+ * answer into the same "Could not fetch a valid release JSON" string. A dead pipeline is NOT a
  * pre-first-release state, so this has to be tested before {@link isNoReleaseYet} can absorb it.
  */
 function isUpdateSourceUnreachable(message: string): boolean {
   return /update source unreachable/i.test(message)
+}
+
+/**
+ * The channel has a release, but its `latest.json` is missing: the release pipeline is broken.
+ * Stamped by the same Rust classification; its message carries the 404, so it too must be tested
+ * before {@link isNoReleaseYet}.
+ */
+function isUpdateManifestMissing(message: string): boolean {
+  return /update manifest missing/i.test(message)
+}
+
+/** GitHub refused the manifest for now: a rate limit or a server error, not an empty channel. */
+function isUpdateServerUnavailable(message: string): boolean {
+  return /update server unavailable/i.test(message)
 }
 
 /**
@@ -76,6 +90,22 @@ export function describeUpdateError(message: string): UpdateErrorInfo {
       title: 'The update service is unreachable',
       detail:
         'Windbag could not reach its releases repository at all. Either this machine is offline, or the update pipeline is broken — this is not the same as there being nothing new.',
+      retryable: true,
+    }
+  }
+  if (isUpdateManifestMissing(lower)) {
+    return {
+      title: 'This release is missing its update manifest',
+      detail:
+        'A release is published on this channel without the latest.json Windbag updates from, so the update pipeline is broken — this is not the same as there being nothing new. Download the release from GitHub instead.',
+      retryable: true,
+    }
+  }
+  if (isUpdateServerUnavailable(lower)) {
+    return {
+      title: 'The update server is busy',
+      detail:
+        'GitHub is rate-limiting requests or having trouble right now. Try again in a few minutes.',
       retryable: true,
     }
   }

@@ -135,6 +135,14 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Changed
 
+- **Claude Code and Codex drafts run with no tools and no MCP servers.**
+  Claude's `--restricted` still let the model read and write files, search the
+  web and call every claude.ai connector, so a prompt injection in a selected
+  note could put local file contents into a draft. Both now run in an empty
+  per-draft folder, with the tool list confirmed empty in a live session.
+- **Codex drafting no longer reads `~/.codex/config.toml`.** It is the only way
+  to keep its MCP servers out; set the model and effort in Settings →
+  Assistant.
 - **A custom Bluesky client-metadata URL must be hosted on
   entro314-labs.github.io.** The app registers one callback scheme, derived from
   that host, so any other host is refused up front with an explanation instead
@@ -170,6 +178,24 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Fixed
 
+- **Assistant drafts are measured the way each destination measures them.**
+  Each draft shows its tightest destination as used/limit from the composer's
+  own check, instead of a raw string length no platform uses.
+- **A hung assistant CLI can no longer freeze Settings.** The version check that
+  decides which backends are available gives up after ten seconds.
+- **The assistant finds `claude` and `codex` when Windbag is opened from Finder,
+  the Dock or at login.** It asks your login shell for its PATH instead of using
+  the system's minimal one, so neither backend reports "not on PATH" in a
+  release build.
+- **An assistant that runs past its time limit is stopped**, rather than left
+  running in the background after the request gave up.
+- **An assistant that quits early says why**, with the CLI's own error, and an
+  answer to only part of the prompt is not used.
+- **Drafts are found even when the reply has brackets before them.** A preamble
+  like "[as requested]" no longer turns the whole reply into one draft, and a
+  draft missing its text is skipped instead of failing the batch.
+- **A missing update manifest or a GitHub rate limit no longer reads as
+  "Nothing published on this channel yet".** Settings says which it is.
 - **Reddit link posts can be saved.** A post with a title and a link but no body
   was always refused, although that is exactly how a Reddit link submission
   works. A link now counts as content on Reddit and Facebook.

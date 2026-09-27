@@ -9,7 +9,13 @@ import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { useAnimatedIcon } from '@/lib/animated-icon'
-import { useAiAvailability, useNotes, useSettings, useSuggestPosts } from '@/lib/query'
+import {
+  useAiAvailability,
+  useCheckPost,
+  useNotes,
+  useSettings,
+  useSuggestPosts,
+} from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
 import type { Suggestion } from '@/lib/tauri/types'
 import { cn } from '@/lib/utils'
@@ -223,11 +229,45 @@ export function SuggestPanel({
         >
           <span className="text-sm leading-relaxed whitespace-pre-wrap">{draft.body}</span>
           <span className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span className="tabular-nums">{draft.body.length} chars</span>
+            <DraftFit draft={draft} accountIds={accountIds} />
             {draft.rationale ? <span className="truncate italic">{draft.rationale}</span> : null}
           </span>
         </button>
       ))}
     </aside>
   )
+}
+
+/**
+ * How a draft sits against the picked destinations, counted by the same `check_post` the composer
+ * uses — graphemes on Bluesky, weighted characters on X, bytes for Threads' emoji — rather than the
+ * UTF-16 length a string reports here. Shows the tightest destination, or the first it breaks.
+ */
+function DraftFit({ draft, accountIds }: { draft: Suggestion; accountIds: number[] }) {
+  const targets = React.useMemo(
+    () => accountIds.map((accountId) => ({ accountId, options: {} })),
+    [accountIds],
+  )
+  const check = useCheckPost(draft.body, draft.title ?? null, null, [], targets)
+  if (accountIds.length === 0 || !check.data) return null
+  const over = check.data.find((result) => result.error)
+  if (over) {
+    // An over-limit draft shows its count; anything else (Instagram's missing
+    // image, Reddit's missing title) is the destination's own message.
+    return (
+      <span className="truncate text-destructive tabular-nums">
+        {over.used > over.limit ? `${over.used}/${over.limit} · ${over.handle}` : over.error}
+      </span>
+    )
+  }
+  const tightest = check.data.reduce<(typeof check.data)[number] | null>(
+    (worst, result) =>
+      worst === null || result.used / result.limit > worst.used / worst.limit ? result : worst,
+    null,
+  )
+  return tightest ? (
+    <span className="tabular-nums">
+      {tightest.used}/{tightest.limit} · {tightest.handle}
+    </span>
+  ) : null
 }
