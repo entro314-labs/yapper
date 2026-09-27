@@ -159,6 +159,9 @@ All notable changes to Windbag are documented here. The format follows
   span 80px from the window edge, and at 56px the green one straddled the seam
   between the rail and the content pane. In fullscreen, where the OS hides them,
   the wordmark stops reserving the gap.
+- **Changing the window material replaces it instead of layering it.** Each
+  switch on macOS added another frosted layer over the previous one, so moving
+  between Standard and Strong a few times left several materials stacked.
 - **A zero grace window no longer marks every post missed.** The missed-post
   check runs before each publishing pass, so with the window at 0 a post was
   marked missed in the pass that should have sent it — "Post now" included. The
