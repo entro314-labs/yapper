@@ -8,6 +8,12 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Added
 
+- **Engagement bars and top posts drill down too.** A platform's engagement bar
+  opens its measured posts; a top-post row opens the post in Windbag as a new
+  draft, beside the link to the live post.
+- **The stats drilldown comes to you.** Clicking a bar or cell scrolls the post
+  list into view and focuses it; rows carry readable status labels, and
+  published posts open as a new draft.
 - **Duplicate a post as a new draft.** Sent posts in the queue and published
   posts on the calendar open as a copy in the composer — text, destinations,
   options and attachments. Saving creates a new post; the original is never
@@ -182,6 +188,27 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Fixed
 
+- **The delivery chart's "Failed" series is no longer always zero.** Failed
+  destinations are drawn on the day the date filter dates them by.
+- **An empty date range no longer hides the stats filters.** The first-run
+  screen appears only when there are no posts at all; a filtered view with
+  nothing in it keeps its filters and says so.
+- **Engagement a platform does not report shows as "—", not 0.** Bluesky and
+  Mastodon no longer show "Impressions 0", and the screen names which platforms
+  do not report each figure. The agent door's `get_stats` says `null` too.
+- **A refresh that fails partway says what it did** — updated, skipped and
+  failed destinations, and the X reads already billed — instead of "Updated 0".
+- **The X cost prompt cannot be skipped.** If the cost cannot be read, the
+  refresh stops with that error instead of spending without asking.
+- **Stats filters survive leaving the screen**, and every connected platform is
+  always offered.
+- **The agent door negotiates its protocol version**, validates `get_stats`
+  filters (an offset date selects the right instant; an unknown platform is an
+  error naming the valid ones; `accountIds` filters), lists upcoming posts
+  first, and answers an unknown tool with a protocol error.
+- **The Meta ads tools are listed only when they can work** — a Facebook Page
+  connected with the ads scope — decided without reading the keychain, and the
+  ads client completes Meta's MCP handshake.
 - **Assistant drafts are measured the way each destination measures them.**
   Each draft shows its tightest destination as used/limit from the composer's
   own check, instead of a raw string length no platform uses.
