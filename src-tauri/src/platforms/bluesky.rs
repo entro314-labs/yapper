@@ -28,12 +28,25 @@ use super::{
     PlatformId, PlatformInfo, PublishRequest, Published,
 };
 use crate::error::{AppError, Result, from_status};
+use crate::platforms::MediaRule;
 use crate::{atproto, dpop, http};
 
 pub struct Bluesky;
 
 const DEFAULT_PDS: &str = "https://bsky.social";
 const COLLECTION: &str = "app.bsky.feed.post";
+
+/// `app.bsky.embed.images` takes any `image/*` blob up to 2,000,000 bytes:
+/// <https://github.com/bluesky-social/atproto/blob/main/lexicons/app/bsky/embed/images.json>
+/// Video is a different embed (`app.bsky.embed.video`) behind its own upload
+/// service, which this adapter does not implement — so an MP4 is refused here
+/// instead of being sent into an image embed.
+const MEDIA: &[MediaRule] = &[
+    MediaRule::up_to("image/png", 2_000_000),
+    MediaRule::up_to("image/jpeg", 2_000_000),
+    MediaRule::up_to("image/gif", 2_000_000),
+    MediaRule::up_to("image/webp", 2_000_000),
+];
 
 impl Platform for Bluesky {
     fn info(&self) -> PlatformInfo {
@@ -44,6 +57,7 @@ impl Platform for Bluesky {
             limits: Limits {
                 max_chars: 300,
                 max_media: 4,
+                accepts: MEDIA,
                 supports_alt_text: true,
                 requires_title: false,
                 requires_media: false,

@@ -18,11 +18,30 @@ use super::{
 };
 use crate::error::{AppError, Result, from_status};
 use crate::oauth::{self, OAuthConfig, REDIRECT_URI};
+use crate::platforms::{MB, MediaRule};
 use crate::{http, secrets};
 
 pub struct Mastodon;
 
 const SCOPES: &str = "read:accounts write:statuses write:media";
+
+/// Mastodon's defaults: images up to 16 MB, one video up to 99 MB
+/// (<https://docs.joinmastodon.org/user/posting/#attachments>). A server can
+/// change both in its own configuration; these are what almost all of them
+/// run. A video beside images is refused by the server
+/// (`media_attachments.validations.images_and_video` in
+/// <https://github.com/mastodon/mastodon/blob/main/app/services/post_status_service.rb>).
+/// An animated GIF is transcoded to a looping video, so it gets the video
+/// size limit (`larger_media_format?` in
+/// <https://github.com/mastodon/mastodon/blob/main/app/models/media_attachment.rb>)
+/// but may still sit beside images.
+const MEDIA: &[MediaRule] = &[
+    MediaRule::up_to("image/png", 16 * MB),
+    MediaRule::up_to("image/jpeg", 16 * MB),
+    MediaRule::up_to("image/gif", 99 * MB),
+    MediaRule::up_to("image/webp", 16 * MB),
+    MediaRule::up_to("video/mp4", 99 * MB).alone(),
+];
 
 impl Platform for Mastodon {
     fn info(&self) -> PlatformInfo {
@@ -33,6 +52,7 @@ impl Platform for Mastodon {
             limits: Limits {
                 max_chars: 500,
                 max_media: 4,
+                accepts: MEDIA,
                 supports_alt_text: true,
                 requires_title: false,
                 requires_media: false,

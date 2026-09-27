@@ -32,10 +32,26 @@ export interface FieldSpec {
   choices: string[]
 }
 
+/** `platforms::MediaRule` — one attachment type a platform takes. */
+export interface MediaRule {
+  mime: string
+  maxBytes: number
+  /** Must be the only attachment on its post (a video on X, Mastodon or Facebook; a GIF on X). */
+  alone: boolean
+}
+
+/** `platforms::MediaSpec` — an attachment as validation sees it: its type and size. */
+export interface MediaSpec {
+  mime: string
+  bytes: number
+}
+
 /** `platforms::Limits` */
 export interface Limits {
   maxChars: number
   maxMedia: number
+  /** Every attachment type the adapter can post, with the platform's documented size cap. */
+  accepts: MediaRule[]
   supportsAltText: boolean
   requiresTitle: boolean
   /** Instagram: a caption is never a post by itself, so the composer refuses one with no media. */

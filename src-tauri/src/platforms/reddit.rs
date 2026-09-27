@@ -37,6 +37,7 @@ impl Platform for Reddit {
                 // Image submissions go through a separate upload-lease flow that
                 // Windbag does not implement yet; a link post covers the case.
                 max_media: 0,
+                accepts: &[],
                 supports_alt_text: false,
                 requires_title: true,
                 requires_media: false,

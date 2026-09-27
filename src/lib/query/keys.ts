@@ -1,3 +1,5 @@
+import type { MediaSpec } from '@/lib/tauri/types'
+
 /**
  * Centralised query keys.
  *
@@ -30,9 +32,9 @@ export const queryKeys = {
       body: string,
       title: string | null,
       link: string | null,
-      mediaCount: number,
+      media: MediaSpec[],
       accountIds: number[],
-    ) => [...queryKeys.queue.root, 'check', body, title, link, mediaCount, accountIds] as const,
+    ) => [...queryKeys.queue.root, 'check', body, title, link, media, accountIds] as const,
   },
   notes: {
     root: ['notes'] as const,

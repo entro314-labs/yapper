@@ -8,6 +8,7 @@ import type {
   AiAvailability,
   AppCredentialsView,
   Attempt,
+  MediaSpec,
   PlatformId,
   PlatformInfo,
   PostDetail,
@@ -111,17 +112,17 @@ export function useCheckPost(
   body: string,
   title: string | null,
   link: string | null,
-  mediaCount: number,
+  media: MediaSpec[],
   accountIds: number[],
 ) {
   return useQuery({
-    queryKey: queryKeys.queue.check(body, title, link, mediaCount, accountIds),
+    queryKey: queryKeys.queue.check(body, title, link, media, accountIds),
     queryFn: async () =>
       invokeCommand<TargetCheck[]>(IPC_COMMANDS.checkPost, {
         body,
         title,
         link,
-        mediaCount,
+        media,
         accountIds,
       }),
     enabled: accountIds.length > 0,

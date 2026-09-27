@@ -20,7 +20,7 @@ use tauri::{AppHandle, Emitter};
 use crate::db::{self, Db, DueTarget, POST_MISSED, POST_SCHEDULED};
 use crate::error::{AppError, Result};
 use crate::media;
-use crate::platforms::{self, PublishRequest, Published};
+use crate::platforms::{self, MediaSpec, PublishRequest, Published};
 
 /// How often the worker looks for work. Twenty seconds is well inside the
 /// smallest scheduling granularity the UI offers (one minute) while costing a
@@ -195,13 +195,22 @@ fn publish_one(database: &Arc<Db>, item: &DueTarget) -> Result<Published> {
     // Validated again here, not only in the composer: the post may have been
     // edited after it was scheduled, and a limit that was fine then may not be
     // now (a Mastodon instance can lower its own).
+    // Judged on the bytes just read, not the size recorded at save: the file
+    // on disk is what goes out, and it may have been replaced since.
+    let specs: Vec<MediaSpec> = media
+        .iter()
+        .map(|item| MediaSpec {
+            mime: item.mime.clone(),
+            bytes: item.bytes.len() as u64,
+        })
+        .collect();
     let limit = effective_char_limit(account, adapter);
     platforms::validate(
         account.platform,
         &item.post.body,
         item.post.title.as_deref(),
         item.post.link.as_deref(),
-        media.len(),
+        &specs,
         limit,
     )?;
 

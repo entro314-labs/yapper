@@ -31,6 +31,7 @@ use super::{
 use crate::error::{AppError, Result, from_status};
 use crate::http;
 use crate::oauth::{self, OAuthConfig, REDIRECT_URI};
+use crate::platforms::{MB, MediaRule};
 
 pub struct X;
 
@@ -41,6 +42,18 @@ const SCOPES: &str = "tweet.read tweet.write users.read media.write offline.acce
 /// X caps an APPEND segment at 5 MB.
 const SEGMENT_BYTES: usize = 4 * 1024 * 1024;
 
+/// Images up to 5 MB, a GIF up to 15 MB, a post video up to 8 GB
+/// (<https://docs.x.com/x-api/media/quickstart/media-upload-chunked>); a post
+/// carries up to four photos, OR one GIF, OR one video
+/// (<https://docs.x.com/x-api/media/quickstart/best-practices>).
+const MEDIA: &[MediaRule] = &[
+    MediaRule::up_to("image/png", 5 * MB),
+    MediaRule::up_to("image/jpeg", 5 * MB),
+    MediaRule::up_to("image/webp", 5 * MB),
+    MediaRule::up_to("image/gif", 15 * MB).alone(),
+    MediaRule::up_to("video/mp4", 8 * 1024 * MB).alone(),
+];
+
 impl Platform for X {
     fn info(&self) -> PlatformInfo {
         PlatformInfo {
@@ -50,6 +63,7 @@ impl Platform for X {
             limits: Limits {
                 max_chars: 280,
                 max_media: 4,
+                accepts: MEDIA,
                 supports_alt_text: true,
                 requires_title: false,
                 requires_media: false,

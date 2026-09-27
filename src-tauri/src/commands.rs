@@ -13,7 +13,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::ai::{self, Availability, Backend, DraftRequest, Suggestion};
 use crate::db::{self, Account, Attempt, Db, MediaInput, Note, PostDetail};
 use crate::error::{AppError, Result};
-use crate::platforms::{self, AppCredentials, ConnectInput, PlatformId, PlatformInfo};
+use crate::platforms::{self, AppCredentials, ConnectInput, MediaSpec, PlatformId, PlatformInfo};
 use crate::scheduler::{
     self, EVENT_ACCOUNTS_CHANGED, EVENT_QUEUE_CHANGED, META_GRACE_MINUTES, META_MISSED_POLICY,
     MissedPolicy, Scheduler,
@@ -349,6 +349,13 @@ pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInpu
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let specs: Vec<MediaSpec> = media
+        .iter()
+        .map(|item| MediaSpec {
+            mime: item.mime.clone(),
+            bytes: item.bytes.unsigned_abs(),
+        })
+        .collect();
     for target in &input.targets {
         let account = state.db.get_account(target.account_id)?;
         let adapter = platforms::adapter(account.platform);
@@ -357,7 +364,7 @@ pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInpu
             &input.body,
             title,
             link,
-            media.len(),
+            &specs,
             scheduler::effective_char_limit(&account, adapter),
         )?;
     }
@@ -469,7 +476,7 @@ pub fn check_post(
     body: String,
     title: Option<String>,
     link: Option<String>,
-    media_count: usize,
+    media: Vec<MediaSpec>,
     account_ids: Vec<i64>,
 ) -> Result<Vec<TargetCheck>> {
     let title = title
@@ -486,10 +493,9 @@ pub fn check_post(
             let account = state.db.get_account(account_id)?;
             let adapter = platforms::adapter(account.platform);
             let limit = scheduler::effective_char_limit(&account, adapter);
-            let error =
-                platforms::validate(account.platform, &body, title, link, media_count, limit)
-                    .err()
-                    .map(|err| err.to_string());
+            let error = platforms::validate(account.platform, &body, title, link, &media, limit)
+                .err()
+                .map(|err| err.to_string());
             Ok(TargetCheck {
                 account_id,
                 platform: account.platform,

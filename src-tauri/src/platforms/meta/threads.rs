@@ -25,6 +25,7 @@ use crate::platforms::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, MediaItem,
     Platform, PlatformId, PlatformInfo, PublishRequest, Published,
 };
+use crate::platforms::{MB, MediaRule};
 use crate::webhost;
 
 pub struct Threads;
@@ -44,6 +45,14 @@ const LABEL: &str = "Threads";
 const POLL_TRIES: usize = 12;
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// JPEG and PNG up to 8 MB, MP4 up to 1 GB, mixed freely in a carousel:
+/// <https://developers.facebook.com/docs/threads/overview>
+const MEDIA: &[MediaRule] = &[
+    MediaRule::up_to("image/png", 8 * MB),
+    MediaRule::up_to("image/jpeg", 8 * MB),
+    MediaRule::up_to("video/mp4", 1024 * MB),
+];
+
 impl Platform for Threads {
     fn info(&self) -> PlatformInfo {
         PlatformInfo {
@@ -55,6 +64,7 @@ impl Platform for Threads {
                 // A carousel takes 2–20; a single post takes 1. The cap is the
                 // carousel's, and `publish` picks the shape from the count.
                 max_media: 20,
+                accepts: MEDIA,
                 supports_alt_text: true,
                 requires_title: false,
                 requires_media: false,

@@ -23,6 +23,7 @@ use crate::platforms::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, MediaItem,
     Platform, PlatformId, PlatformInfo, PublishRequest, Published,
 };
+use crate::platforms::{MB, MediaRule};
 use crate::webhost;
 
 pub struct Instagram;
@@ -41,6 +42,14 @@ const LABEL: &str = "Instagram";
 const POLL_TRIES: usize = 20;
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Feed images are JPEG only, up to 8 MB; a video (posted as a reel) up to
+/// 300 MB. Carousels mix the two:
+/// <https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/media>
+const MEDIA: &[MediaRule] = &[
+    MediaRule::up_to("image/jpeg", 8 * MB),
+    MediaRule::up_to("video/mp4", 300 * MB),
+];
+
 impl Platform for Instagram {
     fn info(&self) -> PlatformInfo {
         PlatformInfo {
@@ -50,6 +59,7 @@ impl Platform for Instagram {
             limits: Limits {
                 max_chars: 2200,
                 max_media: 10,
+                accepts: MEDIA,
                 // The caption's `alt_text` is not offered on the container for a
                 // feed post, so promising it here would be a lie in the composer.
                 supports_alt_text: false,
