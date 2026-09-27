@@ -1,4 +1,4 @@
-import { IconTrash, IconUsers } from '@tabler/icons-react'
+import { IconArrowDown, IconArrowUp, IconFileOff, IconTrash, IconUsers } from '@tabler/icons-react'
 import { Link, createFileRoute, useNavigate } from '@tanstack/react-router'
 import { open } from '@tauri-apps/plugin-dialog'
 import * as React from 'react'
@@ -8,11 +8,16 @@ import { SuggestPanel } from '@/components/compose/suggest-panel'
 import { AttachFileIcon } from '@/components/icons/attach-file'
 import { SendIcon } from '@/components/icons/send'
 import { SparklesIcon } from '@/components/icons/sparkles'
+import { EmptyState } from '@/components/shell/empty-state'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Kbd } from '@/components/ui/kbd'
 import { Select } from '@/components/ui/select'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { useAnimatedIcon } from '@/lib/animated-icon'
+import { IS_MACOS } from '@/lib/chrome'
 import { brandOf } from '@/lib/platform-brand'
 import {
   useAccounts,
@@ -26,20 +31,22 @@ import {
   useSettings,
 } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
-import type { PlatformInfo, Suggestion } from '@/lib/tauri/types'
+import type { PlatformInfo, PostDetail, Suggestion } from '@/lib/tauri/types'
+import { useUnsavedGuard } from '@/lib/unsaved'
 import { cn, formatBytes, fromLocalInputValue, toLocalInputValue } from '@/lib/utils'
 
 export const Route = createFileRoute('/compose')({
-  component: ComposeScreen,
+  component: ComposeRoute,
   validateSearch: (
     search: Record<string, unknown>,
-  ): { id?: number; noteId?: number; suggest?: boolean } => {
+  ): { id?: number; from?: number; noteId?: number; suggest?: boolean } => {
     const positive = (value: unknown) => {
       const parsed = Number(value)
       return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
     }
     return {
       ...(positive(search.id) === undefined ? {} : { id: positive(search.id) }),
+      ...(positive(search.from) === undefined ? {} : { from: positive(search.from) }),
       ...(positive(search.noteId) === undefined ? {} : { noteId: positive(search.noteId) }),
       ...(search.suggest ? { suggest: true } : {}),
     }
@@ -53,8 +60,62 @@ interface Attachment {
   bytes: number
 }
 
+/** Everything the composer edits — what a post seeds, and what "unsaved" is measured against. */
+interface Form {
+  body: string
+  title: string
+  link: string
+  when: string
+  selected: number[]
+  options: Record<number, Record<string, string>>
+  media: Attachment[]
+}
+
+const EMPTY_FORM: Form = {
+  body: '',
+  title: '',
+  link: '',
+  when: '',
+  selected: [],
+  options: {},
+  media: [],
+}
+
+/**
+ * The form a stored post opens as. `keepTime` is false for a copy, which starts as a draft: the
+ * original's time is the original's, and on a published post it is already in the past.
+ */
+function formFromPost(post: PostDetail, keepTime: boolean): Form {
+  return {
+    body: post.body,
+    title: post.title ?? '',
+    link: post.link ?? '',
+    when: keepTime && post.scheduledAt ? toLocalInputValue(new Date(post.scheduledAt)) : '',
+    selected: post.targets.map((target) => target.accountId),
+    options: Object.fromEntries(
+      post.targets.map((target) => [target.accountId, target.options ?? {}]),
+    ),
+    media: post.media.map((item) => ({
+      path: item.path,
+      altText: item.altText ?? '',
+      mime: item.mime,
+      bytes: item.bytes,
+    })),
+  }
+}
+
+/**
+ * A different post, copy or note is a different form, so the screen is remounted per visit. Staying
+ * mounted would carry one visit's edits into the next — leaving an edit for a blank compose, even
+ * after "Discard", would keep the old text and save it as a new post.
+ */
+function ComposeRoute() {
+  const { id, from, noteId } = Route.useSearch()
+  return <ComposeScreen key={`${id ?? ''}:${from ?? ''}:${noteId ?? ''}`} />
+}
+
 function ComposeScreen() {
-  const { id, noteId, suggest: openSuggest } = Route.useSearch()
+  const { id, from, noteId, suggest: openSuggest } = Route.useSearch()
   const navigate = useNavigate()
   const accounts = useAccounts()
   const platforms = usePlatforms()
@@ -67,9 +128,13 @@ function ComposeScreen() {
   const [assistantRef, assistantHover] = useAnimatedIcon()
   const [sendRef, sendHover] = useAnimatedIcon()
 
-  const editing = React.useMemo(
-    () => (id ? posts.data?.find((post) => post.id === id) : undefined),
-    [id, posts.data],
+  // `from` opens a COPY: the source seeds the form, but the post stays
+  // unsaved until the user saves it as a new one — nothing ever writes back
+  // to the original, which is what makes this safe for a published post.
+  const sourceId = id ?? from
+  const source = React.useMemo(
+    () => (sourceId ? posts.data?.find((post) => post.id === sourceId) : undefined),
+    [sourceId, posts.data],
   )
 
   const [body, setBody] = React.useState('')
@@ -83,51 +148,75 @@ function ComposeScreen() {
   const [suggesting, setSuggesting] = React.useState(Boolean(openSuggest))
   const [seededNote, setSeededNote] = React.useState<number | null>(null)
 
-  // Loads an existing post exactly once per id. A plain effect on `editing`
+  // Loads an existing post exactly once per id. A plain effect on `source`
   // would re-seed the form every time the queue refetched and throw away
   // whatever was being typed.
   React.useEffect(() => {
-    if (!editing || loadedId === editing.id) return
-    setBody(editing.body)
-    setTitle(editing.title ?? '')
-    setLink(editing.link ?? '')
-    setWhen(editing.scheduledAt ? toLocalInputValue(new Date(editing.scheduledAt)) : '')
-    setSelected(editing.targets.map((target) => target.accountId))
-    setOptions(
-      Object.fromEntries(editing.targets.map((target) => [target.accountId, target.options ?? {}])),
-    )
-    setMedia(
-      editing.media.map((item) => ({
-        path: item.path,
-        altText: item.altText ?? '',
-        mime: item.mime,
-        bytes: item.bytes,
-      })),
-    )
-    setLoadedId(editing.id)
-  }, [editing, loadedId])
+    if (!source || loadedId === source.id) return
+    const form = formFromPost(source, id !== undefined)
+    setBody(form.body)
+    setTitle(form.title)
+    setLink(form.link)
+    setWhen(form.when)
+    setSelected(form.selected)
+    setOptions(form.options)
+    setMedia(form.media)
+    setLoadedId(source.id)
+  }, [source, loadedId, id])
 
   // Arriving from a note: seed the body once, so "Turn into a post" does not
   // mean retyping. Only when composing something NEW — an existing post's own
   // text must never be replaced by a note's.
   React.useEffect(() => {
-    if (id !== undefined || noteId === undefined || seededNote === noteId) return
+    if (sourceId !== undefined || noteId === undefined || seededNote === noteId) return
     const note = notes.data?.find((candidate) => candidate.id === noteId)
     if (!note) return
     setSeededNote(noteId)
     if (openSuggest) return
     setTitle((current) => current || note.title)
     setBody((current) => current || note.body)
-  }, [id, noteId, seededNote, notes.data, openSuggest])
+  }, [sourceId, noteId, seededNote, notes.data, openSuggest])
 
-  const checks = useCheckPost(body, title || null, media.length, selected)
+  // Unsaved means "differs from what this visit opened with" — the stored post,
+  // the note it was seeded from, or nothing — derived rather than tracked, so
+  // no edit path can forget to mark the form dirty.
+  const seedNote =
+    sourceId === undefined && noteId !== undefined && !openSuggest
+      ? notes.data?.find((note) => note.id === noteId)
+      : undefined
+  const pristine: Form = source
+    ? formFromPost(source, id !== undefined)
+    : seedNote
+      ? { ...EMPTY_FORM, title: seedNote.title, body: seedNote.body }
+      : EMPTY_FORM
+  const edited: Form = { body, title, link, when, selected, options, media }
+  const dirty = JSON.stringify(edited) !== JSON.stringify(pristine)
+  const { allowNextNavigation } = useUnsavedGuard(dirty, 'this post')
+
+  // Checked with the same options that will be saved: a required subreddit or
+  // an over-long content warning is an error here, not at publish time.
+  const targets = React.useMemo(
+    () => selected.map((accountId) => ({ accountId, options: options[accountId] ?? {} })),
+    [selected, options],
+  )
+  const checks = useCheckPost(
+    body,
+    title || null,
+    link.trim() || null,
+    media.map(({ mime, bytes }) => ({ mime, bytes })),
+    targets,
+  )
   const platformById = React.useMemo(
     () => new Map((platforms.data ?? []).map((info) => [info.id, info])),
     [platforms.data],
   )
 
   const blocking = checks.data?.filter((check) => check.error) ?? []
-  const canSave = selected.length > 0 && blocking.length === 0
+  // Only a verdict on what is on screen NOW can unlock saving. While a new
+  // check runs, the previous one is kept as placeholder data for the counters —
+  // and its "fits" must not let an edit that does not fit through.
+  const checked = checks.isSuccess && !checks.isPlaceholderData
+  const canSave = selected.length > 0 && checked && blocking.length === 0
 
   const collect = React.useCallback(
     () => ({
@@ -136,35 +225,54 @@ function ComposeScreen() {
       title: title.trim() || null,
       link: link.trim() || null,
       scheduledAt: when ? fromLocalInputValue(when) : null,
-      targets: selected.map((accountId) => ({
-        accountId,
-        options: options[accountId] ?? {},
-      })),
+      targets,
       media: media.map((item) => ({
         path: item.path,
         altText: item.altText.trim() || null,
       })),
     }),
-    [id, body, title, link, when, selected, options, media],
+    [id, body, title, link, when, targets, media],
   )
 
   const save = React.useCallback(
     async (thenPublish: boolean) => {
       try {
-        const savedId = await savePost.mutateAsync(collect())
+        // "Post now" sends at once whatever the time field says, so the time is
+        // not saved with it — a stale past time would otherwise be refused.
+        const input = collect()
+        const savedId = await savePost.mutateAsync(
+          thenPublish ? { ...input, scheduledAt: null } : input,
+        )
         if (thenPublish) {
           await publishNow.mutateAsync(savedId)
           toast.success('Sending now')
         } else {
           toast.success(when ? 'Scheduled' : 'Saved as a draft')
         }
+        allowNextNavigation()
         void navigate({ to: '/' })
       } catch (err) {
         toast.error(humanMessage(err))
       }
     },
-    [collect, savePost, publishNow, navigate, when],
+    [collect, savePost, publishNow, navigate, when, allowNextNavigation],
   )
+
+  // Cmd/Ctrl+Enter is the Schedule / Save draft button, behind the same guard.
+  // Never "Post now": a keystroke that publishes immediately is too easy to
+  // hit while still writing.
+  const canSubmit = canSave && !savePost.isPending
+  React.useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return
+      event.preventDefault()
+      if (canSubmit) void save(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [canSubmit, save])
 
   const attach = React.useCallback(async () => {
     const picked = await open({
@@ -209,6 +317,43 @@ function ComposeScreen() {
     setSuggesting(false)
   }, [])
 
+  // Only the reads this visit actually depends on: the queue matters when a
+  // post is being opened, the notes when one is being drafted from.
+  const reads = [
+    accounts,
+    platforms,
+    ...(sourceId === undefined ? [] : [posts]),
+    ...(noteId === undefined ? [] : [notes]),
+  ]
+  if (reads.some((query) => query.isError)) {
+    return (
+      <QueryErrorState
+        what={
+          id !== undefined ? 'this post' : from !== undefined ? 'the post to copy' : 'the composer'
+        }
+        queries={reads}
+      />
+    )
+  }
+
+  // An edit opened before the queue arrives would otherwise show an empty
+  // form, indistinguishable from the post having no text.
+  if (sourceId !== undefined && !source) {
+    return posts.isLoading ? (
+      <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4">
+        <Skeleton className="h-52 w-full rounded-lg" />
+        <Skeleton className="h-8 w-full rounded-md" />
+      </div>
+    ) : (
+      <EmptyState
+        icon={IconFileOff}
+        title="This post no longer exists"
+        description={`It was deleted from the queue, so there is nothing here to ${id === undefined ? 'copy' : 'edit'}.`}
+        action={<Button render={<Link to="/" />}>Back to the queue</Button>}
+      />
+    )
+  }
+
   if (accounts.data?.length === 0) {
     return (
       <div className="grid h-full place-items-center px-6 text-center">
@@ -240,30 +385,6 @@ function ComposeScreen() {
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4">
-      {suggesting ? (
-        <SuggestPanel
-          accountIds={selected}
-          {...(noteId === undefined ? {} : { initialNoteId: noteId })}
-          onApply={applySuggestion}
-          onClose={() => {
-            setSuggesting(false)
-          }}
-        />
-      ) : assistantOn ? (
-        <Button
-          size="sm"
-          variant="outline"
-          className="self-start"
-          onClick={() => {
-            setSuggesting(true)
-          }}
-          {...assistantHover}
-        >
-          <SparklesIcon ref={assistantRef} data-icon="inline-start" />
-          Draft with the assistant
-        </Button>
-      ) : null}
-
       {needsTitle ? (
         <Input
           value={title}
@@ -351,6 +472,16 @@ function ComposeScreen() {
             current.map((item) => (item.path === path ? { ...item, altText: value } : item)),
           )
         }}
+        onMove={(index, delta) => {
+          // Array order IS the saved order: save_post writes each item's
+          // position from its index, which is how a carousel is sequenced.
+          setMedia((current) => {
+            const next = [...current]
+            const [item] = next.splice(index, 1)
+            if (item) next.splice(index + delta, 0, item)
+            return next
+          })
+        }}
       />
 
       <Destinations
@@ -371,6 +502,34 @@ function ComposeScreen() {
           }))
         }}
       />
+
+      {/* Below Destinations, not at the top: drafts are written to the picked
+          destinations' limits, so the picker has to come first. At the top, a
+          draft arriving from a note opened on "Pick destinations first" with
+          the picker out of sight below it. */}
+      {suggesting ? (
+        <SuggestPanel
+          accountIds={selected}
+          {...(noteId === undefined ? {} : { initialNoteId: noteId })}
+          onApply={applySuggestion}
+          onClose={() => {
+            setSuggesting(false)
+          }}
+        />
+      ) : assistantOn ? (
+        <Button
+          size="sm"
+          variant="outline"
+          className="self-start"
+          onClick={() => {
+            setSuggesting(true)
+          }}
+          {...assistantHover}
+        >
+          <SparklesIcon ref={assistantRef} data-icon="inline-start" />
+          Draft with the assistant
+        </Button>
+      ) : null}
 
       <div className="flex flex-wrap items-center gap-2 border-t border-border/50 pt-4">
         <label htmlFor="scheduled-at" className="text-xs text-muted-foreground">
@@ -393,9 +552,11 @@ function ComposeScreen() {
         </span>
 
         <div className="ml-auto flex items-center gap-2">
+          <Kbd aria-hidden>{IS_MACOS ? '⌘↵' : 'Ctrl+↵'}</Kbd>
           <Button
             variant="outline"
-            disabled={!canSave || savePost.isPending}
+            disabled={!canSubmit}
+            aria-keyshortcuts={IS_MACOS ? 'Meta+Enter' : 'Control+Enter'}
             onClick={() => {
               void save(false)
             }}
@@ -423,13 +584,31 @@ function AttachmentList({
   onAdd,
   onRemove,
   onAlt,
+  onMove,
 }: {
   media: Attachment[]
   onAdd: () => void
   onRemove: (path: string) => void
   onAlt: (path: string, value: string) => void
+  onMove: (index: number, delta: -1 | 1) => void
 }) {
   const [attachRef, attachHover] = useAnimatedIcon()
+  const moveButtons = React.useRef(new Map<string, HTMLButtonElement>())
+  const refocus = React.useRef<{ path: string; delta: -1 | 1 } | null>(null)
+
+  // Keeps the keyboard on the item that moved. Reordering can detach the
+  // focused row from the DOM, and once it reaches an end its button in that
+  // direction is disabled, so focus falls back to the other one.
+  React.useEffect(() => {
+    const target = refocus.current
+    if (!target) return
+    refocus.current = null
+    const same = moveButtons.current.get(`${target.delta}:${target.path}`)
+    const other = moveButtons.current.get(`${-target.delta}:${target.path}`)
+    const button = same && !same.disabled ? same : other
+    button?.focus()
+  }, [media])
+
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2">
@@ -444,7 +623,7 @@ function AttachmentList({
         ) : null}
       </div>
 
-      {media.map((item) => (
+      {media.map((item, index) => (
         <div
           key={item.path}
           className="flex items-center gap-2 rounded-md border border-border/60 bg-card/50 px-2.5 py-2"
@@ -467,6 +646,28 @@ function AttachmentList({
             aria-label={`Alt text for ${item.path}`}
             className="h-7 flex-1 text-xs"
           />
+          {media.length > 1
+            ? ([-1, 1] as const).map((delta) => (
+                <Button
+                  key={delta}
+                  ref={(element: HTMLButtonElement | null) => {
+                    const key = `${delta}:${item.path}`
+                    if (element) moveButtons.current.set(key, element)
+                    else moveButtons.current.delete(key)
+                  }}
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label={`Move ${item.path.split('/').pop() ?? ''} ${delta < 0 ? 'up' : 'down'}`}
+                  disabled={delta < 0 ? index === 0 : index === media.length - 1}
+                  onClick={() => {
+                    refocus.current = { path: item.path, delta }
+                    onMove(index, delta)
+                  }}
+                >
+                  {delta < 0 ? <IconArrowUp /> : <IconArrowDown />}
+                </Button>
+              ))
+            : null}
           <Button
             size="icon-xs"
             variant="ghost"
@@ -514,7 +715,10 @@ function Destinations({
               key={account.id}
               type="button"
               aria-pressed={on}
-              disabled={stale}
+              // A stale account cannot be ADDED, but one already picked (an
+              // older post, a copy) must stay removable, or the post is stuck
+              // aimed at a destination that cannot take it.
+              disabled={stale && !on}
               title={stale ? 'This account needs reconnecting before it can post' : undefined}
               onClick={() => {
                 onToggle(account.id)
@@ -524,7 +728,8 @@ function Destinations({
                 on
                   ? 'border-primary/50 bg-primary/10 text-foreground'
                   : 'border-border/60 text-muted-foreground hover:border-border hover:text-foreground',
-                stale && 'cursor-not-allowed opacity-50',
+                stale && !on && 'cursor-not-allowed opacity-50',
+                stale && on && 'border-destructive/50',
               )}
             >
               <Icon className="size-3.5" style={{ color: brand.tone }} />

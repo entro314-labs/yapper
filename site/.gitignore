@@ -6,3 +6,5 @@ next-env.d.ts
 tsconfig.tsbuildinfo
 .vercel
 .env*
+# The template holds no values, and the routes point at it for setup notes.
+!.env.example

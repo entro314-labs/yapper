@@ -29,6 +29,14 @@ export const STATUS_LABEL: Record<PostStatus, string> = {
   missed: 'Missed',
 }
 
+/**
+ * Whether a post can still be changed. A published post is history and a publishing one is in
+ * flight; editing or moving either would describe something that did not happen.
+ */
+export function isEditable(status: PostStatus): boolean {
+  return status !== 'published' && status !== 'publishing'
+}
+
 export function StatusDot({
   status,
   className,

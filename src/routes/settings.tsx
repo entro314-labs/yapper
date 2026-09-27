@@ -1,5 +1,6 @@
 import { IconAlertTriangle, IconCircleCheck } from '@tabler/icons-react'
 import { createFileRoute } from '@tanstack/react-router'
+import { ask } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import * as React from 'react'
 import { toast } from 'sonner'
@@ -7,6 +8,7 @@ import { toast } from 'sonner'
 import { CheckIcon } from '@/components/icons/check'
 import { CopyIcon } from '@/components/icons/copy'
 import { ExternalLinkIcon } from '@/components/icons/external-link'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Progress } from '@/components/ui/progress'
@@ -55,14 +57,19 @@ function SettingsScreen() {
     [settings.data, update],
   )
 
+  if (settings.isError) {
+    return <QueryErrorState what="settings" queries={[settings]} />
+  }
+
   const current = settings.data
   if (!current) return null
 
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-8 p-4">
       <Section title="Appearance">
-        <Row label="Theme" hint="System follows your desktop.">
+        <Row label="Theme" hint="System follows your desktop." htmlFor="settings-theme">
           <Select
+            id="settings-theme"
             value={current.theme}
             onChange={(event) => {
               patch({ theme: event.target.value as Settings['theme'] })
@@ -77,8 +84,10 @@ function SettingsScreen() {
         <Row
           label="Window material"
           hint="Frosts the window chrome. macOS and Windows only — Linux compositors mostly refuse, and Windbag falls back to solid."
+          htmlFor="settings-window-material"
         >
           <Select
+            id="settings-window-material"
             value={current.windowMaterial}
             onChange={(event) => {
               patch({ windowMaterial: event.target.value as Settings['windowMaterial'] })
@@ -96,8 +105,13 @@ function SettingsScreen() {
         title="Scheduling"
         note="Windbag posts from this machine, so it has to be running when a post is due. Launching at login keeps it in the background."
       >
-        <Row label="Launch at login" hint="Starts hidden, with the scheduler running.">
+        <Row
+          label="Launch at login"
+          hint="Starts hidden, with the scheduler running."
+          htmlFor="settings-launch-at-login"
+        >
           <Switch
+            id="settings-launch-at-login"
             checked={current.launchAtLogin}
             onCheckedChange={(checked) => {
               patch({ launchAtLogin: checked })
@@ -107,8 +121,10 @@ function SettingsScreen() {
         <Row
           label="If a post was missed"
           hint="What to do with a post whose time passed while Windbag was closed."
+          htmlFor="settings-missed-policy"
         >
           <Select
+            id="settings-missed-policy"
             value={current.missedPolicy}
             onChange={(event) => {
               patch({ missedPolicy: event.target.value as Settings['missedPolicy'] })
@@ -122,14 +138,28 @@ function SettingsScreen() {
         <Row
           label="Grace window"
           hint="Minutes past due that still count as on time. Closing the laptop briefly should not cost a post."
+          htmlFor="settings-grace-minutes"
         >
-          <Input
+          <CommitInput
+            id="settings-grace-minutes"
             type="number"
             min={1}
             max={720}
-            value={current.graceMinutes}
-            onChange={(event) => {
-              patch({ graceMinutes: Number(event.target.value) })
+            value={String(current.graceMinutes)}
+            onCommit={(next) => {
+              const minutes = Number(next)
+              // A cleared or out-of-range field is not a value: sending it
+              // would store the clamped minimum rather than what was meant.
+              if (
+                next.trim() === '' ||
+                !Number.isInteger(minutes) ||
+                minutes < 1 ||
+                minutes > 720
+              ) {
+                toast.error('The grace window is a whole number of minutes, from 1 to 720.')
+                return
+              }
+              if (minutes !== current.graceMinutes) patch({ graceMinutes: minutes })
             }}
             className="w-20"
           />
@@ -151,18 +181,25 @@ function SettingsScreen() {
             <Row
               label="Model"
               hint="Passed straight to the CLI. Leave blank for its own default, which is usually right."
+              htmlFor="settings-ai-model"
             >
-              <Input
+              <CommitInput
+                id="settings-ai-model"
                 value={current.aiModel}
                 placeholder="default"
-                onChange={(event) => {
-                  patch({ aiModel: event.target.value })
+                onCommit={(next) => {
+                  if (next.trim() !== current.aiModel) patch({ aiModel: next.trim() })
                 }}
                 className="w-40"
               />
             </Row>
-            <Row label="Effort" hint="How hard it should think. Blank uses the tool's default.">
+            <Row
+              label="Effort"
+              hint="How hard it should think. Blank uses the tool's default."
+              htmlFor="settings-ai-effort"
+            >
               <Select
+                id="settings-ai-effort"
                 value={current.aiEffort}
                 onChange={(event) => {
                   patch({ aiEffort: event.target.value })
@@ -186,8 +223,10 @@ function SettingsScreen() {
         <Row
           label="Channel"
           hint="Which release stream to follow. Matching this build keeps a prerelease install on the channel it came from."
+          htmlFor="settings-update-channel"
         >
           <Select
+            id="settings-update-channel"
             value={current.updateChannel}
             onChange={(event) => {
               patch({ updateChannel: event.target.value as Settings['updateChannel'] })
@@ -221,6 +260,14 @@ function SettingsScreen() {
         title="Platform apps"
         note="X, Reddit, LinkedIn and all three Meta surfaces gate posting behind a developer app that has to be registered to a person. Windbag cannot ship one, so you register your own and paste its client id here — it is stored in your OS keychain, never in the app's database."
       >
+        {platforms.isError || redirectUri.isError ? (
+          <QueryErrorState
+            compact
+            what="the platform apps"
+            queries={[platforms, redirectUri]}
+            className="px-3 py-2.5"
+          />
+        ) : null}
         {redirectUri.data ? <RedirectUriRow uri={redirectUri.data} /> : null}
         {(platforms.data ?? [])
           .filter((info) => info.appFields.length > 0)
@@ -355,25 +402,74 @@ function Section({
   )
 }
 
+/**
+ * One setting. `htmlFor` names the control's id, and the label is then a real `<label>` — the
+ * control's accessible name, and a larger click target. Rows whose control is a button already
+ * named by its own text leave it out.
+ */
 function Row({
   label,
   hint,
+  htmlFor,
   children,
 }: {
   label: string
   hint?: string
+  htmlFor?: string
   children: React.ReactNode
 }) {
   return (
     <div className="flex items-start gap-4 px-3 py-2.5">
       <div className="min-w-0 flex-1">
-        <p className="text-sm">{label}</p>
+        {htmlFor ? (
+          <label htmlFor={htmlFor} className="block text-sm">
+            {label}
+          </label>
+        ) : (
+          <p className="text-sm">{label}</p>
+        )}
         {hint ? (
           <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{hint}</p>
         ) : null}
       </div>
       <div className="shrink-0 pt-0.5">{children}</div>
     </div>
+  )
+}
+
+/**
+ * A text field that saves on blur or Enter rather than per keystroke. Each save sends the whole
+ * settings object, so saving while typing dropped characters when an older save's refetch landed
+ * over newer input, and re-ran everything `update_settings` applies (autostart included) on every
+ * key. The edit is local until committed; `onCommit` may refuse it, and the field then shows the
+ * stored value again.
+ */
+function CommitInput({
+  value,
+  onCommit,
+  ...props
+}: Omit<React.ComponentProps<typeof Input>, 'value' | 'onChange' | 'onBlur' | 'onKeyDown'> & {
+  value: string
+  onCommit: (next: string) => void
+}) {
+  const [draft, setDraft] = React.useState<string | null>(null)
+  const commit = () => {
+    if (draft === null) return
+    setDraft(null)
+    onCommit(draft)
+  }
+  return (
+    <Input
+      {...props}
+      value={draft ?? value}
+      onChange={(event) => {
+        setDraft(event.target.value)
+      }}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') commit()
+      }}
+    />
   )
 }
 
@@ -462,6 +558,19 @@ function WebDeploymentRow() {
       }
     })()
   }, [save, token, value])
+
+  // A blank form over an unreadable store would invite saving over whatever
+  // is actually there.
+  if (stored.isError) {
+    return (
+      <QueryErrorState
+        compact
+        what="the web deployment"
+        queries={[stored]}
+        className="px-3 py-2.5"
+      />
+    )
+  }
 
   return (
     <div className="flex flex-col gap-3 px-3 py-2.5">
@@ -565,8 +674,13 @@ function AssistantRow({
 
   return (
     <div className="px-3 py-2.5">
-      <Row label="Use" hint="Off by default. Nothing is sent anywhere until you pick one.">
+      <Row
+        label="Use"
+        hint="Off by default. Nothing is sent anywhere until you pick one."
+        htmlFor="settings-ai-backend"
+      >
         <Select
+          id="settings-ai-backend"
           value={value}
           onChange={(event) => {
             onChange(event.target.value as AiBackend)
@@ -580,21 +694,30 @@ function AssistantRow({
         </Select>
       </Row>
 
-      <ul className="mt-1 flex flex-col gap-1 border-t border-border/50 pt-2.5">
-        {(availability.data ?? []).map((entry) => (
-          <li key={entry.backend} className="flex items-start gap-1.5 text-xs">
-            {entry.available ? (
-              <IconCircleCheck className="mt-px size-3.5 shrink-0 text-success" />
-            ) : (
-              <IconAlertTriangle className="mt-px size-3.5 shrink-0 text-muted-foreground" />
-            )}
-            <span className="font-medium">{entry.label}</span>
-            <span className="min-w-0 flex-1 leading-relaxed text-muted-foreground">
-              {entry.reason}
-            </span>
-          </li>
-        ))}
-      </ul>
+      {availability.isError ? (
+        <QueryErrorState
+          compact
+          what="which assistants are available"
+          queries={[availability]}
+          className="mt-1 border-t border-border/50 pt-2.5"
+        />
+      ) : (
+        <ul className="mt-1 flex flex-col gap-1 border-t border-border/50 pt-2.5">
+          {(availability.data ?? []).map((entry) => (
+            <li key={entry.backend} className="flex items-start gap-1.5 text-xs">
+              {entry.available ? (
+                <IconCircleCheck className="mt-px size-3.5 shrink-0 text-success" />
+              ) : (
+                <IconAlertTriangle className="mt-px size-3.5 shrink-0 text-muted-foreground" />
+              )}
+              <span className="font-medium">{entry.label}</span>
+              <span className="min-w-0 flex-1 leading-relaxed text-muted-foreground">
+                {entry.reason}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
@@ -673,6 +796,19 @@ function AppCredentialsRow({ info }: { info: PlatformInfo }) {
     })()
   }, [draft, stored.data, info, save, value])
 
+  // "Not set up" over a keychain that could not be read would be a lie, and
+  // the form behind it would invite overwriting a stored app.
+  if (stored.isError) {
+    return (
+      <QueryErrorState
+        compact
+        what={`your ${info.name} app`}
+        queries={[stored]}
+        className="px-3 py-2.5"
+      />
+    )
+  }
+
   return (
     <div className="px-3 py-2.5">
       <div className="flex items-center gap-2.5">
@@ -747,6 +883,16 @@ function AppCredentialsRow({ info }: { info: PlatformInfo }) {
                       // connected with this app keep working until their tokens
                       // expire — there is nothing to refresh them with after
                       // that, which is what the account list will then say.
+                      const proceed = await ask(
+                        `This deletes the ${info.name} app's credentials from your keychain. Accounts connected through it keep posting until their tokens expire, then need the app added again to reconnect.`,
+                        {
+                          title: `Remove your ${info.name} app?`,
+                          kind: 'warning',
+                          okLabel: 'Remove',
+                          cancelLabel: 'Cancel',
+                        },
+                      )
+                      if (!proceed) return
                       await forget.mutateAsync({ platform: info.id })
                       toast.success(`Removed your ${info.name} app`)
                       setDraft({})

@@ -39,6 +39,12 @@ export function r2(): R2Config | null {
     region: 'auto',
     endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
     credentials: { accessKeyId, secretAccessKey },
+    // The SDK's default flexible checksums write an `x-amz-checksum-crc32`
+    // into every presigned PUT URL, computed over the EMPTY body it signs —
+    // so the real upload would fail the check. Checksums only where the S3
+    // API itself demands one.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
   })
 
   return {

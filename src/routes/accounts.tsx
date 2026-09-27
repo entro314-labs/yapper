@@ -1,10 +1,12 @@
 import { IconAlertTriangle, IconPlus, IconTrash, IconUsers } from '@tabler/icons-react'
 import { Link, createFileRoute } from '@tanstack/react-router'
+import { ask } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import * as React from 'react'
 import { toast } from 'sonner'
 
 import { EmptyState } from '@/components/shell/empty-state'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -15,11 +17,19 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
+import { Skeleton } from '@/components/ui/skeleton'
 import { brandOf } from '@/lib/platform-brand'
-import { useAccounts, useConnectAccount, useDisconnectAccount, usePlatforms } from '@/lib/query'
-import { humanMessage } from '@/lib/tauri/client'
-import type { PlatformInfo } from '@/lib/tauri/types'
-import { cn, formatAbsolute } from '@/lib/utils'
+import {
+  useAccounts,
+  useConnectAccount,
+  useDeliverAuthCallback,
+  useDisconnectAccount,
+  usePlatforms,
+} from '@/lib/query'
+import { humanMessage, subscribeEvent } from '@/lib/tauri/client'
+import { IPC_EVENTS } from '@/lib/tauri/ipc'
+import type { Account, AuthOutcome, PlatformInfo } from '@/lib/tauri/types'
+import { cn, formatAbsolute, repeatKeys } from '@/lib/utils'
 
 export const Route = createFileRoute('/accounts')({ component: AccountsScreen })
 
@@ -27,7 +37,17 @@ function AccountsScreen() {
   const accounts = useAccounts()
   const platforms = usePlatforms()
   const disconnect = useDisconnectAccount()
-  const [connecting, setConnecting] = React.useState<PlatformInfo | null>(null)
+  // `account` is set when this is a RE-connect: the dialog then opens on that
+  // account's platform, pre-filled with what identifies it.
+  const [connecting, setConnecting] = React.useState<{
+    info: PlatformInfo
+    account?: Account
+  } | null>(null)
+  // Stable, because a waiting dialog subscribes to the auth event with it: a new
+  // identity on every refetch would resubscribe and could miss the outcome.
+  const closeDialog = React.useCallback(() => {
+    setConnecting(null)
+  }, [])
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6 p-4">
@@ -35,7 +55,19 @@ function AccountsScreen() {
         <h2 className="font-display mb-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
           Connected
         </h2>
-        {accounts.data && accounts.data.length > 0 ? (
+        {accounts.isError ? (
+          <QueryErrorState
+            what="your accounts"
+            queries={[accounts]}
+            className="rounded-lg border border-dashed border-border/60 py-12"
+          />
+        ) : accounts.isLoading ? (
+          <div className="flex flex-col gap-2">
+            {repeatKeys(2, 'account').map((key) => (
+              <Skeleton key={key} className="h-[3.25rem] w-full rounded-lg" />
+            ))}
+          </div>
+        ) : accounts.data && accounts.data.length > 0 ? (
           <ul className="flex flex-col gap-2">
             {accounts.data.map((account) => {
               const brand = brandOf(account.platform)
@@ -78,10 +110,18 @@ function AccountsScreen() {
                   </div>
 
                   {stale ? (
-                    <span className="flex items-center gap-1 text-xs text-destructive">
-                      <IconAlertTriangle className="size-3.5" />
+                    <Button
+                      size="xs"
+                      variant="destructive"
+                      disabled={!platforms.data}
+                      onClick={() => {
+                        const info = platforms.data?.find((item) => item.id === account.platform)
+                        if (info) setConnecting({ info, account })
+                      }}
+                    >
+                      <IconAlertTriangle data-icon="inline-start" />
                       Reconnect
-                    </span>
+                    </Button>
                   ) : account.tokenExpiresAt ? (
                     <span
                       className="hidden text-xs text-muted-foreground sm:block"
@@ -98,6 +138,22 @@ function AccountsScreen() {
                     onClick={() => {
                       void (async () => {
                         try {
+                          // Asked natively because this is not undoable: the
+                          // account's rows cascade, taking its delivery
+                          // history and stats with them.
+                          const platformName =
+                            platforms.data?.find((item) => item.id === account.platform)?.name ??
+                            account.platform
+                          const proceed = await ask(
+                            `This removes ${account.handle} from every post it is a destination of, along with those destinations' delivery history and stats in Windbag. Anything already published on ${platformName} stays there.`,
+                            {
+                              title: `Disconnect ${account.handle}?`,
+                              kind: 'warning',
+                              okLabel: 'Disconnect',
+                              cancelLabel: 'Cancel',
+                            },
+                          )
+                          if (!proceed) return
                           await disconnect.mutateAsync(account.id)
                           toast.success(`Disconnected ${account.handle}`)
                         } catch (err) {
@@ -126,6 +182,14 @@ function AccountsScreen() {
         <h2 className="font-display mb-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
           Add
         </h2>
+        {platforms.isError ? (
+          <QueryErrorState
+            compact
+            what="the platform list"
+            queries={[platforms]}
+            className="rounded-lg border border-border/60 px-3 py-2.5"
+          />
+        ) : null}
         <div className="grid gap-2 sm:grid-cols-2">
           {(platforms.data ?? []).map((info) => {
             const brand = brandOf(info.id)
@@ -135,7 +199,7 @@ function AccountsScreen() {
                 key={info.id}
                 type="button"
                 onClick={() => {
-                  setConnecting(info)
+                  setConnecting({ info })
                 }}
                 className="flex items-start gap-3 rounded-lg border border-border/60 bg-card/50 px-3 py-2.5 text-left transition-colors hover:border-border hover:bg-card"
               >
@@ -162,10 +226,9 @@ function AccountsScreen() {
 
       {connecting ? (
         <ConnectDialog
-          info={connecting}
-          onClose={() => {
-            setConnecting(null)
-          }}
+          info={connecting.info}
+          {...(connecting.account ? { account: connecting.account } : {})}
+          onClose={closeDialog}
         />
       ) : null}
     </div>
@@ -178,10 +241,28 @@ function AccountsScreen() {
  * Nothing here knows what Bluesky or Reddit needs — Rust says which fields to ask for, so adding an
  * adapter needs no change in this file.
  */
-function ConnectDialog({ info, onClose }: { info: PlatformInfo; onClose: () => void }) {
+function ConnectDialog({
+  info,
+  account,
+  onClose,
+}: {
+  info: PlatformInfo
+  account?: Account
+  onClose: () => void
+}) {
   const connect = useConnectAccount()
-  const [fields, setFields] = React.useState<Record<string, string>>({})
+  const deliverCallback = useDeliverAuthCallback()
+  // A reconnect starts from the server the account lives on (Mastodon's
+  // instance), so signing in again cannot land on a different one by default.
+  const [fields, setFields] = React.useState((): Record<string, string> =>
+    account?.instance && info.connectFields.some((field) => field.key === 'instance')
+      ? { instance: account.instance.replace(/^https?:\/\//, '') }
+      : {},
+  )
   const [busy, setBusy] = React.useState(false)
+  // Set once a deep-link sign-in is under way, until its outcome arrives.
+  const [waiting, setWaiting] = React.useState(false)
+  const [callbackUrl, setCallbackUrl] = React.useState('')
 
   const missing = info.connectFields.filter((field) => field.required && !fields[field.key]?.trim())
 
@@ -190,6 +271,11 @@ function ConnectDialog({ info, onClose }: { info: PlatformInfo; onClose: () => v
   // nominal auth kind.
   const method = fields.method ?? info.connectFields.find((f) => f.key === 'method')?.placeholder
   const opensBrowser = info.auth === 'oAuth2' || method === 'oauth'
+  // Bluesky's OAuth is the one flow that comes back on a custom URI scheme
+  // rather than the loopback, and that route can fail (a dev build, a broken
+  // scheme registration) — so the dialog stays open with somewhere to paste
+  // the link the browser could not open.
+  const returnsByDeepLink = method === 'oauth'
 
   // Only a REQUIRED app field is a precondition — the same rule the backend
   // applies. Bluesky's optional client-metadata override must not make it look
@@ -203,13 +289,44 @@ function ConnectDialog({ info, onClose }: { info: PlatformInfo; onClose: () => v
       if (opensBrowser) {
         toast.info(`Finish signing in to ${info.name} in your browser`)
       }
-      onClose()
+      if (returnsByDeepLink) {
+        setWaiting(true)
+      } else {
+        onClose()
+      }
     } catch (err) {
       toast.error(humanMessage(err))
     } finally {
       setBusy(false)
     }
-  }, [connect, info, fields, onClose])
+  }, [connect, info, fields, onClose, opensBrowser, returnsByDeepLink])
+
+  const finishWithPaste = React.useCallback(async () => {
+    try {
+      await deliverCallback.mutateAsync(callbackUrl)
+    } catch (err) {
+      toast.error(humanMessage(err))
+    }
+  }, [deliverCallback, callbackUrl])
+
+  // The outcome toast is the root AuthListener's job; this only closes the
+  // dialog once the sign-in it is waiting on has finished, either way.
+  React.useEffect(() => {
+    if (!waiting) return
+    let detach: (() => void) | null = null
+    let cancelled = false
+    void (async () => {
+      const unsubscribe = await subscribeEvent<AuthOutcome>(IPC_EVENTS.auth, (outcome) => {
+        if (outcome.platform === info.id) onClose()
+      })
+      if (cancelled) unsubscribe()
+      else detach = unsubscribe
+    })()
+    return () => {
+      cancelled = true
+      detach?.()
+    }
+  }, [waiting, info.id, onClose])
 
   return (
     <Dialog
@@ -220,8 +337,14 @@ function ConnectDialog({ info, onClose }: { info: PlatformInfo; onClose: () => v
     >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Connect {info.name}</DialogTitle>
-          <DialogDescription>{info.notes}</DialogDescription>
+          <DialogTitle>
+            {account ? `Reconnect ${account.handle}` : `Connect ${info.name}`}
+          </DialogTitle>
+          <DialogDescription>
+            {account
+              ? `Sign in to ${info.name} as ${account.handle} again. The account is updated in place, so posts scheduled to it keep their destination.`
+              : info.notes}
+          </DialogDescription>
         </DialogHeader>
 
         {needsDeveloperApp ? (
@@ -234,65 +357,104 @@ function ConnectDialog({ info, onClose }: { info: PlatformInfo; onClose: () => v
           </p>
         ) : null}
 
-        <div className="flex flex-col gap-3">
-          {info.connectFields.map((field) => (
-            <label key={field.key} className="flex flex-col gap-1 text-xs">
-              <span className="font-medium">
-                {field.label}
-                {field.required ? <span className="text-destructive"> *</span> : null}
-              </span>
-              {field.choices.length > 0 ? (
-                <Select
-                  value={fields[field.key] ?? field.placeholder}
-                  onChange={(event) => {
-                    setFields((current) => ({ ...current, [field.key]: event.target.value }))
-                  }}
-                >
-                  {field.choices.map((choice) => (
-                    <option key={choice} value={choice}>
-                      {choice}
-                    </option>
-                  ))}
-                </Select>
-              ) : (
-                <Input
-                  type={field.secret ? 'password' : 'text'}
-                  value={fields[field.key] ?? ''}
-                  placeholder={field.placeholder}
-                  autoComplete="off"
-                  onChange={(event) => {
-                    setFields((current) => ({ ...current, [field.key]: event.target.value }))
-                  }}
-                />
-              )}
-              <span className="leading-relaxed text-muted-foreground">{field.help}</span>
-            </label>
-          ))}
-        </div>
+        {/* A form so Enter in any field connects, behind the same guard as the
+            button: a disabled submit button also blocks implicit submission. */}
+        <form
+          className="flex flex-col gap-4"
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (missing.length > 0 || busy || waiting) return
+            void submit()
+          }}
+        >
+          <div className="flex flex-col gap-3">
+            {info.connectFields.map((field) => (
+              <label key={field.key} className="flex flex-col gap-1 text-xs">
+                <span className="font-medium">
+                  {field.label}
+                  {field.required ? <span className="text-destructive"> *</span> : null}
+                </span>
+                {field.choices.length > 0 ? (
+                  <Select
+                    value={fields[field.key] ?? field.placeholder}
+                    onChange={(event) => {
+                      setFields((current) => ({ ...current, [field.key]: event.target.value }))
+                    }}
+                  >
+                    {field.choices.map((choice) => (
+                      <option key={choice} value={choice}>
+                        {choice}
+                      </option>
+                    ))}
+                  </Select>
+                ) : (
+                  <Input
+                    type={field.secret ? 'password' : 'text'}
+                    value={fields[field.key] ?? ''}
+                    placeholder={field.placeholder}
+                    autoComplete="off"
+                    onChange={(event) => {
+                      setFields((current) => ({ ...current, [field.key]: event.target.value }))
+                    }}
+                  />
+                )}
+                <span className="leading-relaxed text-muted-foreground">{field.help}</span>
+              </label>
+            ))}
+          </div>
 
-        <div className="flex items-center gap-2">
-          {info.setupUrl ? (
+          <div className="flex items-center gap-2">
+            {info.setupUrl ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  void openUrl(info.setupUrl ?? '')
+                }}
+              >
+                Open {info.name} setup
+              </Button>
+            ) : null}
             <Button
+              type="submit"
+              className="ml-auto"
               size="sm"
-              variant="ghost"
-              onClick={() => {
-                void openUrl(info.setupUrl ?? '')
-              }}
+              disabled={missing.length > 0 || busy || waiting}
             >
-              Open {info.name} setup
+              {opensBrowser ? 'Continue in browser' : 'Connect'}
             </Button>
-          ) : null}
-          <Button
-            className="ml-auto"
-            size="sm"
-            disabled={missing.length > 0 || busy}
-            onClick={() => {
-              void submit()
-            }}
-          >
-            {opensBrowser ? 'Continue in browser' : 'Connect'}
-          </Button>
-        </div>
+          </div>
+        </form>
+
+        {waiting ? (
+          <div className="flex flex-col gap-2 rounded-md bg-muted/60 px-3 py-2 text-xs">
+            <p className="leading-relaxed text-muted-foreground">
+              Waiting for {info.name} to send you back. If your browser showed a link it could not
+              open, paste the whole link here.
+            </p>
+            <div className="flex items-center gap-2">
+              <Input
+                value={callbackUrl}
+                placeholder="io.github.entro314-labs:/callback?…"
+                aria-label="Callback URL"
+                autoComplete="off"
+                onChange={(event) => {
+                  setCallbackUrl(event.target.value)
+                }}
+              />
+              <Button
+                size="sm"
+                disabled={!callbackUrl.trim() || deliverCallback.isPending}
+                onClick={() => {
+                  void finishWithPaste()
+                }}
+              >
+                Finish sign-in
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </DialogContent>
     </Dialog>
   )
