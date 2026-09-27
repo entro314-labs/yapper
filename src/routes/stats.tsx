@@ -13,6 +13,7 @@ import { EmptyState } from '@/components/shell/empty-state'
 import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
+import { STATUS_LABEL } from '@/components/ui/status-dot'
 import { useAnimatedIcon } from '@/lib/animated-icon'
 import { brandOf } from '@/lib/platform-brand'
 import {
@@ -81,6 +82,18 @@ function StatsScreen() {
   const search = Route.useSearch()
   const navigate = Route.useNavigate()
   const [drilldown, setDrilldown] = React.useState<Bucket | null>(null)
+  const drillRef = React.useRef<HTMLElement>(null)
+
+  // The drilldown renders below every chart, so a click on a bar near the top would otherwise
+  // change something off-screen and look like it did nothing. Scrolled to and focused, so a
+  // keyboard or screen-reader user lands on the answer too.
+  React.useEffect(() => {
+    const section = drillRef.current
+    if (!drilldown || !section) return
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    section.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
+    section.focus({ preventScroll: true })
+  }, [drilldown])
 
   const range = search.range ?? '30'
   // The bound is computed when the range CHANGES, not on every render: reading
@@ -384,9 +397,17 @@ function StatsScreen() {
       </section>
 
       {drilldown ? (
-        <section>
+        <section
+          ref={drillRef}
+          tabIndex={-1}
+          aria-labelledby="stats-drilldown"
+          className="scroll-mt-4 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
           <div className="mb-2 flex items-baseline gap-2">
-            <h2 className="font-display text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+            <h2
+              id="stats-drilldown"
+              className="font-display text-xs font-semibold tracking-wide text-muted-foreground uppercase"
+            >
               {drilldown.label}
             </h2>
             <span className="text-xs text-muted-foreground tabular-nums">
@@ -406,14 +427,17 @@ function StatsScreen() {
           <ul className="flex flex-col gap-1.5">
             {drilled.map((post) => (
               <li key={post.id}>
+                {/* A published post is history: opening it starts a new draft from it rather than
+                    editing what already went out. */}
                 <Link
                   to="/compose"
-                  search={{ id: post.id }}
+                  search={post.status === 'published' ? { from: post.id } : { id: post.id }}
                   className="flex flex-col gap-0.5 rounded-md border border-border/60 bg-card/50 px-3 py-2 transition-colors hover:border-border"
                 >
                   <span className="line-clamp-2 text-sm">{post.body || 'No text'}</span>
                   <span className="text-xs text-muted-foreground">
-                    {post.status} · {formatRelative(post.scheduledAt ?? post.updatedAt)}
+                    {STATUS_LABEL[post.status]} ·{' '}
+                    {formatRelative(post.scheduledAt ?? post.updatedAt)}
                   </span>
                 </Link>
               </li>
