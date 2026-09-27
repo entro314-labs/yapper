@@ -49,12 +49,15 @@ use crate::stats::{self, StatsFilter};
 /// `server/discover` is mandatory. A client that opens with `initialize` has
 /// chosen the handshake-based protocol, so the answer must be a handshake-era
 /// revision; a newer client probing with `server/discover` gets `-32601`, which
-/// the spec defines as its cue to fall back to `initialize`.
-const PROTOCOL_VERSION: &str = "2025-11-25";
+/// the spec defines as its cue to fall back to `initialize`. [`crate::metaads`]
+/// asks for the same revision when Windbag is the client.
+pub(crate) const PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// Every handshake-era revision the spec has published. For a tools-only stdio
-/// server they behave alike, so a client asking for any of them gets it back.
-const SUPPORTED_VERSIONS: [&str; 4] = [PROTOCOL_VERSION, "2025-06-18", "2025-03-26", "2024-11-05"];
+/// server they behave alike, so a client asking for any of them gets it back —
+/// and, as a client, Windbag accepts a server choosing any of them.
+pub(crate) const SUPPORTED_VERSIONS: [&str; 4] =
+    [PROTOCOL_VERSION, "2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// One request/response cycle over the shared store.
 pub struct Session {
@@ -89,7 +92,12 @@ impl Session {
 
         let outcome = match method {
             "initialize" => Ok(Self::initialize(&params)),
-            "tools/list" => Ok(json!({ "tools": tool_definitions() })),
+            "tools/list" => match self.tool_definitions() {
+                Ok(tools) => Ok(json!({ "tools": tools })),
+                // Only the credential store can fail here. That is not a tool's
+                // failure to report as a result, so it is an internal error.
+                Err(err) => return Some(error_frame(&id, -32603, &err.to_string())),
+            },
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -156,7 +164,29 @@ impl Session {
         })
     }
 
+    /// The tool catalogue. Descriptions are written for a model deciding
+    /// whether to call something, so each says what it is FOR and what it
+    /// costs, not just what it does.
+    ///
+    /// Two halves, because they answer to different owners: [`store_tools`] is
+    /// this store, [`ads_tools`] a passthrough to a server somebody else runs
+    /// against live ad accounts. The ads half is listed only while it can work
+    /// — a Facebook Page is connected and its Meta app has Ads access on, the
+    /// same setting that makes the connection ask for the ads scopes. Listing
+    /// it otherwise invites a model to plan around tools that can only fail.
+    fn tool_definitions(&self) -> Result<Vec<Value>> {
+        let mut tools = store_tools();
+        if crate::metaads::available(&self.db)? {
+            tools.extend(ads_tools());
+        }
+        Ok(tools)
+    }
+
     /// Runs one tool. `None` means no tool has that name.
+    ///
+    /// The ads tools are routed whether or not `tools/list` currently offers
+    /// them: an agent holding an older catalogue should get their own message
+    /// about what is missing, not a protocol error.
     fn call(&self, name: &str, args: &Value) -> Option<Result<String>> {
         Some(match name {
             "list_accounts" => self.list_accounts(),
@@ -515,19 +545,6 @@ fn unreadable(computed: &stats::Stats) -> Vec<Value> {
     rows
 }
 
-/// The tool catalogue. Descriptions are written for a model deciding whether to
-/// call something, so each says what it is FOR and what it costs, not just what
-/// it does.
-///
-/// Split in two because the halves answer to different owners: [`store_tools`]
-/// is this store, [`ads_tools`] is a passthrough to a server somebody else runs
-/// against live ad accounts.
-fn tool_definitions() -> Vec<Value> {
-    let mut tools = store_tools();
-    tools.extend(ads_tools());
-    tools
-}
-
 /// Everything backed by the local store.
 fn store_tools() -> Vec<Value> {
     vec![
@@ -655,12 +672,8 @@ fn stats_tool() -> Value {
     )
 }
 
-/// The passthrough to Meta's hosted ads MCP server.
-///
-/// Advertised unconditionally rather than only when a Facebook Page is
-/// connected: `tools/list` is answered before any credential is read, and a
-/// catalogue that changes shape depending on stored state is harder for a model
-/// to reason about than one whose tools state their own preconditions.
+/// The passthrough to Meta's hosted ads MCP server. Listed only when
+/// [`crate::metaads::available`] says it can work.
 fn ads_tools() -> Vec<Value> {
     vec![
         tool(
@@ -821,6 +834,44 @@ mod tests {
                 frame.get("error").is_none(),
                 "{name} is advertised but not routed"
             );
+        }
+    }
+
+    #[test]
+    fn the_ads_tools_are_not_listed_without_a_facebook_page_with_ads_access() {
+        // The regression this guards: the ads tools were always listed, so a
+        // model planned around a passthrough that could only fail.
+        let (mut session, _) = session();
+        let listed = session
+            .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+            .expect("reply");
+        let names: Vec<&str> = listed
+            .pointer("/result/tools")
+            .and_then(Value::as_array)
+            .expect("tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(names.contains(&"get_stats"));
+        assert!(
+            !names.iter().any(|name| name.starts_with("meta_ads_")),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn an_unlisted_ads_tool_still_answers_with_what_is_missing() {
+        // Routed even when unlisted: an agent with an older catalogue gets told
+        // to connect a Page, not a protocol error.
+        let (mut session, _) = session();
+        for name in ["meta_ads_tools", "meta_ads_call"] {
+            let frame = call(&mut session, name, json!({ "tool": "list_campaigns" }));
+            assert!(frame.get("error").is_none(), "{name}: {frame}");
+            assert_eq!(
+                frame.pointer("/result/isError").and_then(Value::as_bool),
+                Some(true)
+            );
+            assert!(text_of(&frame).contains("Facebook Page"), "{name}: {frame}");
         }
     }
 
