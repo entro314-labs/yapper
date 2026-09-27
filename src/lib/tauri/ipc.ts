@@ -43,9 +43,6 @@ export const IPC_COMMANDS = {
   saveWebHost: 'save_web_host',
   forgetWebHost: 'forget_web_host',
 
-  metaAdsTools: 'meta_ads_tools',
-  metaAdsCall: 'meta_ads_call',
-
   checkForUpdate: 'check_for_update',
   installUpdate: 'install_update',
   restartAndInstall: 'restart_and_install',

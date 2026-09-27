@@ -112,8 +112,6 @@ pub fn run() {
             commands::get_web_host,
             commands::save_web_host,
             commands::forget_web_host,
-            commands::meta_ads_tools,
-            commands::meta_ads_call,
             update::check_for_update,
             update::install_update,
             update::restart_and_install,

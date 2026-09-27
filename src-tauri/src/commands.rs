@@ -956,25 +956,6 @@ pub fn forget_web_host() -> Result<()> {
     secrets::forget_web_host()
 }
 
-// ─── Meta ads, through Meta's own MCP server ────────────────────────────────
-
-/// Meta's current ads tool catalogue, fetched live rather than mirrored — see
-/// [`crate::metaads`] for why Windbag forwards instead of reimplementing.
-#[tauri::command(async)]
-pub fn meta_ads_tools(state: State<'_, AppState>) -> Result<serde_json::Value> {
-    crate::metaads::AdsClient::from_store(&state.db)?.list_tools()
-}
-
-#[tauri::command(async)]
-pub fn meta_ads_call(
-    state: State<'_, AppState>,
-    name: String,
-    arguments: Option<serde_json::Value>,
-) -> Result<serde_json::Value> {
-    let arguments = arguments.unwrap_or_else(|| serde_json::json!({}));
-    crate::metaads::AdsClient::from_store(&state.db)?.call_tool(&name, &arguments)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
