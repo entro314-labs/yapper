@@ -9,7 +9,7 @@ import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { useAnimatedIcon } from '@/lib/animated-icon'
-import { useNotes, useSettings, useSuggestPosts } from '@/lib/query'
+import { useAiAvailability, useNotes, useSettings, useSuggestPosts } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
 import type { Suggestion } from '@/lib/tauri/types'
 import { cn } from '@/lib/utils'
@@ -37,6 +37,7 @@ export function SuggestPanel({
   onClose: () => void
 }) {
   const settings = useSettings()
+  const availability = useAiAvailability()
   const notes = useNotes()
   const suggest = useSuggestPosts()
   const [draftRef, draftHover] = useAnimatedIcon()
@@ -49,7 +50,19 @@ export function SuggestPanel({
   const [drafts, setDrafts] = React.useState<Suggestion[]>([])
 
   const backend = settings.data?.aiBackend ?? 'off'
+  // Rust's own name for the backend ("Claude Code"), not its settings id.
+  const backendLabel =
+    availability.data?.find((entry) => entry.backend === backend)?.label ?? 'the assistant'
   const hasMaterial = selectedNotes.length > 0 || context.trim().length > 0
+
+  // The first dozen in the Notes screen's order, plus every selected note
+  // beyond them — a note picked from the Notes screen can sit further down,
+  // and a selection that is sent but not shown cannot be seen or undone.
+  const shownNotes = React.useMemo(() => {
+    const all = notes.data ?? []
+    const recent = all.slice(0, 12)
+    return [...recent, ...all.slice(12).filter((note) => selectedNotes.includes(note.id))]
+  }, [notes.data, selectedNotes])
 
   const run = React.useCallback(async () => {
     try {
@@ -86,7 +99,7 @@ export function SuggestPanel({
       <header className="flex items-center gap-2">
         <SparklesIcon size={16} className="text-primary" />
         <h2 className="font-display text-xs font-semibold tracking-wide uppercase">
-          Draft with {settings.data?.aiBackend === 'apple' ? 'Apple Intelligence' : backend}
+          Draft with {backendLabel}
         </h2>
         <Button
           size="icon-xs"
@@ -101,11 +114,11 @@ export function SuggestPanel({
 
       {notes.isError ? <QueryErrorState compact what="your notes" queries={[notes]} /> : null}
 
-      {(notes.data ?? []).length > 0 ? (
+      {shownNotes.length > 0 ? (
         <div className="flex flex-col gap-1.5">
           <span className="text-xs text-muted-foreground">Notes to work from</span>
           <div className="flex flex-wrap gap-1.5">
-            {(notes.data ?? []).slice(0, 12).map((note) => {
+            {shownNotes.map((note) => {
               const on = selectedNotes.includes(note.id)
               return (
                 <button
