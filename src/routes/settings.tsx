@@ -66,8 +66,9 @@ function SettingsScreen() {
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-8 p-4">
       <Section title="Appearance">
-        <Row label="Theme" hint="System follows your desktop.">
+        <Row label="Theme" hint="System follows your desktop." htmlFor="settings-theme">
           <Select
+            id="settings-theme"
             value={current.theme}
             onChange={(event) => {
               patch({ theme: event.target.value as Settings['theme'] })
@@ -82,8 +83,10 @@ function SettingsScreen() {
         <Row
           label="Window material"
           hint="Frosts the window chrome. macOS and Windows only — Linux compositors mostly refuse, and Windbag falls back to solid."
+          htmlFor="settings-window-material"
         >
           <Select
+            id="settings-window-material"
             value={current.windowMaterial}
             onChange={(event) => {
               patch({ windowMaterial: event.target.value as Settings['windowMaterial'] })
@@ -101,8 +104,13 @@ function SettingsScreen() {
         title="Scheduling"
         note="Windbag posts from this machine, so it has to be running when a post is due. Launching at login keeps it in the background."
       >
-        <Row label="Launch at login" hint="Starts hidden, with the scheduler running.">
+        <Row
+          label="Launch at login"
+          hint="Starts hidden, with the scheduler running."
+          htmlFor="settings-launch-at-login"
+        >
           <Switch
+            id="settings-launch-at-login"
             checked={current.launchAtLogin}
             onCheckedChange={(checked) => {
               patch({ launchAtLogin: checked })
@@ -112,8 +120,10 @@ function SettingsScreen() {
         <Row
           label="If a post was missed"
           hint="What to do with a post whose time passed while Windbag was closed."
+          htmlFor="settings-missed-policy"
         >
           <Select
+            id="settings-missed-policy"
             value={current.missedPolicy}
             onChange={(event) => {
               patch({ missedPolicy: event.target.value as Settings['missedPolicy'] })
@@ -127,8 +137,10 @@ function SettingsScreen() {
         <Row
           label="Grace window"
           hint="Minutes past due that still count as on time. Closing the laptop briefly should not cost a post."
+          htmlFor="settings-grace-minutes"
         >
           <Input
+            id="settings-grace-minutes"
             type="number"
             min={1}
             max={720}
@@ -156,8 +168,10 @@ function SettingsScreen() {
             <Row
               label="Model"
               hint="Passed straight to the CLI. Leave blank for its own default, which is usually right."
+              htmlFor="settings-ai-model"
             >
               <Input
+                id="settings-ai-model"
                 value={current.aiModel}
                 placeholder="default"
                 onChange={(event) => {
@@ -166,8 +180,13 @@ function SettingsScreen() {
                 className="w-40"
               />
             </Row>
-            <Row label="Effort" hint="How hard it should think. Blank uses the tool's default.">
+            <Row
+              label="Effort"
+              hint="How hard it should think. Blank uses the tool's default."
+              htmlFor="settings-ai-effort"
+            >
               <Select
+                id="settings-ai-effort"
                 value={current.aiEffort}
                 onChange={(event) => {
                   patch({ aiEffort: event.target.value })
@@ -191,8 +210,10 @@ function SettingsScreen() {
         <Row
           label="Channel"
           hint="Which release stream to follow. Matching this build keeps a prerelease install on the channel it came from."
+          htmlFor="settings-update-channel"
         >
           <Select
+            id="settings-update-channel"
             value={current.updateChannel}
             onChange={(event) => {
               patch({ updateChannel: event.target.value as Settings['updateChannel'] })
@@ -368,19 +389,32 @@ function Section({
   )
 }
 
+/**
+ * One setting. `htmlFor` names the control's id, and the label is then a real `<label>` — the
+ * control's accessible name, and a larger click target. Rows whose control is a button already
+ * named by its own text leave it out.
+ */
 function Row({
   label,
   hint,
+  htmlFor,
   children,
 }: {
   label: string
   hint?: string
+  htmlFor?: string
   children: React.ReactNode
 }) {
   return (
     <div className="flex items-start gap-4 px-3 py-2.5">
       <div className="min-w-0 flex-1">
-        <p className="text-sm">{label}</p>
+        {htmlFor ? (
+          <label htmlFor={htmlFor} className="block text-sm">
+            {label}
+          </label>
+        ) : (
+          <p className="text-sm">{label}</p>
+        )}
         {hint ? (
           <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{hint}</p>
         ) : null}
@@ -591,8 +625,13 @@ function AssistantRow({
 
   return (
     <div className="px-3 py-2.5">
-      <Row label="Use" hint="Off by default. Nothing is sent anywhere until you pick one.">
+      <Row
+        label="Use"
+        hint="Off by default. Nothing is sent anywhere until you pick one."
+        htmlFor="settings-ai-backend"
+      >
         <Select
+          id="settings-ai-backend"
           value={value}
           onChange={(event) => {
             onChange(event.target.value as AiBackend)
