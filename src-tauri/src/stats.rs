@@ -61,20 +61,14 @@ pub struct StatsFilter {
 }
 
 impl StatsFilter {
-    /// Whether one destination is in scope.
-    ///
-    /// `fallback_at` is the POST's own time, and it is load-bearing: a FAILED
-    /// destination has no `published_at`, so dating it by that alone drops every
-    /// failure out of any range — which would leave "why things failed" silently
-    /// empty exactly when it matters most.
-    fn matches(&self, target: &PostTarget, account: &db::Account, fallback_at: &str) -> bool {
+    /// Whether one destination, dated `at` by [`dated_at`], is in scope.
+    fn matches(&self, account: &db::Account, at: &str) -> bool {
         if !self.platforms.is_empty() && !self.platforms.contains(&account.platform) {
             return false;
         }
         if !self.account_ids.is_empty() && !self.account_ids.contains(&account.id) {
             return false;
         }
-        let at = target.published_at.as_deref().unwrap_or(fallback_at);
         if self.since.as_deref().is_some_and(|since| at < since) {
             return false;
         }
@@ -82,7 +76,24 @@ impl StatsFilter {
     }
 }
 
-/// One row of a breakdown: a label, what it counts, and the ids behind it.
+/// When a destination happened — the one date both the filter and the delivery
+/// chart use, so a destination counted in range is also drawn on a day.
+///
+/// The fallback to the POST's own time is load-bearing: a FAILED destination has
+/// no `published_at`, so dating it by that alone drops every failure out of any
+/// range — which would leave "why things failed" silently empty exactly when it
+/// matters most. A post is dated by when it was meant to go out, falling back to
+/// when it was last touched — the only timestamps a never-published destination
+/// has.
+fn dated_at<'a>(target: &'a PostTarget, post: &'a db::Post) -> &'a str {
+    target
+        .published_at
+        .as_deref()
+        .or(post.scheduled_at.as_deref())
+        .unwrap_or(&post.updated_at)
+}
+
+/// One row of a breakdown:a label, what it counts, and the ids behind it.
 ///
 /// `target_ids` is what makes a chart a drilldown rather than a picture — the
 /// UI hands them straight back to filter the queue.
@@ -197,9 +208,15 @@ struct Groupers {
 }
 
 impl Groupers {
-    /// Records one settled destination. Returns whether it published — the
-    /// caller needs that to decide whether to look for engagement.
-    fn add(&mut self, post_id: i64, target: &PostTarget, account: &db::Account, ok: bool) {
+    /// Records one settled destination, dated `at` by [`dated_at`].
+    fn add(
+        &mut self,
+        post_id: i64,
+        target: &PostTarget,
+        account: &db::Account,
+        at: &str,
+        ok: bool,
+    ) {
         self.platform.add(
             account.platform.as_str(),
             account.platform.label(),
@@ -209,41 +226,47 @@ impl Groupers {
         self.account
             .add(&account.id.to_string(), &account.handle, post_id, ok);
 
-        if ok && let Some(at) = target.published_at.as_deref() {
-            // Local time, because "when do I post" is a question about the
-            // person's day, not about UTC.
-            if let Ok(at) = db::parse_rfc3339(at) {
-                let local = at.with_timezone(&chrono::Local);
-                self.hour.add(
-                    &format!("{:02}", local.hour()),
-                    &format!("{:02}:00", local.hour()),
-                    post_id,
-                    true,
-                );
-                self.weekday.add(
-                    &local.weekday().number_from_monday().to_string(),
-                    &local.format("%a").to_string(),
-                    post_id,
-                    true,
-                );
-                let key = local.format("%Y-%m-%d").to_string();
-                self.day.add(&key, &key, post_id, true);
-                self.slot.add(
-                    &format!(
-                        "{}-{:02}",
-                        local.weekday().number_from_monday(),
-                        local.hour()
-                    ),
-                    &local.format("%a %H:00").to_string(),
-                    post_id,
-                    true,
-                );
-            }
-        }
-
         if !ok && let Some(error) = target.error.as_deref() {
             let code = error_code(error);
             self.failure.add(code, failure_label(code), post_id, false);
+        }
+
+        // Local time, because "when do I post" is a question about the person's
+        // day, not about UTC.
+        let Ok(local) = db::parse_rfc3339(at).map(|at| at.with_timezone(&chrono::Local)) else {
+            return;
+        };
+
+        // Delivery over time carries both outcomes — its "Failed" series is half
+        // the point of drawing it — each on the day the filter dated it by.
+        let day = local.format("%Y-%m-%d").to_string();
+        self.day.add(&day, &day, post_id, ok);
+
+        // "When do I post" is about what went out, so these count published
+        // destinations only.
+        if ok {
+            self.hour.add(
+                &format!("{:02}", local.hour()),
+                &format!("{:02}:00", local.hour()),
+                post_id,
+                true,
+            );
+            self.weekday.add(
+                &local.weekday().number_from_monday().to_string(),
+                &local.format("%a").to_string(),
+                post_id,
+                true,
+            );
+            self.slot.add(
+                &format!(
+                    "{}-{:02}",
+                    local.weekday().number_from_monday(),
+                    local.hour()
+                ),
+                &local.format("%a %H:00").to_string(),
+                post_id,
+                true,
+            );
         }
     }
 }
@@ -283,15 +306,8 @@ pub fn compute(database: &Db, filter: &StatsFilter) -> Result<Stats> {
             let Some(account) = accounts.get(&target.account_id) else {
                 continue;
             };
-            // A post is dated by when it was meant to go out, falling back to
-            // when it was last touched — the only timestamps a never-published
-            // destination has.
-            let fallback = detail
-                .post
-                .scheduled_at
-                .as_deref()
-                .unwrap_or(&detail.post.updated_at);
-            if !filter.matches(target, account, fallback) {
+            let at = dated_at(target, &detail.post);
+            if !filter.matches(account, at) {
                 continue;
             }
             if !accounts_in_scope.contains(&account.id) {
@@ -307,7 +323,7 @@ pub fn compute(database: &Db, filter: &StatsFilter) -> Result<Stats> {
             } else {
                 totals.failed += 1;
             }
-            groupers.add(detail.post.id, target, account, ok);
+            groupers.add(detail.post.id, target, account, at, ok);
 
             if ok && let Some(row) = metrics.get(&target.id) {
                 engagement.add(row, &detail.post, target, account);
@@ -1411,6 +1427,18 @@ mod tests {
         .expect("stats");
         assert_eq!(stats.failed, 1, "a failure must survive a date filter");
         assert_eq!(stats.failures.len(), 1);
+    }
+
+    #[test]
+    fn a_failure_is_drawn_on_the_day_the_filter_dated_it() {
+        // The regression this guards: `by_day` was filled only for published
+        // destinations, so the delivery chart's "Failed" series was always zero.
+        let (db, _, _) = seeded();
+        let stats = compute(&db, &StatsFilter::default()).expect("stats");
+        let failed: i64 = stats.by_day.iter().map(|day| day.failed).sum();
+        let published: i64 = stats.by_day.iter().map(|day| day.published).sum();
+        assert_eq!(failed, 1, "the failure is on the chart: {:?}", stats.by_day);
+        assert_eq!(published, 1);
     }
 
     #[test]
