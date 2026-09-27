@@ -92,14 +92,15 @@ unicode-segmentation = "1"
 # Opens the system browser for the OAuth handoff. Rust-side, so it works from
 # the scheduler thread as well as from a command.
 opener = "0.8"
-dirs = "6"
+dirs = "7"
 log = "0.4"
 env_logger = "0.11"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Vibrancy behind the transparent window. Taken direct rather than through
-# tauri's `set_effects`: tauri 2.11 links window-vibrancy 0.6, which predates
-# the newer materials and lacks the `clear_*` half a live toggle needs.
+# tauri's `set_effects`, which discards the result: the renderer has to know
+# what was ACTUALLY applied (Mica refuses on Windows 10). The same 0.8 line
+# tauri links, so it adds no second copy to the graph.
 window-vibrancy = "0.8"
 # The title-bar surgery the traffic lights need (windowing.rs): a transparent
 # titlebar over a full-size content view, plus the empty unified toolbar that
