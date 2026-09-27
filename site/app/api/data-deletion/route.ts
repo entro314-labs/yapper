@@ -15,6 +15,11 @@ import { NextResponse } from 'next/server'
  *
  * The signature is still verified rather than waved through: an endpoint that returns a
  * confirmation code to anyone who posts to it is not a deletion endpoint, it is a decoration.
+ *
+ * Every Meta app a user registers points its callback here — Threads needs an app of its own beside
+ * the one Facebook and Instagram share — and each signs with its own secret. Meta's payload does
+ * not say which app sent it, so `META_APP_SECRETS` lists them all, comma-separated, and a request
+ * is accepted when it verifies against any one.
  */
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -25,14 +30,17 @@ interface SignedRequest {
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
-  const appSecret = process.env.META_APP_SECRET
-  if (!appSecret) {
+  const appSecrets = (process.env.META_APP_SECRETS ?? '')
+    .split(',')
+    .map((secret) => secret.trim())
+    .filter((secret) => secret !== '')
+  if (appSecrets.length === 0) {
     // Not a 200: reporting success for a request that could not be verified
     // would be a lie about having done something.
     return NextResponse.json(
       {
         error:
-          "This deployment has no META_APP_SECRET set, so the callback cannot verify Meta's signature.",
+          "This deployment has no META_APP_SECRETS set, so the callback cannot verify Meta's signature.",
       },
       { status: 503 },
     )
@@ -44,7 +52,10 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: 'Missing signed_request.' }, { status: 400 })
   }
 
-  const payload = verify(signed, appSecret)
+  const payload = appSecrets.reduce<SignedRequest | null>(
+    (found, secret) => found ?? verify(signed, secret),
+    null,
+  )
   if (!payload) {
     return NextResponse.json({ error: 'Bad signature.' }, { status: 401 })
   }
