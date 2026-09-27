@@ -143,6 +143,9 @@ pub struct EngagementRow {
     /// How many destinations these came from — without it, a platform with one
     /// measured post and one with fifty look comparable.
     pub measured: i64,
+    /// The posts behind the row, so a bar in the engagement chart is a
+    /// drilldown like every other bar.
+    pub post_ids: Vec<i64>,
 }
 
 /// A published destination that earned something, for the leaderboard.
@@ -442,12 +445,16 @@ impl Engagement {
                 replies: None,
                 views: None,
                 measured: 0,
+                post_ids: Vec::new(),
             });
         fold(&mut entry.likes, likes);
         fold(&mut entry.reposts, reposts);
         fold(&mut entry.replies, replies);
         fold(&mut entry.views, views);
         entry.measured += 1;
+        if !entry.post_ids.contains(&post.id) {
+            entry.post_ids.push(post.id);
+        }
 
         self.leaderboard.push(TopPost {
             post_id: post.id,
@@ -1478,6 +1485,11 @@ mod tests {
 
         let row = &stats.engagement_by_platform[0];
         assert_eq!((row.likes, row.replies, row.views), (Some(7), None, None));
+        assert_eq!(
+            row.post_ids,
+            vec![stats.top_posts[0].post_id],
+            "the engagement bar drills down to the measured post"
+        );
         let top = &stats.top_posts[0];
         assert_eq!((top.likes, top.replies, top.views), (Some(7), None, None));
         assert_eq!(top.interactions, 9, "ranked on what was reported");

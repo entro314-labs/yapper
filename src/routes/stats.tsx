@@ -70,8 +70,8 @@ export const Route = createFileRoute('/stats')({
  * on each refresh, so there is no honest trend line to draw from it — see the module comment in
  * `stats.rs`. It is shown as a distribution instead: across platforms, across posts.
  *
- * Every bar is a drilldown: it carries the ids of the posts behind it, and clicking one opens that
- * set.
+ * Every bar and every cell is a drilldown: it carries the ids of the posts behind it, and clicking
+ * one opens that set. A top post opens in the composer directly.
  */
 function StatsScreen() {
   const accounts = useAccounts()
@@ -81,7 +81,8 @@ function StatsScreen() {
   const [refreshRef, refreshHover] = useAnimatedIcon()
   const search = Route.useSearch()
   const navigate = Route.useNavigate()
-  const [drilldown, setDrilldown] = React.useState<Bucket | null>(null)
+  // Any set of posts a chart can open: a delivery bucket, a punch-card cell or an engagement bar.
+  const [drilldown, setDrilldown] = React.useState<Pick<Bucket, 'label' | 'postIds'> | null>(null)
   const drillRef = React.useRef<HTMLElement>(null)
 
   // The drilldown renders below every chart, so a click on a bar near the top would otherwise
@@ -362,7 +363,7 @@ function StatsScreen() {
 
               {data.engagementByPlatform.length > 1 ? (
                 <div className="mt-4 border-t border-border/50 pt-3.5">
-                  <EngagementChart rows={data.engagementByPlatform} />
+                  <EngagementChart rows={data.engagementByPlatform} onDrill={setDrilldown} />
                 </div>
               ) : null}
 

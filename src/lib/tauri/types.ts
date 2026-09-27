@@ -344,6 +344,8 @@ export interface EngagementRow {
   replies: number | null
   views: number | null
   measured: number
+  /** The posts behind the row — the engagement bar is a drilldown like every other bar. */
+  postIds: number[]
 }
 
 /** `stats::TopPost` */

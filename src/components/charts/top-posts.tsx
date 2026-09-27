@@ -1,4 +1,5 @@
 import { IconExternalLink } from '@tabler/icons-react'
+import { Link } from '@tanstack/react-router'
 import { openUrl } from '@tauri-apps/plugin-opener'
 
 import { brandOf } from '@/lib/platform-brand'
@@ -14,6 +15,9 @@ import type { TopPost } from '@/lib/tauri/types'
  *
  * Ranked by interactions rather than impressions: reach is what the platform decided to give a
  * post, interactions are what people did with it.
+ *
+ * A row opens the post in Windbag — as a new draft from it, since what went out is history — and
+ * the arrow beside it opens the live post on the platform.
  */
 export function TopPosts({ posts }: { posts: TopPost[] }) {
   if (posts.length === 0) return null
@@ -33,19 +37,25 @@ export function TopPosts({ posts }: { posts: TopPost[] }) {
               key={`${post.postId}-${post.platform}`}
               className="group flex items-center gap-2.5 border-b border-border/40 py-1.5 last:border-0"
             >
-              <Icon
-                className="size-3.5 shrink-0"
-                style={{ color: brand.tone }}
-                aria-label={post.platform}
-              />
+              <Link
+                to="/compose"
+                search={{ from: post.postId }}
+                className="-mx-1 flex min-w-0 flex-1 items-center gap-2.5 rounded-sm px-1 transition-colors hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              >
+                <Icon
+                  className="size-3.5 shrink-0"
+                  style={{ color: brand.tone }}
+                  aria-label={post.platform}
+                />
 
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-xs">{post.excerpt || '(no text)'}</span>
-                <span className="block truncate text-[0.6875rem] text-muted-foreground">
-                  {post.handle}
-                  {post.views === null ? '' : ` · ${post.views.toLocaleString()} impressions`}
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs">{post.excerpt || '(no text)'}</span>
+                  <span className="block truncate text-[0.6875rem] text-muted-foreground">
+                    {post.handle}
+                    {post.views === null ? '' : ` · ${post.views.toLocaleString()} impressions`}
+                  </span>
                 </span>
-              </span>
+              </Link>
 
               {/* A sparkbar, not a chart: it makes the ranking scannable without a second axis. */}
               <span className="hidden h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-muted/50 sm:block">
