@@ -300,14 +300,16 @@ fn apple_availability(_app: &AppHandle) -> (bool, String) {
     )
 }
 
+/// How long `--version` may take. Both CLIs answer in well under a second; a
+/// probe past this is a broken install, and Settings must not hang on it.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A version probe that answers is the only reliable "installed and runnable"
 /// signal — a `which` hit can still be a broken shim.
 fn probe(cli: &Cli) -> Option<String> {
-    let output = cli_command(cli.command)
-        .args(cli.probe)
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+    let mut command = cli_command(cli.command);
+    command.args(cli.probe);
+    let output = run_with_timeout(command, &[], PROBE_TIMEOUT).ok()??.output;
     if !output.status.success() {
         return None;
     }
