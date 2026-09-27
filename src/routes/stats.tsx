@@ -15,12 +15,17 @@ import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
 import { useAnimatedIcon } from '@/lib/animated-icon'
 import { brandOf } from '@/lib/platform-brand'
-import { readRefreshCost, useAccounts, usePosts, useRefreshEngagement, useStats } from '@/lib/query'
+import {
+  readRefreshCost,
+  useAccounts,
+  usePlatforms,
+  usePosts,
+  useRefreshEngagement,
+  useStats,
+} from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
 import type { Bucket, EngagementRow, PlatformId, StatsFilter } from '@/lib/tauri/types'
 import { cn, formatRelative } from '@/lib/utils'
-
-export const Route = createFileRoute('/stats')({ component: StatsScreen })
 
 const RANGES = [
   { key: '7', label: 'Last 7 days' },
@@ -28,6 +33,29 @@ const RANGES = [
   { key: '90', label: 'Last 90 days' },
   { key: 'all', label: 'All time' },
 ] as const
+
+type Range = (typeof RANGES)[number]['key']
+
+/**
+ * The filters live in the URL rather than in component state, so opening a post from a drilldown
+ * and coming back lands on the same view instead of resetting to the last 30 days. Every key is
+ * optional and a default is left out of the URL. `platform` is kept as a string here and resolved
+ * against the known platforms on the screen, where that list exists.
+ */
+export const Route = createFileRoute('/stats')({
+  component: StatsScreen,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { range?: Range; platform?: string; account?: number } => {
+    const range = RANGES.find((option) => option.key === search.range)?.key
+    const account = Number(search.account)
+    return {
+      ...(range === undefined ? {} : { range }),
+      ...(typeof search.platform === 'string' ? { platform: search.platform } : {}),
+      ...(Number.isInteger(account) && account > 0 ? { account } : {}),
+    }
+  },
+})
 
 /**
  * What actually happened.
@@ -46,28 +74,48 @@ const RANGES = [
  */
 function StatsScreen() {
   const accounts = useAccounts()
+  const platforms = usePlatforms()
   const posts = usePosts()
   const refresh = useRefreshEngagement()
   const [refreshRef, refreshHover] = useAnimatedIcon()
+  const search = Route.useSearch()
+  const navigate = Route.useNavigate()
+  const [drilldown, setDrilldown] = React.useState<Bucket | null>(null)
 
-  const [range, setRange] = React.useState<string>('30')
-  // The bound is computed when the range is CHOSEN, not on every render: reading
+  const range = search.range ?? '30'
+  // The bound is computed when the range CHANGES, not on every render: reading
   // the clock during render makes a fresh query key each pass, so the cached
   // answer is never the one being asked for.
-  const [since, setSince] = React.useState<string | null>(() => boundFor('30'))
-  const [platform, setPlatform] = React.useState<PlatformId | 'all'>('all')
-  const [accountId, setAccountId] = React.useState<number | 'all'>('all')
-  const [drilldown, setDrilldown] = React.useState<Bucket | null>(null)
+  const since = React.useMemo(() => boundFor(range), [range])
+  // The platforms on offer are the ones an account is connected to — not the
+  // ones in the current result, which a filter has already narrowed to one.
+  const connected = React.useMemo(
+    () =>
+      (platforms.data ?? []).filter((info) =>
+        (accounts.data ?? []).some((account) => account.platform === info.id),
+      ),
+    [platforms.data, accounts.data],
+  )
+  // Resolved against what is connected, so a URL naming a platform or account
+  // that has since been removed falls back to "all" instead of an empty view.
+  const platform = connected.find((info) => info.id === search.platform)?.id
+  const accountId = accounts.data?.find((account) => account.id === search.account)?.id
 
   const filter: StatsFilter = React.useMemo(
     () => ({
       since,
       until: null,
-      platforms: platform === 'all' ? [] : [platform],
-      accountIds: accountId === 'all' ? [] : [accountId],
+      platforms: platform === undefined ? [] : [platform],
+      accountIds: accountId === undefined ? [] : [accountId],
     }),
     [since, platform, accountId],
   )
+
+  /** Replaces one filter in the URL. `replace`, so Back leaves the screen rather than the filter. */
+  const setSearch = (next: { range?: Range; platform?: string; account?: number }) => {
+    setDrilldown(null)
+    void navigate({ search: (prev) => ({ ...prev, ...next }), replace: true })
+  }
 
   const stats = useStats(filter)
   const data = stats.data
@@ -80,8 +128,8 @@ function StatsScreen() {
     return (posts.data ?? []).filter((post) => ids.has(post.id))
   }, [drilldown, posts.data])
 
-  if (stats.isError || posts.isError || accounts.isError) {
-    return <QueryErrorState what="the stats" queries={[stats, posts, accounts]} />
+  if (stats.isError || posts.isError || accounts.isError || platforms.isError) {
+    return <QueryErrorState what="the stats" queries={[stats, posts, accounts, platforms]} />
   }
 
   // First run is a fact about the STORE, never about the filtered view: an empty 30-day window
@@ -104,9 +152,8 @@ function StatsScreen() {
         <Select
           value={range}
           onChange={(event) => {
-            setRange(event.target.value)
-            setSince(boundFor(event.target.value))
-            setDrilldown(null)
+            const chosen = RANGES.find((option) => option.key === event.target.value)?.key
+            setSearch({ range: chosen === '30' ? undefined : chosen })
           }}
           aria-label="Date range"
           className="w-36"
@@ -119,27 +166,27 @@ function StatsScreen() {
         </Select>
 
         <Select
-          value={platform}
+          value={platform ?? 'all'}
           onChange={(event) => {
-            setPlatform(event.target.value as PlatformId | 'all')
-            setDrilldown(null)
+            setSearch({ platform: event.target.value === 'all' ? undefined : event.target.value })
           }}
           aria-label="Platform"
           className="w-36"
         >
           <option value="all">All platforms</option>
-          {(data?.byPlatform ?? []).map((bucket) => (
-            <option key={bucket.key} value={bucket.key}>
-              {bucket.label}
+          {connected.map((info) => (
+            <option key={info.id} value={info.id}>
+              {info.name}
             </option>
           ))}
         </Select>
 
         <Select
-          value={String(accountId)}
+          value={String(accountId ?? 'all')}
           onChange={(event) => {
-            setAccountId(event.target.value === 'all' ? 'all' : Number(event.target.value))
-            setDrilldown(null)
+            setSearch({
+              account: event.target.value === 'all' ? undefined : Number(event.target.value),
+            })
           }}
           aria-label="Account"
           className="w-44"
