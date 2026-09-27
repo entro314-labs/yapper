@@ -196,6 +196,21 @@ pub fn refresh(config: &OAuthConfig<'_>, refresh_token: &str) -> Result<AccountS
     Ok(secret)
 }
 
+/// What a rejected refresh means. Not what a rejected code exchange means: a
+/// revoked or expired refresh token comes back as 400 `invalid_grant` (RFC 6749
+/// §5.2), which is the account needing reconnection even though a bare 400
+/// reads as a bad request — while a 429 or 5xx is the provider having a bad
+/// minute, and must stay retryable rather than flag a healthy account.
+pub fn refresh_rejection(status: u16, body: &str, platform: &str) -> AppError {
+    if body.contains("invalid_grant") {
+        return AppError::Unauthorized(format!(
+            "{platform} no longer accepts this account's sign-in (invalid_grant). Reconnect the \
+             account."
+        ));
+    }
+    from_status(status, body, platform)
+}
+
 fn exchange(
     config: &OAuthConfig<'_>,
     form: &[(&str, &str)],
@@ -215,9 +230,15 @@ fn exchange(
 
     let (status, body) = http::read_body(request.form(&fields).send()?);
     if !(200..300).contains(&status) {
-        // A rejected exchange is almost always a mis-registered app rather than a
-        // transient fault, so it must not come back as something retryable.
-        return Err(match from_status(status, &body, config.platform.label()) {
+        let platform = config.platform.label();
+        // Only a refresh carries a previous refresh token through.
+        if previous_refresh.is_some() {
+            return Err(refresh_rejection(status, &body, platform));
+        }
+        // A rejected code exchange is almost always a mis-registered app rather
+        // than a transient fault, so it must not come back as something
+        // retryable.
+        return Err(match from_status(status, &body, platform) {
             AppError::Platform(message) | AppError::Network(message) => AppError::Unauthorized(
                 format!("{message} Check the client id and the redirect URI on your app."),
             ),
@@ -364,6 +385,28 @@ pub fn needs_refresh(expires_at: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refresh_rejection_flags_a_dead_grant_and_retries_an_outage() {
+        // (status, body, expected class): a dead refresh token must flag the
+        // account; a provider having a bad minute must stay retryable.
+        let cases = [
+            (400, r#"{"error":"invalid_grant"}"#, "reconnect"),
+            (401, r#"{"error":"invalid_token"}"#, "reconnect"),
+            (429, "slow down", "retry"),
+            (503, "unavailable", "retry"),
+            (400, r#"{"error":"invalid_client"}"#, "terminal"),
+        ];
+        for (status, body, expected) in cases {
+            let error = refresh_rejection(status, body, "X");
+            let class = match error {
+                AppError::Unauthorized(_) => "reconnect",
+                ref other if other.is_retryable() => "retry",
+                _ => "terminal",
+            };
+            assert_eq!(class, expected, "{status} {body} became {error:?}");
+        }
+    }
 
     #[test]
     fn a_token_with_no_expiry_never_needs_refreshing() {

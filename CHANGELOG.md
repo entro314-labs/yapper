@@ -186,6 +186,12 @@ All notable changes to Windbag are documented here. The format follows
   validated afterwards, so a refused save still left a scheduled post that
   would fail at its time — and on a new post, the next save created a
   duplicate. It now validates first, as the agent door already did.
+- **A failed token refresh is read the right way round.** Every refresh failure
+  was treated like a misconfigured app: a brief 429 or 503 from X, Reddit,
+  LinkedIn or Bluesky failed the post for good and flagged a healthy account
+  for reconnection, while a revoked or expired refresh token (a 400
+  `invalid_grant`) failed every post without ever asking you to reconnect. An
+  outage now retries, and a dead grant flags the account.
 
 ### Activation
 

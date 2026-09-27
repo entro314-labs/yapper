@@ -409,6 +409,7 @@ pub fn authorize(client_id: &str, handle_or_did: &str) -> Result<Session> {
             ("redirect_uri", &redirect),
             ("code_verifier", &verifier),
         ],
+        false,
     )?;
 
     // The account the tokens are for must be the account that was asked for.
@@ -454,6 +455,7 @@ pub fn refresh(
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
         ],
+        true,
     )
 }
 
@@ -538,6 +540,7 @@ fn exchange(
     endpoint: &str,
     client_id: &str,
     form: &[(&str, &str)],
+    refreshing: bool,
 ) -> Result<TokenResponse> {
     let mut fields: Vec<(&str, &str)> = form.to_vec();
     fields.push(("client_id", client_id));
@@ -546,6 +549,9 @@ fn exchange(
         http::client().post(endpoint).form(&fields)
     })?;
     if !(200..300).contains(&status) {
+        if refreshing {
+            return Err(crate::oauth::refresh_rejection(status, &body, "Bluesky"));
+        }
         return Err(match from_status(status, &body, "Bluesky") {
             AppError::Platform(message) | AppError::Network(message) => {
                 AppError::Unauthorized(message)
