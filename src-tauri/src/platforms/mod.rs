@@ -515,10 +515,22 @@ pub fn adapter(id: PlatformId) -> &'static dyn Platform {
 /// Both callers need exactly this: the scheduler before it publishes, and
 /// [`crate::stats`] before it reads engagement. X's access tokens live two
 /// hours, so a reporting read on a day-old token fails without it.
+///
+/// The load → refresh → store runs under a per-account lock, and the secret is
+/// read only once the lock is held. The scheduler and a stats refresh can both
+/// arrive here for the same account; X and AT Protocol rotate refresh tokens,
+/// so without the lock both would present the same one and the second refresh
+/// would be refused — flagging a working account for reconnection. With it, the
+/// second caller reads the first one's fresh token and has nothing to refresh.
+/// (The MCP binary is a separate process and never refreshes.)
 pub fn live_secret(
     database: &crate::db::Db,
     account: &crate::db::Account,
 ) -> Result<AccountSecret> {
+    let lock = account_lock(account.id);
+    let _held = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let adapter = adapter(account.platform);
     let app_credentials =
         crate::secrets::load_app_credentials(account.platform, account.instance.as_deref())?;
@@ -532,6 +544,17 @@ pub fn live_secret(
         }
         None => Ok(secret),
     }
+}
+
+/// The lock [`live_secret`] holds for one account, created on first use.
+fn account_lock(account_id: i64) -> std::sync::Arc<std::sync::Mutex<()>> {
+    type Locks = std::sync::Mutex<HashMap<i64, std::sync::Arc<std::sync::Mutex<()>>>>;
+    static LOCKS: std::sync::OnceLock<Locks> = std::sync::OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Locks::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::sync::Arc::clone(locks.entry(account_id).or_default())
 }
 
 pub fn all_info() -> Vec<PlatformInfo> {
@@ -1114,6 +1137,38 @@ mod tests {
         let flag = "\u{1F1EC}\u{1F1E7}";
         assert_eq!(bluesky::Bluesky.count_body(flag), 1);
         assert_eq!(flag.chars().count(), 2);
+    }
+
+    #[test]
+    fn one_account_is_refreshed_by_one_caller_at_a_time() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        // Two callers on the same account must not overlap inside the lock —
+        // that overlap is two refreshes presenting one rotating token.
+        let inside = std::sync::Arc::new(AtomicBool::new(false));
+        let overlaps = std::sync::Arc::new(AtomicUsize::new(0));
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let inside = std::sync::Arc::clone(&inside);
+                let overlaps = std::sync::Arc::clone(&overlaps);
+                std::thread::spawn(move || {
+                    let lock = account_lock(-7);
+                    let _held = lock.lock().expect("lock");
+                    if inside.swap(true, Ordering::SeqCst) {
+                        overlaps.fetch_add(1, Ordering::SeqCst);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    inside.store(false, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+        assert_eq!(overlaps.load(Ordering::SeqCst), 0);
+        assert!(
+            !std::sync::Arc::ptr_eq(&account_lock(-7), &account_lock(-8)),
+            "different accounts never wait on each other"
+        );
     }
 
     #[test]
