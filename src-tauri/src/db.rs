@@ -365,15 +365,60 @@ impl Db {
         Ok(())
     }
 
-    /// Removes the row. The caller is responsible for the credential-store entry —
-    /// deleting the row first would orphan a secret nothing can name any more.
+    /// Removes the row, and with it (by cascade) that account's destinations,
+    /// attempts and metrics. The caller is responsible for the credential-store
+    /// entry.
+    ///
+    /// Every post that lost a destination is re-derived in the same
+    /// transaction: one left with none goes back to `draft`, one whose remaining
+    /// destinations have all settled takes the status they add up to, and one
+    /// still waiting on another destination keeps the status that already says
+    /// so — a future `scheduled` post must not turn into `publishing`.
+    ///
+    /// Refused while one of the account's destinations is mid-send: the cascade
+    /// would take the row the scheduler is about to settle, and with it the only
+    /// record of a send that may have landed.
     pub fn delete_account(&self, id: i64) -> Result<()> {
-        let changed = self
-            .lock()
-            .execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let sending = tx
+            .query_row(
+                "SELECT 1 FROM post_targets WHERE account_id = ?1 AND status = ?2 LIMIT 1",
+                params![id, TARGET_PUBLISHING],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if sending.is_some() {
+            return Err(AppError::Conflict(
+                "This account is sending a post right now. Wait for that to finish before \
+                 disconnecting it."
+                    .into(),
+            ));
+        }
+        let posts = {
+            let mut stmt =
+                tx.prepare("SELECT DISTINCT post_id FROM post_targets WHERE account_id = ?1")?;
+            stmt.query_map(params![id], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let changed = tx.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
         if changed == 0 {
             return Err(AppError::NotFound(format!("No account with id {id}.")));
         }
+        for post_id in posts {
+            let (remaining, waiting): (i64, i64) = tx.query_row(
+                "SELECT COUNT(*), COUNT(*) FILTER (WHERE status NOT IN (?2, ?3))
+                   FROM post_targets WHERE post_id = ?1",
+                params![post_id, TARGET_PUBLISHED, TARGET_FAILED],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if remaining == 0 {
+                set_status(&tx, post_id, POST_DRAFT)?;
+            } else if waiting == 0 {
+                reconcile(&tx, post_id)?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -450,11 +495,7 @@ impl Db {
     }
 
     pub fn set_post_status(&self, id: i64, status: &str) -> Result<()> {
-        self.lock().execute(
-            "UPDATE posts SET status = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, status, now_rfc3339()],
-        )?;
-        Ok(())
+        set_status(&self.lock(), id, status)
     }
 
     pub fn delete_post(&self, id: i64) -> Result<()> {
@@ -753,33 +794,9 @@ impl Db {
         .map_err(Into::into)
     }
 
-    /// Recomputes a post's status from its targets, which is the only place that
-    /// status is decided: every target published is `published`, some published
-    /// and the rest failed is `partial`, all failed is `failed`, anything still
-    /// pending keeps the post in flight.
+    /// See [`reconcile`].
     pub fn reconcile_post_status(&self, post_id: i64) -> Result<String> {
-        let targets = self.list_targets(post_id)?;
-        if targets.is_empty() {
-            return Ok(self.get_post(post_id)?.status);
-        }
-        let published = targets
-            .iter()
-            .filter(|t| t.status == TARGET_PUBLISHED)
-            .count();
-        let failed = targets.iter().filter(|t| t.status == TARGET_FAILED).count();
-        let status = if published == targets.len() {
-            POST_PUBLISHED
-        } else if published + failed == targets.len() {
-            if published == 0 {
-                POST_FAILED
-            } else {
-                POST_PARTIAL
-            }
-        } else {
-            POST_PUBLISHING
-        };
-        self.set_post_status(post_id, status)?;
-        Ok(status.to_string())
+        reconcile(&self.lock(), post_id)
     }
 
     // ─── Media ──────────────────────────────────────────────────────────────
@@ -1044,8 +1061,53 @@ pub struct PostFields<'a> {
 
 // ─── Post writes ────────────────────────────────────────────────────────────
 //
-// Free functions over a connection so the single-write methods and
-// `Db::save_post`'s transaction run the same SQL.
+// Free functions over a connection so the single-write methods and the
+// transactions in `Db::save_post` and `Db::delete_account` run the same SQL.
+
+fn set_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE posts SET status = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, status, now_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// Recomputes a post's status from its targets, which is the only place that
+/// status is decided: every target published is `published`, some published
+/// and the rest failed is `partial`, all failed is `failed`, anything still
+/// pending keeps the post in flight.
+fn reconcile(conn: &Connection, post_id: i64) -> Result<String> {
+    let statuses = {
+        let mut stmt = conn.prepare("SELECT status FROM post_targets WHERE post_id = ?1")?;
+        stmt.query_map(params![post_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if statuses.is_empty() {
+        return conn
+            .query_row(
+                "SELECT status FROM posts WHERE id = ?1",
+                params![post_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound(format!("No post with id {post_id}.")));
+    }
+    let published = statuses.iter().filter(|s| *s == TARGET_PUBLISHED).count();
+    let failed = statuses.iter().filter(|s| *s == TARGET_FAILED).count();
+    let status = if published == statuses.len() {
+        POST_PUBLISHED
+    } else if published + failed == statuses.len() {
+        if published == 0 {
+            POST_FAILED
+        } else {
+            POST_PARTIAL
+        }
+    } else {
+        POST_PUBLISHING
+    };
+    set_status(conn, post_id, status)?;
+    Ok(status.to_string())
+}
 
 fn insert_post(conn: &Connection, fields: &PostFields<'_>) -> Result<i64> {
     let now = now_rfc3339();
@@ -1813,6 +1875,75 @@ mod tests {
         let (db, account, post) = seeded();
         db.delete_account(account).expect("delete");
         assert!(db.list_targets(post).expect("targets").is_empty());
+    }
+
+    /// Two accounts and a future post aimed at both.
+    fn two_destinations() -> (Db, i64, i64, i64) {
+        let db = Db::open_in_memory().expect("store");
+        let a = db
+            .upsert_account(PlatformId::Bluesky, &connected("did:a", "a"))
+            .expect("a");
+        let b = db
+            .upsert_account(PlatformId::Mastodon, &connected("id:b", "b"))
+            .expect("b");
+        let later = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let post = db
+            .create_post("hi", None, None, Some(&later), POST_SCHEDULED)
+            .expect("post");
+        db.set_targets(
+            post,
+            &[(a, serde_json::json!({})), (b, serde_json::json!({}))],
+        )
+        .expect("targets");
+        (db, a, b, post)
+    }
+
+    #[test]
+    fn a_post_that_loses_its_only_destination_goes_back_to_draft() {
+        // Left `scheduled` with nowhere to go, it never sent and was later
+        // reported missed — or sat forever under the post-late policy.
+        let (db, account, post) = seeded();
+        db.delete_account(account).expect("delete");
+        assert_eq!(db.get_post(post).expect("post").status, POST_DRAFT);
+    }
+
+    #[test]
+    fn a_scheduled_post_that_loses_one_destination_stays_scheduled() {
+        let (db, a, _, post) = two_destinations();
+        db.delete_account(a).expect("delete");
+        assert_eq!(db.get_post(post).expect("post").status, POST_SCHEDULED);
+        assert_eq!(db.list_targets(post).expect("targets").len(), 1);
+    }
+
+    #[test]
+    fn a_partial_post_that_loses_its_failed_destination_is_published() {
+        let (db, _, b, post) = two_destinations();
+        let targets = db.list_targets(post).expect("targets");
+        db.finish_target_ok(targets[0].id, "1", None).expect("ok");
+        db.finish_target_err(targets[1].id, "nope", None)
+            .expect("fail");
+        assert_eq!(
+            db.reconcile_post_status(post).expect("status"),
+            POST_PARTIAL
+        );
+        assert_eq!(targets[1].account_id, b);
+
+        db.delete_account(b).expect("delete");
+        assert_eq!(db.get_post(post).expect("post").status, POST_PUBLISHED);
+    }
+
+    #[test]
+    fn an_account_cannot_be_disconnected_while_it_is_sending() {
+        let (db, account, post) = seeded();
+        let target = db.list_targets(post).expect("targets")[0].id;
+        assert!(db.claim_target(target).expect("claim"));
+
+        assert!(matches!(
+            db.delete_account(account),
+            Err(AppError::Conflict(_))
+        ));
+        assert!(db.get_account(account).is_ok());
+        assert_eq!(db.list_targets(post).expect("targets").len(), 1);
     }
 
     #[test]

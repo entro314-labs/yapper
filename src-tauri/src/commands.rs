@@ -173,11 +173,13 @@ fn run_connect(
 
 #[tauri::command]
 pub fn disconnect_account(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<()> {
-    // The credential-store entry goes first: deleting the row first would leave a
-    // secret nothing can name any more.
+    // The row goes first because it can refuse — while the account is mid-send —
+    // and forgetting the secret before a refusal would leave an account that
+    // can no longer post. Forgetting is best effort either way; the platform
+    // and remote id read here are all it needs once the row is gone.
     let account = state.db.get_account(id)?;
-    secrets::forget_account_secret(account.platform, &account.remote_id);
     state.db.delete_account(id)?;
+    secrets::forget_account_secret(account.platform, &account.remote_id);
     let _ = app.emit(EVENT_ACCOUNTS_CHANGED, ());
     let _ = app.emit(EVENT_QUEUE_CHANGED, ());
     Ok(())
