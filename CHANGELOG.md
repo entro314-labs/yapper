@@ -161,14 +161,17 @@ All notable changes to Windbag are documented here. The format follows
   `windbag-mcp` binary you had to build from source; it is now the app's own
   executable run with `--mcp`. Settings → Agent door shows the exact
   `claude mcp add` and `codex mcp add` commands for this machine.
-- **Claude Code and Codex drafts run with no tools and no MCP servers.**
-  Claude's `--restricted` still let the model read and write files, search the
-  web and call every claude.ai connector, so a prompt injection in a selected
-  note could put local file contents into a draft. Both now run in an empty
-  per-draft folder, with the tool list confirmed empty in a live session.
-- **Codex drafting no longer reads `~/.codex/config.toml`.** It is the only way
-  to keep its MCP servers out; set the model and effort in Settings →
-  Assistant.
+- **Claude Code drafts run with no tools and no MCP servers.** Its
+  `--restricted` still let the model read and write files, search the web and
+  call every claude.ai connector, so a prompt injection in a selected note
+  could put local file contents into a draft. The tool list is now confirmed
+  empty in a live session.
+- **Codex drafts run without a shell, file access, plugins or web search**, in
+  a read-only sandbox. Your `~/.codex/config.toml` is still read, so a custom
+  model provider keeps working — which also means its MCP servers are
+  reachable while drafting. Its notify hook is silenced.
+- **Both assistants run in an empty per-draft folder**, never in the app's own
+  working directory.
 - **A custom Bluesky client-metadata URL must be hosted on
   entro314-labs.github.io.** The app registers one callback scheme, derived from
   that host, so any other host is refused up front with an explanation instead

@@ -177,10 +177,15 @@ const CODEX: Cli = Cli {
     // hooks, memories, apps, a shell, a code-mode runtime, image viewing and web
     // search. With all of this the model reports no shell and no file access,
     // and a call to `exec` fails closed.
-    //   * `--ignore-user-config` skips config.toml — the only way to drop its
-    //     `[mcp_servers]`: `-c mcp_servers={}` merges into them rather than
-    //     replacing them. Auth still comes from CODEX_HOME. The user's default
-    //     model and effort go with it; Settings → Assistant supplies both.
+    //   * config.toml IS read, by decision: it is where a custom model provider
+    //     (Azure, a local model) and the user's default model live, and
+    //     dropping it with `--ignore-user-config` broke drafting for anyone who
+    //     relies on one. The cost is that its `[mcp_servers]` load too —
+    //     `-c mcp_servers={}` merges into them rather than replacing them — so
+    //     a model drafting here can reach whatever MCP servers the user gave
+    //     Codex. Claude, by contrast, runs with none (above).
+    //   * `-c notify=[]` silences config.toml's notify hook, which would
+    //     otherwise run the user's program after every draft.
     //   * `--ephemeral` keeps the turn out of their session history.
     //   * `--sandbox read-only` backstops anything that still executes.
     //   * `--disable` turns off features on by default: `plugins`, `apps`
@@ -196,7 +201,6 @@ const CODEX: Cli = Cli {
     args: &[
         "exec",
         "--skip-git-repo-check",
-        "--ignore-user-config",
         "--ephemeral",
         "--sandbox",
         "read-only",
@@ -224,6 +228,8 @@ const CODEX: Cli = Cli {
         "image_generation",
         "-c",
         "web_search=\"disabled\"",
+        "-c",
+        "notify=[]",
     ],
     probe: &["--version"],
     model_flag: "-m",
@@ -1196,11 +1202,14 @@ mod tests {
     }
 
     #[test]
-    fn codex_runs_sandboxed_without_user_config_or_tools() {
+    fn codex_runs_sandboxed_with_user_config_but_without_tools() {
         let answer = Path::new("/tmp/windbag-draft-1-0/answer.md");
         let args = build_args(&CODEX, Some("gpt-5"), Some("low"), Some(answer));
         assert_eq!(args[0], "exec");
-        assert!(args.iter().any(|arg| arg == "--ignore-user-config"));
+        // config.toml is read on purpose (a custom model provider lives there);
+        // only its notify hook is silenced.
+        assert!(!args.iter().any(|arg| arg == "--ignore-user-config"));
+        assert!(has_pair(&args, "-c", "notify=[]"));
         assert!(args.iter().any(|arg| arg == "--ephemeral"));
         assert!(has_pair(&args, "--sandbox", "read-only"));
         for feature in [
