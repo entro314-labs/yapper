@@ -303,7 +303,7 @@ fn apple_availability(_app: &AppHandle) -> (bool, String) {
 /// A version probe that answers is the only reliable "installed and runnable"
 /// signal — a `which` hit can still be a broken shim.
 fn probe(cli: &Cli) -> Option<String> {
-    let output = Command::new(cli.command)
+    let output = cli_command(cli.command)
         .args(cli.probe)
         .stdin(Stdio::null())
         .output()
@@ -317,6 +317,108 @@ fn probe(cli: &Cli) -> Option<String> {
     } else {
         version
     })
+}
+
+// ─── Finding the CLIs ───────────────────────────────────────────────────────
+
+/// How long the login shell may take to report its PATH. Generous — an rc file
+/// that loads nvm, pyenv and a prompt theme takes seconds — but bounded, since
+/// an rc file can also wait on input it will never get.
+#[cfg(not(windows))]
+const SHELL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Brackets the PATH in the shell's output. Login and interactive shells print
+/// whatever their rc files print (a "Last login" line, a fortune, job-control
+/// warnings with no terminal); only what sits between two of these is PATH.
+#[cfg(not(windows))]
+const PATH_SENTINEL: &str = "__WINDBAG_PATH__";
+
+/// A command for one assistant CLI, found and run with [`cli_path`].
+///
+/// PATH is set on the child rather than resolved to an absolute program path
+/// because the child needs it too: an npm-installed `codex` is a
+/// `#!/usr/bin/env node` script, and `env` searches the PATH it inherits. On
+/// Unix, std searches a PATH set on the command when it looks up the program.
+fn cli_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    if let Some(path) = cli_path() {
+        command.env("PATH", path);
+    }
+    command
+}
+
+/// The PATH the assistant CLIs live on, or `None` to inherit Windbag's own.
+///
+/// An app launched from Finder, the Dock or at login inherits launchd's PATH,
+/// `/usr/bin:/bin:/usr/sbin:/sbin` — none of the places `claude` and `codex`
+/// install to (`~/.local/bin`, Homebrew, npm's prefix). The user's login
+/// shell knows them, so it is asked once and the answer kept for the session.
+/// Nothing is written to Windbag's own environment: the rest of the process
+/// has no business running things from the user's PATH.
+#[cfg(not(windows))]
+fn cli_path() -> Option<&'static std::ffi::OsStr> {
+    static PATH: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let Some(shell) = std::env::var_os("SHELL").filter(|shell| !shell.is_empty()) else {
+            log::warn!("SHELL is unset; the assistant CLIs are looked up on the inherited PATH");
+            return None;
+        };
+        let path = login_shell_path(&shell);
+        if path.is_none() {
+            log::warn!(
+                "{} did not report a PATH; the assistant CLIs are looked up on the inherited PATH",
+                shell.to_string_lossy()
+            );
+        }
+        path
+    })
+    .as_deref()
+}
+
+/// Windows GUI apps inherit the user's full PATH from the registry, so there is
+/// nothing to resolve.
+#[cfg(windows)]
+fn cli_path() -> Option<&'static std::ffi::OsStr> {
+    None
+}
+
+/// Asks `shell`, started as a login and interactive shell so both its profile
+/// and its rc file run, for its PATH. `None` when it fails, hangs or prints
+/// no bracketed PATH — `csh` and `nu` reject the invocation, for instance.
+#[cfg(not(windows))]
+fn login_shell_path(shell: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    let mut command = Command::new(shell);
+    command.args([
+        "-l",
+        "-i",
+        "-c",
+        &format!(r#"printf '%s%s%s' {PATH_SENTINEL} "$PATH" {PATH_SENTINEL}"#),
+    ]);
+    if let Some(home) = dirs::home_dir() {
+        command.current_dir(home);
+    }
+    let finished = match run_with_timeout(command, b"", SHELL_TIMEOUT) {
+        Ok(Some(finished)) => finished,
+        Ok(None) => {
+            log::warn!("the login shell did not answer within {SHELL_TIMEOUT:?}");
+            return None;
+        }
+        Err(err) => {
+            log::warn!("could not start the login shell: {err}");
+            return None;
+        }
+    };
+    parse_login_path(&String::from_utf8_lossy(&finished.output.stdout))
+        .map(std::ffi::OsString::from)
+}
+
+/// The PATH between the first two sentinels, when there is a non-blank one.
+#[cfg(not(windows))]
+fn parse_login_path(output: &str) -> Option<String> {
+    let (_, rest) = output.split_once(PATH_SENTINEL)?;
+    let (path, _) = rest.split_once(PATH_SENTINEL)?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| path.to_string())
 }
 
 // ─── Drafting ───────────────────────────────────────────────────────────────
@@ -469,7 +571,7 @@ fn run_cli(cli: &Cli, prompt: &str, model: Option<&str>, effort: Option<&str>) -
     let answer_file = cli.uses_output_file.then(|| scratch.0.join("answer.md"));
     let args = build_args(cli, model, effort, answer_file.as_deref());
 
-    let mut command = Command::new(cli.command);
+    let mut command = cli_command(cli.command);
     command.args(&args).current_dir(&scratch.0);
     let finished = run_with_timeout(command, prompt.as_bytes(), TIMEOUT)
         .map_err(|err| {
@@ -1065,6 +1167,48 @@ mod tests {
         let path = first.0.clone();
         drop(first);
         assert!(!path.exists(), "the scratch directory outlived its draft");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_login_path_is_read_between_the_sentinels_despite_shell_noise() {
+        let output = format!(
+            "Last login: Sat Sep 27 on ttys001\nzsh: no job control\n\
+             {PATH_SENTINEL}/Users/me/.local/bin:/opt/homebrew/bin:/usr/bin{PATH_SENTINEL}\
+             \nfortune: a banner the rc file prints on exit\n"
+        );
+        assert_eq!(
+            parse_login_path(&output).as_deref(),
+            Some("/Users/me/.local/bin:/opt/homebrew/bin:/usr/bin")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_shell_that_never_printed_the_path_yields_nothing() {
+        assert!(parse_login_path("").is_none());
+        assert!(parse_login_path("zsh: command not found: printf").is_none());
+        assert!(parse_login_path(&format!("{PATH_SENTINEL}/usr/bin")).is_none());
+        assert!(parse_login_path(&format!("{PATH_SENTINEL}{PATH_SENTINEL}")).is_none());
+        assert!(parse_login_path(&format!("{PATH_SENTINEL}  \n{PATH_SENTINEL}")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_login_shell_reports_its_path() {
+        let path = login_shell_path(std::ffi::OsStr::new("/bin/sh")).expect("sh prints a PATH");
+        assert!(!path.is_empty());
+        assert!(!path.to_string_lossy().contains(PATH_SENTINEL));
+    }
+
+    #[test]
+    fn cli_commands_are_found_and_run_with_the_resolved_path() {
+        let command = cli_command("claude");
+        let path = command
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, value)| value);
+        assert_eq!(path, cli_path());
     }
 
     #[test]
