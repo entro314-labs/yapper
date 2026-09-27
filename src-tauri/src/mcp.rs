@@ -860,6 +860,40 @@ mod tests {
     }
 
     #[test]
+    fn the_ads_tools_are_listed_for_a_page_connected_with_the_ads_scopes() {
+        // Decided from the scopes the connection was made with, which the store
+        // holds — so listing tools never reads the credential store.
+        let (mut session, _) = session();
+        session
+            .db
+            .upsert_account(
+                PlatformId::Facebook,
+                &Connected {
+                    remote_id: "page:1".into(),
+                    handle: "My Page".into(),
+                    display_name: None,
+                    avatar_url: None,
+                    instance: None,
+                    scopes: Some("pages_manage_posts,ads_read,ads_management".into()),
+                    char_limit: None,
+                    secret: AccountSecret::default(),
+                },
+            )
+            .expect("page");
+        let listed = session
+            .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+            .expect("reply");
+        let names: Vec<&str> = listed
+            .pointer("/result/tools")
+            .and_then(Value::as_array)
+            .expect("tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(names.contains(&"meta_ads_call"), "{names:?}");
+    }
+
+    #[test]
     fn an_unlisted_ads_tool_still_answers_with_what_is_missing() {
         // Routed even when unlisted: an agent with an older catalogue gets told
         // to connect a Page, not a protocol error.

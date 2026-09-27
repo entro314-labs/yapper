@@ -47,23 +47,20 @@ pub fn ads_access(app: &AppCredentials) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("yes"))
 }
 
-/// Whether the ads tools can work at all: a Facebook Page is connected and its
-/// Meta app has Ads access turned on.
-///
-/// The store is asked first, so a user with no Facebook Page — every test, and
-/// most people — never has the credential store read on their behalf.
+/// Whether the ads tools can work at all: a Facebook Page connected WITH the ads
+/// scope. Read from the scopes the store recorded at connect time rather than
+/// from the app's Ads access setting: a Page connected before that setting was
+/// turned on never got the scope, and the store answers without touching the
+/// credential store — which an agent host starting `windbag --mcp` must not
+/// trigger a keychain prompt for.
 pub fn available(db: &Db) -> Result<bool> {
-    if !db
-        .list_accounts()?
-        .iter()
-        .any(|account| account.platform == PlatformId::Facebook)
-    {
-        return Ok(false);
-    }
-    Ok(
-        crate::secrets::load_app_credentials(PlatformId::Facebook, None)?
-            .is_some_and(|app| ads_access(&app)),
-    )
+    Ok(db.list_accounts()?.iter().any(|account| {
+        account.platform == PlatformId::Facebook
+            && account
+                .scopes
+                .as_deref()
+                .is_some_and(|scopes| scopes.split([',', ' ']).any(|s| s == "ads_management"))
+    }))
 }
 
 /// One connection, holding what Meta hands back on `initialize`.
