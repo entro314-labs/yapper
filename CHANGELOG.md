@@ -8,6 +8,8 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Added
 
+- **Bluesky hashtags are real tags.** Posts carry tag facets found by the same
+  rules bsky.app uses, so a tag is clickable and shows up in tag search.
 - **Engagement bars and top posts drill down too.** A platform's engagement bar
   opens its measured posts; a top-post row opens the post in Windbag as a new
   draft, beside the link to the live post.
@@ -141,6 +143,12 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Changed
 
+- **A post's link is never dropped.** Where a platform has nowhere native for it
+  (always on Bluesky, X, Mastodon and Instagram; on Threads, Facebook and
+  LinkedIn when the post has attachments; on a Reddit self post) it is added to
+  the text on its own line and counted in the composer's limit.
+- **X posts are counted the way X counts them.** Every URL costs 23 and emoji
+  and CJK cost 2, so the composer refuses what X would refuse.
 - **A partly sent post can be edited, and saving re-queues only what did not go
   out.** Destinations that already published keep their copy and permalink; the
   composer names them and says the edit applies to the rest. Editing a failed
@@ -196,6 +204,28 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Fixed
 
+- **No double posts after a lost answer.** A timeout or unreadable reply after a
+  post was sent is no longer retried blindly: Bluesky, Threads and Instagram
+  pick up the post they already started, and the other platforms stop with
+  "may have gone out — check before retrying".
+- **Threads and Instagram media is not re-uploaded on every retry.** A container
+  still processing is checked again on the next attempt instead of rebuilt.
+- **Video and GIF posts work on Mastodon and X.** Windbag waits for the platform
+  to finish processing before posting.
+- **Instagram carousels with video publish.**
+- **A 403 no longer marks a working account "reconnect".** Only a 401, or a 403
+  that says the token is bad, does.
+- **Rate limits are waited out.** X's named reset, including the daily cap, is
+  honoured, and X's spend cap is reported as out of credit instead of being
+  retried five times.
+- **Threads' counter no longer undercounts emoji sequences** — families,
+  keycaps, ©, ⌚ and the like.
+- **Large uploads no longer time out after 60 seconds**; the timeout scales with
+  the file.
+- **An interrupted database upgrade no longer blocks every later launch.**
+- **Two refreshes of the same account can no longer collide** and knock out an
+  account whose tokens rotate.
+- **Instagram uses the same Graph API version as the other Meta calls.**
 - **A rescheduled failed post actually sends.** Editing it left the failed
   destination untouched, so it sat as "Scheduled" with nothing to send.
 - **A post cannot be changed or deleted while it is being sent.** The queue shows
