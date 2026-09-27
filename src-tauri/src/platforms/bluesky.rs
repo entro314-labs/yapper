@@ -170,6 +170,10 @@ impl Platform for Bluesky {
             || normalize_pds(request.account.instance.as_deref()),
             str::to_string,
         );
+        if let Some(done) = already_created(request, &pds)? {
+            return Ok(done);
+        }
+        let rkey = record_key(request)?;
         let app_password = request.secret.extra_str("app_password").ok_or_else(|| {
             AppError::Unauthorized(
                 "The stored Bluesky app password is missing. Reconnect the account.".into(),
@@ -202,6 +206,7 @@ impl Platform for Bluesky {
                 .json(&json!({
                     "repo": session.did,
                     "collection": COLLECTION,
+                    "rkey": rkey,
                     "record": record,
                 }))
                 .send()?,
@@ -365,6 +370,10 @@ fn refresh_oauth(secret: &AccountSecret) -> Result<AccountSecret> {
 
 fn publish_oauth(request: &PublishRequest<'_>) -> Result<Published> {
     let context = oauth_context(request.secret)?;
+    if let Some(done) = already_created(request, &context.pds)? {
+        return Ok(done);
+    }
+    let rkey = record_key(request)?;
 
     let mut record = post_record(request.body);
     if !request.media.is_empty() {
@@ -386,6 +395,7 @@ fn publish_oauth(request: &PublishRequest<'_>) -> Result<Published> {
     let payload = json!({
         "repo": request.account.remote_id,
         "collection": COLLECTION,
+        "rkey": rkey,
         "record": record,
     });
     let (status, body) = dpop::send(&context.key, "POST", &url, Some(&context.token), || {
@@ -526,6 +536,85 @@ fn upload_blob(pds: &str, access_jwt: &str, bytes: &[u8], mime: &str) -> Result<
         .ok_or_else(|| AppError::Platform("Bluesky's upload response carried no blob.".into()))
 }
 
+// ─── Record keys ────────────────────────────────────────────────────────────
+//
+// Every post is created under a record key chosen HERE and stored on the target
+// before `createRecord` goes out. A retry therefore asks the PDS whether that
+// key already holds a record — the earlier attempt landed and only its answer
+// was lost — and if so reports that post instead of creating a second one.
+// Asking first matters: the reference PDS answers a create on a taken key with
+// a bare 500, which would read as an outage and be retried for ever.
+//
+// Minted fresh rather than derived from the target id: target ids restart at 1
+// in a new or reset store, and the same key in the same repo would make an old
+// post read as this one.
+
+const TID_ALPHABET: &str = "234567abcdefghijklmnopqrstuvwxyz";
+
+/// A TID, the key type `app.bsky.feed.post` declares: the top bit 0, 53 bits of
+/// microseconds since the epoch, 10 bits of clock id, written as 13
+/// base32-sortable characters.
+fn tid(micros: u64, clock: u16) -> String {
+    let value = ((micros & ((1 << 53) - 1)) << 10) | u64::from(clock & 0x3FF);
+    let alphabet = TID_ALPHABET.as_bytes();
+    (0..13u32)
+        .rev()
+        .map(|digit| {
+            let index = usize::try_from((value >> (digit * 5)) & 31).unwrap_or_default();
+            char::from(alphabet[index])
+        })
+        .collect()
+}
+
+/// The post an earlier attempt already created under this target's key, if
+/// there is one.
+fn already_created(request: &PublishRequest<'_>, pds: &str) -> Result<Option<Published>> {
+    let Some(rkey) = request.resume_key else {
+        return Ok(None);
+    };
+    // `getRecord` is public on every PDS, so neither auth path needs a token.
+    let (status, body) = http::read_body(
+        http::client()
+            .get(format!("{pds}/xrpc/com.atproto.repo.getRecord"))
+            .query(&[
+                ("repo", request.account.remote_id.as_str()),
+                ("collection", COLLECTION),
+                ("rkey", rkey),
+            ])
+            .send()?,
+    );
+    Ok(found_record(status, &body)?.map(|uri| Published {
+        remote_url: Some(permalink(&request.account.handle, &uri)),
+        remote_id: uri,
+    }))
+}
+
+/// A `getRecord` answer: the record's URI, `None` for a key nothing holds.
+fn found_record(status: u16, body: &str) -> Result<Option<String>> {
+    if (200..300).contains(&status) {
+        let record: CreateRecord = serde_json::from_str(body).map_err(|e| {
+            AppError::Platform(format!("Bluesky returned an unreadable record: {e}"))
+        })?;
+        return Ok(Some(record.uri));
+    }
+    if status == 400 && body.contains("RecordNotFound") {
+        return Ok(None);
+    }
+    Err(from_status(status, body, "Bluesky"))
+}
+
+/// The key this attempt creates the post under: the stored one on a retry, a
+/// fresh TID — stored before it is used — otherwise.
+fn record_key(request: &PublishRequest<'_>) -> Result<String> {
+    if let Some(rkey) = request.resume_key {
+        return Ok(rkey.to_string());
+    }
+    let micros = u64::try_from(chrono::Utc::now().timestamp_micros()).unwrap_or_default();
+    let rkey = tid(micros, rand::random::<u16>());
+    (request.keep_resume_key)(Some(&rkey))?;
+    Ok(rkey)
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn normalize_pds(value: Option<&str>) -> String {
@@ -636,6 +725,49 @@ mod tests {
                 "at://did:plc:abc/app.bsky.feed.post/3kabc"
             ),
             "https://bsky.app/profile/me.bsky.social/post/3kabc"
+        );
+    }
+
+    #[test]
+    fn a_record_key_is_a_valid_tid() {
+        // The atproto TID spec: 13 base32-sortable characters, the first one
+        // limited because the top bit is always 0.
+        for (micros, clock) in [(0, 0), (1_790_000_000_000_000, 1023), ((1 << 53) - 1, 7)] {
+            let key = tid(micros, clock);
+            assert_eq!(key.len(), 13, "{key}");
+            assert!("234567abcdefghij".contains(&key[..1]), "{key}");
+            assert!(key.chars().all(|ch| TID_ALPHABET.contains(ch)), "{key}");
+        }
+        assert_eq!(tid(0, 0), "2222222222222");
+    }
+
+    #[test]
+    fn later_record_keys_sort_after_earlier_ones() {
+        assert!(tid(1_790_000_000_000_001, 0) > tid(1_790_000_000_000_000, 1023));
+    }
+
+    #[test]
+    fn a_missing_record_is_not_an_error_and_a_found_one_yields_its_uri() {
+        assert_eq!(
+            found_record(
+                400,
+                r#"{"error":"RecordNotFound","message":"Could not locate record"}"#
+            )
+            .expect("not found"),
+            None
+        );
+        assert_eq!(
+            found_record(
+                200,
+                r#"{"uri":"at://did:plc:a/app.bsky.feed.post/3k","cid":"b","value":{}}"#
+            )
+            .expect("found"),
+            Some("at://did:plc:a/app.bsky.feed.post/3k".to_string())
+        );
+        assert!(
+            found_record(503, "down")
+                .expect_err("outage")
+                .is_retryable()
         );
     }
 
