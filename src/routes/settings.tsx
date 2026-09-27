@@ -1,5 +1,6 @@
 import { IconAlertTriangle, IconCircleCheck } from '@tabler/icons-react'
 import { createFileRoute } from '@tanstack/react-router'
+import { ask } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import * as React from 'react'
 import { toast } from 'sonner'
@@ -834,6 +835,16 @@ function AppCredentialsRow({ info }: { info: PlatformInfo }) {
                       // connected with this app keep working until their tokens
                       // expire — there is nothing to refresh them with after
                       // that, which is what the account list will then say.
+                      const proceed = await ask(
+                        `This deletes the ${info.name} app's credentials from your keychain. Accounts connected through it keep posting until their tokens expire, then need the app added again to reconnect.`,
+                        {
+                          title: `Remove your ${info.name} app?`,
+                          kind: 'warning',
+                          okLabel: 'Remove',
+                          cancelLabel: 'Cancel',
+                        },
+                      )
+                      if (!proceed) return
                       await forget.mutateAsync({ platform: info.id })
                       toast.success(`Removed your ${info.name} app`)
                       setDraft({})

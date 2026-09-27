@@ -1,5 +1,6 @@
 import { IconAlertTriangle, IconPlus, IconTrash, IconUsers } from '@tabler/icons-react'
 import { Link, createFileRoute } from '@tanstack/react-router'
+import { ask } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import * as React from 'react'
 import { toast } from 'sonner'
@@ -125,6 +126,22 @@ function AccountsScreen() {
                     onClick={() => {
                       void (async () => {
                         try {
+                          // Asked natively because this is not undoable: the
+                          // account's rows cascade, taking its delivery
+                          // history and stats with them.
+                          const platformName =
+                            platforms.data?.find((item) => item.id === account.platform)?.name ??
+                            account.platform
+                          const proceed = await ask(
+                            `This removes ${account.handle} from every post it is a destination of, along with those destinations' delivery history and stats in Windbag. Anything already published on ${platformName} stays there.`,
+                            {
+                              title: `Disconnect ${account.handle}?`,
+                              kind: 'warning',
+                              okLabel: 'Disconnect',
+                              cancelLabel: 'Cancel',
+                            },
+                          )
+                          if (!proceed) return
                           await disconnect.mutateAsync(account.id)
                           toast.success(`Disconnected ${account.handle}`)
                         } catch (err) {

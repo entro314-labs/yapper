@@ -41,6 +41,7 @@ function NotesScreen() {
   const [title, setTitle] = React.useState('')
   const [body, setBody] = React.useState('')
   const [loaded, setLoaded] = React.useState<number | null>(null)
+  const [confirmingDelete, setConfirmingDelete] = React.useState(false)
 
   const current = React.useMemo(
     () => notes.data?.find((note) => note.id === selected),
@@ -57,6 +58,7 @@ function NotesScreen() {
   }, [current, loaded])
 
   const startNew = React.useCallback(() => {
+    setConfirmingDelete(false)
     setSelected(null)
     setLoaded(null)
     setTitle('')
@@ -125,6 +127,8 @@ function NotesScreen() {
               <button
                 type="button"
                 onClick={() => {
+                  // An armed delete belongs to the note it was armed on.
+                  setConfirmingDelete(false)
                   setSelected(note.id)
                 }}
                 className={cn(
@@ -181,9 +185,18 @@ function NotesScreen() {
                   </Button>
                   <Button
                     size="icon-sm"
-                    variant="ghost"
-                    aria-label="Delete note"
+                    variant={confirmingDelete ? 'destructive' : 'ghost'}
+                    aria-label={confirmingDelete ? 'Confirm delete' : 'Delete note'}
+                    // Two-step, the same as deleting a post from the queue.
                     onClick={() => {
+                      if (!confirmingDelete) {
+                        setConfirmingDelete(true)
+                        window.setTimeout(() => {
+                          setConfirmingDelete(false)
+                        }, 3000)
+                        return
+                      }
+                      setConfirmingDelete(false)
                       void (async () => {
                         try {
                           await deleteNote.mutateAsync(current.id)
