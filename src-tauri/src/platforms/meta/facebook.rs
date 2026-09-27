@@ -185,19 +185,14 @@ impl Platform for Facebook {
         let page = &request.account.remote_id;
         let base = api_base();
 
-        let images: Vec<&MediaItem> = request
+        // A video is its own endpoint and cannot share a post with photos;
+        // `validate` admits one only on its own (see `MEDIA`), so a post here
+        // is either that video or nothing but photos.
+        if let Some(item) = request
             .media
             .iter()
-            .filter(|item| !item.mime.starts_with("video/"))
-            .collect();
-        let video = request
-            .media
-            .iter()
-            .find(|item| item.mime.starts_with("video/"));
-
-        // A video is its own endpoint and cannot share a post with photos, so it
-        // wins outright rather than being silently dropped from a /feed post.
-        if let Some(item) = video {
+            .find(|item| item.mime.starts_with("video/"))
+        {
             let response = upload_bytes(
                 &format!("{base}/{page}/videos"),
                 item,
@@ -214,7 +209,7 @@ impl Platform for Facebook {
             });
         }
 
-        match images.len() {
+        match request.media.len() {
             0 => {
                 let mut form = vec![("message", request.body), ("access_token", token.as_str())];
                 if let Some(link) = request.link {
@@ -228,8 +223,14 @@ impl Platform for Facebook {
                 })
             }
             1 => {
-                let response =
-                    upload_photo(&base, page, token, images[0], Some(request.body), true)?;
+                let response = upload_photo(
+                    &base,
+                    page,
+                    token,
+                    &request.media[0],
+                    Some(request.body),
+                    true,
+                )?;
                 // A published photo answers with both its own id and the id of
                 // the post wrapping it; the post is what a permalink addresses.
                 let id = response
@@ -245,8 +246,8 @@ impl Platform for Facebook {
             _ => {
                 // Unpublished first, then one /feed post referencing them all —
                 // otherwise each photo becomes a separate post on the Page.
-                let mut attached = Vec::with_capacity(images.len());
-                for item in &images {
+                let mut attached = Vec::with_capacity(request.media.len());
+                for item in request.media {
                     let response = upload_photo(&base, page, token, item, None, false)?;
                     attached.push(id_of(&response, LABEL, "photo")?);
                 }
