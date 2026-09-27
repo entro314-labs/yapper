@@ -385,6 +385,32 @@ pub fn requeue(database: &Arc<Db>, post_id: i64, scheduled_at: &str) -> Result<(
     Ok(())
 }
 
+/// Clears one destination's error and backoff so the next pass tries it
+/// again. Returns its post.
+///
+/// Refused on a post with no time rather than giving it "now": a draft is
+/// explicitly something that does not go out yet, and a retry button that
+/// quietly publishes one is the surprising reading. "Post now" is one click
+/// away for the other intent.
+pub fn retry(database: &Db, target_id: i64) -> Result<i64> {
+    let post_id = database
+        .list_posts()?
+        .into_iter()
+        .find(|detail| detail.targets.iter().any(|t| t.id == target_id))
+        .map(|detail| detail.post.id)
+        .ok_or_else(|| AppError::NotFound(format!("No destination with id {target_id}.")))?;
+    if database.get_post(post_id)?.scheduled_at.is_none() {
+        return Err(AppError::InvalidInput(
+            "This post has no time, so a retry would never send it. Give it a time, or use \
+             Post now."
+                .into(),
+        ));
+    }
+    database.requeue_target(target_id)?;
+    database.reconcile_post_status(post_id)?;
+    Ok(post_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -789,6 +815,59 @@ mod tests {
         assert_eq!(
             database.get_post(post).expect("post").status,
             POST_SCHEDULED
+        );
+    }
+
+    #[test]
+    fn retrying_a_destination_of_a_post_with_no_time_is_refused() {
+        // Nothing sends a post without a time, so the retry used to leave it
+        // `publishing` with nothing ever due — only deleting it got out.
+        let (database, _, post, target) = store();
+        settle(
+            &database,
+            target,
+            post,
+            1,
+            Err(AppError::InvalidInput("too long".into())),
+        )
+        .expect("fail");
+        let current = database.get_post(post).expect("post");
+        database
+            .update_post(post, &current.body, None, None, None, db::POST_DRAFT)
+            .expect("unscheduled");
+
+        let err = retry(&database, target).unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
+        assert_eq!(
+            database.list_targets(post).expect("targets")[0].status,
+            TARGET_FAILED
+        );
+        assert_eq!(
+            database.get_post(post).expect("post").status,
+            db::POST_DRAFT
+        );
+    }
+
+    #[test]
+    fn retrying_a_failed_destination_puts_its_post_back_in_flight() {
+        let (database, _, post, target) = store();
+        settle(
+            &database,
+            target,
+            post,
+            1,
+            Err(AppError::InvalidInput("too long".into())),
+        )
+        .expect("fail");
+
+        assert_eq!(retry(&database, target).expect("retry"), post);
+        assert_eq!(
+            database.list_targets(post).expect("targets")[0].status,
+            TARGET_PENDING
+        );
+        assert_eq!(
+            database.get_post(post).expect("post").status,
+            POST_PUBLISHING
         );
     }
 

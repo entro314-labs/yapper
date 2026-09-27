@@ -1075,22 +1075,25 @@ fn set_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
 /// Recomputes a post's status from its targets, which is the only place that
 /// status is decided: every target published is `published`, some published
 /// and the rest failed is `partial`, all failed is `failed`, anything still
-/// pending keeps the post in flight.
+/// pending keeps the post in flight — unless it has no time, because nothing
+/// sends a post without one, and `publishing` there would promise a send that
+/// never comes. Such a post is a draft.
 fn reconcile(conn: &Connection, post_id: i64) -> Result<String> {
+    let (current, scheduled_at): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, scheduled_at FROM posts WHERE id = ?1",
+            params![post_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::NotFound(format!("No post with id {post_id}.")))?;
     let statuses = {
         let mut stmt = conn.prepare("SELECT status FROM post_targets WHERE post_id = ?1")?;
         stmt.query_map(params![post_id], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
     if statuses.is_empty() {
-        return conn
-            .query_row(
-                "SELECT status FROM posts WHERE id = ?1",
-                params![post_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or_else(|| AppError::NotFound(format!("No post with id {post_id}.")));
+        return Ok(current);
     }
     let published = statuses.iter().filter(|s| *s == TARGET_PUBLISHED).count();
     let failed = statuses.iter().filter(|s| *s == TARGET_FAILED).count();
@@ -1102,6 +1105,8 @@ fn reconcile(conn: &Connection, post_id: i64) -> Result<String> {
         } else {
             POST_PARTIAL
         }
+    } else if scheduled_at.is_none() {
+        POST_DRAFT
     } else {
         POST_PUBLISHING
     };
@@ -1816,6 +1821,21 @@ mod tests {
             db.list_targets(post).expect("targets")[0].status,
             TARGET_PUBLISHING
         );
+    }
+
+    #[test]
+    fn a_post_with_no_time_is_never_reconciled_into_flight() {
+        // `publishing` promises a send; without a time nothing is ever due.
+        let db = Db::open_in_memory().expect("store");
+        let account = db
+            .upsert_account(PlatformId::Bluesky, &connected("did:1", "me"))
+            .expect("account");
+        let post = db
+            .create_post("hi", None, None, None, POST_DRAFT)
+            .expect("post");
+        db.set_targets(post, &[(account, serde_json::json!({}))])
+            .expect("targets");
+        assert_eq!(db.reconcile_post_status(post).expect("status"), POST_DRAFT);
     }
 
     #[test]

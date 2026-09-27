@@ -484,15 +484,7 @@ pub fn reschedule_post(
 /// Clears one destination's error and backoff so the next pass tries it again.
 #[tauri::command]
 pub fn retry_target(app: AppHandle, state: State<'_, AppState>, target_id: i64) -> Result<()> {
-    state.db.requeue_target(target_id)?;
-    let post_id = state
-        .db
-        .list_posts()?
-        .into_iter()
-        .find(|detail| detail.targets.iter().any(|t| t.id == target_id))
-        .map(|detail| detail.post.id)
-        .ok_or_else(|| AppError::NotFound(format!("No destination with id {target_id}.")))?;
-    state.db.reconcile_post_status(post_id)?;
+    let post_id = scheduler::retry(&state.db, target_id)?;
     let _ = app.emit(EVENT_QUEUE_CHANGED, post_id);
     state.scheduler.nudge();
     Ok(())
