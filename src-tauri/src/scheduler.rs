@@ -367,8 +367,16 @@ pub fn recover_interrupted(database: &Arc<Db>) -> Result<usize> {
 /// Puts a missed or failed post back in the queue at a new time. Targets that
 /// already published keep their permalink; everything else is cleared of its
 /// error and its backoff.
+///
+/// A published post is refused, as the save path refuses to edit one: with
+/// nothing left to send it would sit `scheduled` and later read as missed.
 pub fn requeue(database: &Arc<Db>, post_id: i64, scheduled_at: &str) -> Result<()> {
     let post = database.get_post(post_id)?;
+    if post.status == db::POST_PUBLISHED {
+        return Err(AppError::Conflict(
+            "This post has already gone out and cannot be rescheduled.".into(),
+        ));
+    }
     database.update_post(
         post_id,
         &post.body,
@@ -815,6 +823,34 @@ mod tests {
         assert_eq!(
             database.get_post(post).expect("post").status,
             POST_SCHEDULED
+        );
+    }
+
+    #[test]
+    fn a_published_post_cannot_be_requeued() {
+        // Dragging a published post on the calendar used to set it back to
+        // `scheduled` with nothing left to send; it later showed as missed.
+        let (database, _, post, target) = store();
+        settle(
+            &database,
+            target,
+            post,
+            1,
+            Ok(Published {
+                remote_id: "at://1".into(),
+                remote_url: None,
+            }),
+        )
+        .expect("published");
+
+        let later = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        assert!(matches!(
+            requeue(&database, post, &later),
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            database.get_post(post).expect("post").status,
+            POST_PUBLISHED
         );
     }
 
