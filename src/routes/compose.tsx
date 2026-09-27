@@ -12,10 +12,12 @@ import { EmptyState } from '@/components/shell/empty-state'
 import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Kbd } from '@/components/ui/kbd'
 import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { useAnimatedIcon } from '@/lib/animated-icon'
+import { IS_MACOS } from '@/lib/chrome'
 import { brandOf } from '@/lib/platform-brand'
 import {
   useAccounts,
@@ -177,6 +179,22 @@ function ComposeScreen() {
     },
     [collect, savePost, publishNow, navigate, when],
   )
+
+  // Cmd/Ctrl+Enter is the Schedule / Save draft button, behind the same guard.
+  // Never "Post now": a keystroke that publishes immediately is too easy to
+  // hit while still writing.
+  const canSubmit = canSave && !savePost.isPending
+  React.useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return
+      event.preventDefault()
+      if (canSubmit) void save(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [canSubmit, save])
 
   const attach = React.useCallback(async () => {
     const picked = await open({
@@ -442,9 +460,11 @@ function ComposeScreen() {
         </span>
 
         <div className="ml-auto flex items-center gap-2">
+          <Kbd aria-hidden>{IS_MACOS ? '⌘↵' : 'Ctrl+↵'}</Kbd>
           <Button
             variant="outline"
-            disabled={!canSave || savePost.isPending}
+            disabled={!canSubmit}
+            aria-keyshortcuts={IS_MACOS ? 'Meta+Enter' : 'Control+Enter'}
             onClick={() => {
               void save(false)
             }}

@@ -290,65 +290,75 @@ function ConnectDialog({
           </p>
         ) : null}
 
-        <div className="flex flex-col gap-3">
-          {info.connectFields.map((field) => (
-            <label key={field.key} className="flex flex-col gap-1 text-xs">
-              <span className="font-medium">
-                {field.label}
-                {field.required ? <span className="text-destructive"> *</span> : null}
-              </span>
-              {field.choices.length > 0 ? (
-                <Select
-                  value={fields[field.key] ?? field.placeholder}
-                  onChange={(event) => {
-                    setFields((current) => ({ ...current, [field.key]: event.target.value }))
-                  }}
-                >
-                  {field.choices.map((choice) => (
-                    <option key={choice} value={choice}>
-                      {choice}
-                    </option>
-                  ))}
-                </Select>
-              ) : (
-                <Input
-                  type={field.secret ? 'password' : 'text'}
-                  value={fields[field.key] ?? ''}
-                  placeholder={field.placeholder}
-                  autoComplete="off"
-                  onChange={(event) => {
-                    setFields((current) => ({ ...current, [field.key]: event.target.value }))
-                  }}
-                />
-              )}
-              <span className="leading-relaxed text-muted-foreground">{field.help}</span>
-            </label>
-          ))}
-        </div>
+        {/* A form so Enter in any field connects, behind the same guard as the
+            button: a disabled submit button also blocks implicit submission. */}
+        <form
+          className="flex flex-col gap-4"
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (missing.length > 0 || busy) return
+            void submit()
+          }}
+        >
+          <div className="flex flex-col gap-3">
+            {info.connectFields.map((field) => (
+              <label key={field.key} className="flex flex-col gap-1 text-xs">
+                <span className="font-medium">
+                  {field.label}
+                  {field.required ? <span className="text-destructive"> *</span> : null}
+                </span>
+                {field.choices.length > 0 ? (
+                  <Select
+                    value={fields[field.key] ?? field.placeholder}
+                    onChange={(event) => {
+                      setFields((current) => ({ ...current, [field.key]: event.target.value }))
+                    }}
+                  >
+                    {field.choices.map((choice) => (
+                      <option key={choice} value={choice}>
+                        {choice}
+                      </option>
+                    ))}
+                  </Select>
+                ) : (
+                  <Input
+                    type={field.secret ? 'password' : 'text'}
+                    value={fields[field.key] ?? ''}
+                    placeholder={field.placeholder}
+                    autoComplete="off"
+                    onChange={(event) => {
+                      setFields((current) => ({ ...current, [field.key]: event.target.value }))
+                    }}
+                  />
+                )}
+                <span className="leading-relaxed text-muted-foreground">{field.help}</span>
+              </label>
+            ))}
+          </div>
 
-        <div className="flex items-center gap-2">
-          {info.setupUrl ? (
+          <div className="flex items-center gap-2">
+            {info.setupUrl ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  void openUrl(info.setupUrl ?? '')
+                }}
+              >
+                Open {info.name} setup
+              </Button>
+            ) : null}
             <Button
+              type="submit"
+              className="ml-auto"
               size="sm"
-              variant="ghost"
-              onClick={() => {
-                void openUrl(info.setupUrl ?? '')
-              }}
+              disabled={missing.length > 0 || busy}
             >
-              Open {info.name} setup
+              {opensBrowser ? 'Continue in browser' : 'Connect'}
             </Button>
-          ) : null}
-          <Button
-            className="ml-auto"
-            size="sm"
-            disabled={missing.length > 0 || busy}
-            onClick={() => {
-              void submit()
-            }}
-          >
-            {opensBrowser ? 'Continue in browser' : 'Connect'}
-          </Button>
-        </div>
+          </div>
+        </form>
       </DialogContent>
     </Dialog>
   )

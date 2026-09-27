@@ -8,8 +8,10 @@ import { EmptyState } from '@/components/shell/empty-state'
 import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Kbd } from '@/components/ui/kbd'
 import { Textarea } from '@/components/ui/textarea'
 import { useAnimatedIcon } from '@/lib/animated-icon'
+import { IS_MACOS } from '@/lib/chrome'
 import { useDeleteNote, useNotes, useSaveNote, useSettings } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
 import type { Note } from '@/lib/tauri/types'
@@ -82,6 +84,22 @@ function NotesScreen() {
     },
     [body, title, selected, current, saveNote],
   )
+
+  // Cmd/Ctrl+S saves, behind the same guard as the Save button. Default
+  // prevented even when there is nothing to save, so the keystroke never falls
+  // through to the webview.
+  const canSave = !saveNote.isPending && body.trim() !== ''
+  React.useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() !== 's' || !(event.metaKey || event.ctrlKey)) return
+      event.preventDefault()
+      if (canSave) void save()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [canSave, save])
 
   const aiOn = settings.data ? settings.data.aiBackend !== 'off' : false
 
@@ -215,8 +233,10 @@ function NotesScreen() {
                     {aiOn ? 'Draft from this' : 'Turn into a post'}
                   </Button>
                 ) : null}
+                <Kbd aria-hidden>{IS_MACOS ? '⌘S' : 'Ctrl+S'}</Kbd>
                 <Button
-                  disabled={saveNote.isPending || !body.trim()}
+                  disabled={!canSave}
+                  aria-keyshortcuts={IS_MACOS ? 'Meta+S' : 'Control+S'}
                   onClick={() => {
                     void save()
                   }}
