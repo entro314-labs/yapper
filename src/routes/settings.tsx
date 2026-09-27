@@ -140,14 +140,26 @@ function SettingsScreen() {
           hint="Minutes past due that still count as on time. Closing the laptop briefly should not cost a post."
           htmlFor="settings-grace-minutes"
         >
-          <Input
+          <CommitInput
             id="settings-grace-minutes"
             type="number"
             min={1}
             max={720}
-            value={current.graceMinutes}
-            onChange={(event) => {
-              patch({ graceMinutes: Number(event.target.value) })
+            value={String(current.graceMinutes)}
+            onCommit={(next) => {
+              const minutes = Number(next)
+              // A cleared or out-of-range field is not a value: sending it
+              // would store the clamped minimum rather than what was meant.
+              if (
+                next.trim() === '' ||
+                !Number.isInteger(minutes) ||
+                minutes < 1 ||
+                minutes > 720
+              ) {
+                toast.error('The grace window is a whole number of minutes, from 1 to 720.')
+                return
+              }
+              if (minutes !== current.graceMinutes) patch({ graceMinutes: minutes })
             }}
             className="w-20"
           />
@@ -171,12 +183,12 @@ function SettingsScreen() {
               hint="Passed straight to the CLI. Leave blank for its own default, which is usually right."
               htmlFor="settings-ai-model"
             >
-              <Input
+              <CommitInput
                 id="settings-ai-model"
                 value={current.aiModel}
                 placeholder="default"
-                onChange={(event) => {
-                  patch({ aiModel: event.target.value })
+                onCommit={(next) => {
+                  if (next.trim() !== current.aiModel) patch({ aiModel: next.trim() })
                 }}
                 className="w-40"
               />
@@ -422,6 +434,42 @@ function Row({
       </div>
       <div className="shrink-0 pt-0.5">{children}</div>
     </div>
+  )
+}
+
+/**
+ * A text field that saves on blur or Enter rather than per keystroke. Each save sends the whole
+ * settings object, so saving while typing dropped characters when an older save's refetch landed
+ * over newer input, and re-ran everything `update_settings` applies (autostart included) on every
+ * key. The edit is local until committed; `onCommit` may refuse it, and the field then shows the
+ * stored value again.
+ */
+function CommitInput({
+  value,
+  onCommit,
+  ...props
+}: Omit<React.ComponentProps<typeof Input>, 'value' | 'onChange' | 'onBlur' | 'onKeyDown'> & {
+  value: string
+  onCommit: (next: string) => void
+}) {
+  const [draft, setDraft] = React.useState<string | null>(null)
+  const commit = () => {
+    if (draft === null) return
+    setDraft(null)
+    onCommit(draft)
+  }
+  return (
+    <Input
+      {...props}
+      value={draft ?? value}
+      onChange={(event) => {
+        setDraft(event.target.value)
+      }}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') commit()
+      }}
+    />
   )
 }
 
