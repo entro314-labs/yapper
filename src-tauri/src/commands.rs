@@ -209,14 +209,23 @@ pub fn save_app_credentials(
         ));
     }
     let key = instance.as_deref().map(normalize_instance_key);
+    // A blank secret keeps the stored one, as the form promises ("leave blank
+    // to keep it"). The item is written whole, so without this, flipping a
+    // toggle like Insights access would silently delete the app secret.
+    let client_secret = match client_secret
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(secret) => Some(secret),
+        None => secrets::load_app_credentials(platform, key.as_deref())?
+            .and_then(|stored| stored.client_secret),
+    };
     secrets::store_app_credentials(
         platform,
         key.as_deref(),
         &AppCredentials {
             client_id,
-            client_secret: client_secret
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
+            client_secret,
             extra: extra.unwrap_or_default(),
         },
     )

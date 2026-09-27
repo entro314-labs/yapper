@@ -171,6 +171,11 @@ All notable changes to Windbag are documented here. The format follows
   as sent, and the due query compares stored strings — so `09:00+02:00` went
   out at 09:00 UTC, two hours late. Every writer now stores the same instant in
   canonical UTC.
+- **Saving a platform app no longer deletes its stored secret.** The form says
+  "leave blank to keep it", but the save overwrote the whole credential, so
+  turning on *Insights access* or *Ads access* without retyping the Meta app
+  secret wiped it and the reconnect that followed failed. A blank secret now
+  keeps the stored one.
 
 ### Activation
 
