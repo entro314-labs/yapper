@@ -139,7 +139,11 @@ function ComposeScreen() {
   )
 
   const blocking = checks.data?.filter((check) => check.error) ?? []
-  const canSave = selected.length > 0 && blocking.length === 0
+  // Only a verdict on what is on screen NOW can unlock saving. While a new
+  // check runs, the previous one is kept as placeholder data for the counters —
+  // and its "fits" must not let an edit that does not fit through.
+  const checked = checks.isSuccess && !checks.isPlaceholderData
+  const canSave = selected.length > 0 && checked && blocking.length === 0
 
   const collect = React.useCallback(
     () => ({
