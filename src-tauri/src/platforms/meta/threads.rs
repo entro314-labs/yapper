@@ -418,15 +418,20 @@ fn client_secret(app: &AppCredentials) -> Result<&str> {
 /// The emoji planes plus the older symbol blocks that Threads also bills by
 /// byte. Deliberately a range test rather than a Unicode property lookup: see
 /// [`Threads::count_body`] for why erring high is the right direction.
+///
+/// Besides the pictographs themselves, the invisible parts of a sequence are
+/// billed too: the zero-width joiner that glues a family together, the
+/// variation selectors that turn `❤` into ❤️, and the tag characters of the
+/// subdivision flags. Counting those as one each is what made the old test
+/// undercount. A joiner inside Indic text is counted high as a result, which
+/// is the harmless direction.
 fn is_emoji(ch: char) -> bool {
-    matches!(ch as u32,
-        // The emoji planes, which already contain the regional indicators that
-        // make up flag sequences.
-        0x1F000..=0x1FAFF
-        | 0x2600..=0x27BF // misc symbols and dingbats
-        | 0x2B00..=0x2BFF // arrows and misc symbols
-        | 0xFE00..=0xFE0F // variation selectors
-    )
+    crate::platforms::is_pictographic(ch)
+        || matches!(ch as u32,
+            0x200D // zero-width joiner
+            | 0xFE00..=0xFE0F // variation selectors
+            | 0xE0020..=0xE007F // tag characters (🏴󠁧󠁢󠁳󠁣󠁴󠁿)
+        )
 }
 
 #[cfg(test)]
@@ -443,6 +448,23 @@ mod tests {
         // Threads bills emoji by byte, so one grinning face is four of the 500.
         assert_eq!(Threads.count_body("\u{1F600}"), 4);
         assert_eq!(Threads.count_body("hi \u{1F600}"), 7);
+    }
+
+    #[test]
+    fn every_byte_of_an_emoji_sequence_is_billed() {
+        // The joiners, selectors and keycaps inside a sequence are bytes too;
+        // counting them as one character each undercounted every family,
+        // keycap and flag-with-selector, which is the direction that fails a
+        // scheduled post.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        assert_eq!(Threads.count_body(family), family.len());
+        let keycap = "1\u{FE0F}\u{20E3}";
+        assert_eq!(Threads.count_body(keycap), keycap.len());
+        let heart = "\u{2764}\u{FE0F}";
+        assert_eq!(Threads.count_body(heart), heart.len());
+        for symbol in ["\u{231A}", "\u{00A9}", "\u{00AE}", "\u{2194}", "\u{25B6}"] {
+            assert_eq!(Threads.count_body(symbol), symbol.len(), "{symbol}");
+        }
     }
 
     #[test]
