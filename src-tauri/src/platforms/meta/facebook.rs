@@ -423,7 +423,10 @@ fn upload_bytes(
         form = form.text((*key).to_string(), (*value).to_string());
     }
 
-    let request = http::client().post(url).multipart(form);
+    let request = http::client()
+        .post(url)
+        .timeout(http::upload_timeout(item.bytes.len()))
+        .multipart(form);
     let response = if publishes {
         request.send().map_err(after_send)?
     } else {

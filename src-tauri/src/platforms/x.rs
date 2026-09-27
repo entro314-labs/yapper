@@ -421,6 +421,7 @@ fn append_segment(
         http::client()
             .post(format!("{API_BASE}/media/upload/{media_id}/append"))
             .bearer_auth(token)
+            .timeout(http::upload_timeout(chunk.len()))
             .multipart(form)
             .send()?,
     )?;

@@ -313,6 +313,7 @@ fn upload_image(token: &str, version: &str, owner: &str, item: &MediaItem) -> Re
             .put(upload_url)
             .bearer_auth(token)
             .header(reqwest::header::CONTENT_TYPE, &item.mime)
+            .timeout(http::upload_timeout(item.bytes.len()))
             .body(item.bytes.clone())
             .send()?,
     );

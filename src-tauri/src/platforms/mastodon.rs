@@ -304,6 +304,7 @@ fn upload_media(instance: &str, token: &str, item: &super::MediaItem) -> Result<
         http::client()
             .post(format!("{instance}/api/v2/media"))
             .bearer_auth(token)
+            .timeout(http::upload_timeout(item.bytes.len()))
             .multipart(form)
             .send()?,
     );

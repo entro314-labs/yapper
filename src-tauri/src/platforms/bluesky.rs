@@ -428,6 +428,7 @@ fn oauth_upload_blob(
         http::client()
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, mime)
+            .timeout(http::upload_timeout(bytes.len()))
             .body(bytes.to_vec())
     })?;
     if !(200..300).contains(&status) {
@@ -521,6 +522,7 @@ fn upload_blob(pds: &str, access_jwt: &str, bytes: &[u8], mime: &str) -> Result<
             .post(format!("{pds}/xrpc/com.atproto.repo.uploadBlob"))
             .bearer_auth(access_jwt)
             .header(reqwest::header::CONTENT_TYPE, mime)
+            .timeout(http::upload_timeout(bytes.len()))
             .body(bytes.to_vec())
             .send()?,
     );
