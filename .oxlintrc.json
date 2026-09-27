@@ -10,8 +10,11 @@
 
   // Vendored shadcn baseline dump under apps/landing (mostly unimported; kept by decision
   // 2026-07-07). Not our code style — excluded from linting instead of being reworked.
+  // `site/` is a separate Next.js project with its own dependencies; linting it
+  // from here type-checks against packages this workspace never installs.
   "ignorePatterns": [
     "apps/landing/src/components/ui/**",
+    "site/**",
     "**/*.gen.ts",
     "**/*.gen.tsx"
   ],
