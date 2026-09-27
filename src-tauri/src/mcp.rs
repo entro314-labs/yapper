@@ -41,8 +41,20 @@ use crate::platforms::{self, PlatformId};
 use crate::scheduler;
 use crate::stats::{self, StatsFilter};
 
-/// The spec revision this server implements, echoed back on `initialize`.
-const PROTOCOL_VERSION: &str = "2026-07-28";
+/// The latest revision this server speaks, and its answer to a client that
+/// asks for one it does not know.
+///
+/// Not `2026-07-28`, the spec's current revision: that one has no `initialize`
+/// at all — version and capabilities ride on every request, and
+/// `server/discover` is mandatory. A client that opens with `initialize` has
+/// chosen the handshake-based protocol, so the answer must be a handshake-era
+/// revision; a newer client probing with `server/discover` gets `-32601`, which
+/// the spec defines as its cue to fall back to `initialize`.
+const PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Every handshake-era revision the spec has published. For a tools-only stdio
+/// server they behave alike, so a client asking for any of them gets it back.
+const SUPPORTED_VERSIONS: [&str; 4] = [PROTOCOL_VERSION, "2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// One request/response cycle over the shared store.
 pub struct Session {
@@ -76,7 +88,7 @@ impl Session {
         let id = id.unwrap_or(Value::Null);
 
         let outcome = match method {
-            "initialize" => Ok(Self::initialize()),
+            "initialize" => Ok(Self::initialize(&params)),
             "tools/list" => Ok(json!({ "tools": tool_definitions() })),
             "tools/call" => self.call(&params),
             // `ping` is the host's liveness check and must answer even before
@@ -107,9 +119,17 @@ impl Session {
         })
     }
 
-    fn initialize() -> Value {
+    /// Negotiates the revision as the handshake-era spec requires: the client's
+    /// own version when this server supports it, otherwise the latest this
+    /// server does — and the client decides whether it can live with that.
+    fn initialize(params: &Value) -> Value {
+        let version = params
+            .get("protocolVersion")
+            .and_then(Value::as_str)
+            .and_then(|asked| SUPPORTED_VERSIONS.into_iter().find(|known| *known == asked))
+            .unwrap_or(PROTOCOL_VERSION);
         json!({
-            "protocolVersion": PROTOCOL_VERSION,
+            "protocolVersion": version,
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "windbag", "version": env!("CARGO_PKG_VERSION") },
             "instructions":
@@ -638,16 +658,41 @@ mod tests {
             .to_string()
     }
 
-    #[test]
-    fn initialize_answers_with_the_protocol_version() {
+    fn negotiated(params: Value) -> Option<String> {
         let (mut session, _) = session();
-        let reply = session
-            .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }))
-            .expect("reply");
+        session
+            .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params }))
+            .expect("reply")
+            .pointer("/result/protocolVersion")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn initialize_echoes_a_supported_version_the_client_asked_for() {
+        // The regression this guards: every client was told the one version
+        // this server preferred, whatever it had asked for.
         assert_eq!(
-            reply
-                .pointer("/result/protocolVersion")
-                .and_then(Value::as_str),
+            negotiated(json!({ "protocolVersion": "2025-06-18" })).as_deref(),
+            Some("2025-06-18")
+        );
+        assert_eq!(
+            negotiated(json!({ "protocolVersion": "2025-03-26" })).as_deref(),
+            Some("2025-03-26")
+        );
+    }
+
+    #[test]
+    fn initialize_answers_the_latest_it_knows_otherwise() {
+        assert_eq!(
+            negotiated(json!({ "protocolVersion": "1900-01-01" })).as_deref(),
+            Some(PROTOCOL_VERSION)
+        );
+        assert_eq!(negotiated(json!({})).as_deref(), Some(PROTOCOL_VERSION));
+        // The spec's current revision has no handshake, so a client that sent
+        // `initialize` is answered in a handshake-era revision.
+        assert_eq!(
+            negotiated(json!({ "protocolVersion": "2026-07-28" })).as_deref(),
             Some(PROTOCOL_VERSION)
         );
     }
