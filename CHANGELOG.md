@@ -170,6 +170,27 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Fixed
 
+- **Reddit link posts can be saved.** A post with a title and a link but no body
+  was always refused, although that is exactly how a Reddit link submission
+  works. A link now counts as content on Reddit and Facebook.
+- **Attachments are checked by type and size when you save, not when they
+  publish.** An MP4 is no longer accepted for Bluesky or LinkedIn, a PNG for
+  Instagram, or an image over a platform's limit (Bluesky's 2 MB). A Facebook
+  post with a video and photos is refused instead of quietly losing the photos;
+  X takes one GIF or one video on its own, and so does Mastodon for video.
+- **Required destination options are enforced.** A Reddit destination without a
+  subreddit, or an option outside its allowed values, is an error in the
+  composer and the agent door rather than a failure at publish time. Mastodon's
+  content warning counts toward the character limit.
+- **A scheduled time that has already passed is refused** in the composer, the
+  calendar and the agent door, instead of being accepted as scheduled and marked
+  missed a few seconds later. A scheduled post needs at least one destination;
+  a draft still does not.
+- **Saving a post is all-or-nothing.** The post, its attachments and its
+  destinations are written in one transaction, and the composer and the agent
+  door share that one save path.
+- **Save stays disabled until the check for what is on screen is back**, so an
+  edit that goes over a limit cannot slip through while it runs.
 - **Threads and Instagram attachments over 4.5 MB publish.** The app now uploads
   the file straight to R2 through a short-lived signed URL from the web
   deployment, instead of through a Vercel function, which rejects any body over
