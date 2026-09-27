@@ -7,7 +7,7 @@ export const metadata = {
 
 # Privacy Policy
 
-**Last updated: 9 September 2026**
+**Last updated: 27 September 2026**
 
 Windbag is a desktop application. It has no user accounts, no analytics, no telemetry, and no
 server that holds your data. Almost everything in this policy is a description of your own
@@ -63,9 +63,11 @@ through in a redirect and is only ever exchanged for a token by the app on your 
 The Threads and Instagram publishing APIs do not accept an uploaded file. They accept a URL, which
 Meta's servers then fetch themselves. There is no alternative endpoint.
 
-So when you publish a post with an attachment to Threads or Instagram, Windbag first uploads that
-attachment from your machine to object storage behind this site, and passes the resulting URL to
-Meta.
+So when you publish a post with an attachment to Threads or Instagram, Windbag first asks this site
+for a one-time upload address, uploads the attachment from your machine straight to the object
+storage behind this site (Cloudflare R2), and passes the resulting URL to Meta. The file itself
+never passes through this site on the way in; if no public storage domain is configured, it is
+served back to Meta through this site's `/m/` address.
 
 You should understand what this means:
 

@@ -1,22 +1,40 @@
+import { createHash, timingSafeEqual } from 'node:crypto'
+
 import { PutObjectCommand } from '@aws-sdk/client-s3'
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { NextResponse } from 'next/server'
 
 import { ALLOWED_TYPES, MAX_BYTES, r2 } from '@/lib/r2'
 
 /**
- * `POST /api/media` — park one attachment at a public URL.
+ * `POST /api/media` — reserve a public URL for one attachment, and hand back a one-time upload
+ * address for it.
  *
  * The desktop app calls this immediately before building a Threads or Instagram media container,
- * because those endpoints fetch media from a URL and will not accept an upload. The body is the raw
- * file and `Content-Type` is the only other input; there is no multipart envelope because there is
- * exactly one file and nothing else to carry.
+ * because those endpoints fetch media from a URL and will not accept an upload. The bytes do NOT
+ * pass through here: a Vercel function refuses any request body over 4.5 MB, which is smaller than
+ * an ordinary phone video. So the app declares what it is about to send, `{ contentType, size }`,
+ * and gets back a presigned R2 PUT URL bound to exactly that type and length, which it uploads to
+ * directly.
  *
- * The response is `{ url, key }`. Nothing is recorded about who uploaded it, and the object is
- * expired by a bucket lifecycle rule rather than deleted here — see the note in `.env.example`.
+ * The response is `{ uploadUrl, url }`. Nothing is recorded about who uploaded it, and the object
+ * is expired by a bucket lifecycle rule rather than deleted here — see the note in `.env.example`.
  */
 export const runtime = 'nodejs'
-// Reading a body and putting it to R2 must never be answered from a cache.
+// Every answer carries a freshly signed URL and must never come from a cache.
 export const dynamic = 'force-dynamic'
+
+/**
+ * How long the upload address stays usable. It only has to cover the gap between this answer and
+ * the app starting its PUT, which is immediate; R2 checks expiry when a request begins, so a slow
+ * upload of a large file is not cut off by it.
+ */
+const UPLOAD_URL_TTL_SECONDS = 10 * 60
+
+interface UploadRequest {
+  contentType: string
+  size: number
+}
 
 export async function POST(request: Request): Promise<NextResponse> {
   const expected = process.env.WINDBAG_UPLOAD_TOKEN
@@ -27,9 +45,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     )
   }
 
-  // Compared whole rather than by prefix: a partial match is not a match.
-  const offered = request.headers.get('authorization')
-  if (offered !== `Bearer ${expected}`) {
+  if (!tokenMatches(request.headers.get('authorization'), `Bearer ${expected}`)) {
     return NextResponse.json({ error: 'Bad upload token.' }, { status: 401 })
   }
 
@@ -41,20 +57,22 @@ export async function POST(request: Request): Promise<NextResponse> {
     )
   }
 
-  const contentType = request.headers.get('content-type')?.split(';')[0]?.trim() ?? ''
-  const extension = ALLOWED_TYPES[contentType]
-  if (!extension) {
+  const declared = readUploadRequest(await request.text())
+  if (!declared) {
     return NextResponse.json(
-      { error: `Unsupported media type \`${contentType || 'none'}\`.` },
-      { status: 415 },
+      { error: 'Expected a JSON body of the form { "contentType": string, "size": number }.' },
+      { status: 400 },
     )
   }
 
-  const body = new Uint8Array(await request.arrayBuffer())
-  if (body.byteLength === 0) {
-    return NextResponse.json({ error: 'Empty upload.' }, { status: 400 })
+  const extension = ALLOWED_TYPES[declared.contentType]
+  if (!extension) {
+    return NextResponse.json(
+      { error: `Unsupported media type \`${declared.contentType || 'none'}\`.` },
+      { status: 415 },
+    )
   }
-  if (body.byteLength > MAX_BYTES) {
+  if (declared.size > MAX_BYTES) {
     return NextResponse.json(
       { error: `Attachment is larger than the ${MAX_BYTES / 1024 / 1024} MB limit.` },
       { status: 413 },
@@ -66,23 +84,22 @@ export async function POST(request: Request): Promise<NextResponse> {
   // thing standing between it and enumeration, and it is sized accordingly.
   const key = `${crypto.randomUUID().replaceAll('-', '')}${randomHex(16)}.${extension}`
 
-  try {
-    await store.client.send(
-      new PutObjectCommand({
-        Bucket: store.bucket,
-        Key: key,
-        Body: body,
-        ContentType: contentType,
-        ContentLength: body.byteLength,
-      }),
-    )
-  } catch (err) {
-    // The one place a server-side log earns its keep: the desktop app is told
-    // only that the upload failed, and the operator needs R2's actual reason.
-    // oxlint-disable-next-line no-console
-    console.error('media upload failed', err)
-    return NextResponse.json({ error: 'Could not store the attachment.' }, { status: 502 })
-  }
+  // Signed locally; R2 is not contacted until the app uploads. Content-Type and
+  // Content-Length are both part of the signature, so the declared type and
+  // size checked above are the only upload this URL will accept.
+  const uploadUrl = await getSignedUrl(
+    store.client,
+    new PutObjectCommand({
+      Bucket: store.bucket,
+      Key: key,
+      ContentType: declared.contentType,
+      ContentLength: declared.size,
+    }),
+    {
+      expiresIn: UPLOAD_URL_TTL_SECONDS,
+      signableHeaders: new Set(['content-type', 'content-length']),
+    },
+  )
 
   // With a public bucket domain Meta fetches straight from R2 and this
   // deployment never serves the bytes; without one they come back through /m.
@@ -90,7 +107,35 @@ export async function POST(request: Request): Promise<NextResponse> {
     ? `${store.publicBaseUrl}/${key}`
     : `${originOf(request)}/m/${key}`
 
-  return NextResponse.json({ url, key }, { status: 201 })
+  return NextResponse.json({ uploadUrl, url }, { status: 201 })
+}
+
+/**
+ * Constant-time, so response timing cannot be used to recover the token a byte at a time. Both
+ * sides are hashed first because `timingSafeEqual` requires equal lengths, and comparing lengths
+ * directly would leak the token's.
+ */
+function tokenMatches(offered: string | null, expected: string): boolean {
+  if (offered === null) return false
+  const digest = (value: string) => createHash('sha256').update(value).digest()
+  return timingSafeEqual(digest(offered), digest(expected))
+}
+
+function readUploadRequest(body: string): UploadRequest | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const contentType = 'contentType' in parsed ? parsed.contentType : undefined
+  const size = 'size' in parsed ? parsed.size : undefined
+  if (typeof contentType !== 'string' || typeof size !== 'number') return null
+  // An empty file is not an attachment, and a fractional or unsafe size cannot
+  // be a Content-Length.
+  if (!Number.isSafeInteger(size) || size <= 0) return null
+  return { contentType: contentType.split(';')[0]?.trim() ?? '', size }
 }
 
 function randomHex(bytes: number): string {

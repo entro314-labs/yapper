@@ -103,7 +103,10 @@ So this repo ships [`site/`](site/): a small Next.js deployment that answers
 both. It serves the legal pages Meta's app review asks for, provides the HTTPS
 redirect at `/oauth/meta` (which bounces straight back to the loopback listener
 the app already has open, storing nothing), and holds attachments in Cloudflare
-R2 for as long as it takes Meta to fetch them.
+R2 for as long as it takes Meta to fetch them. The app never pushes the file
+through the deployment itself — a Vercel function refuses request bodies over
+4.5 MB — so `/api/media` answers with a presigned R2 upload URL, signed for the
+declared type and size, and the app uploads straight to R2.
 
 It deploys to **windbag.social**, which makes the strings each Meta app needs:
 
@@ -299,8 +302,9 @@ posting to, and every one of those requests is made from Rust — the webview
 never sees a token, and its CSP allows no outbound connections at all.
 
 The one exception is Meta, and only when you post to Threads or Instagram *with
-an attachment*: that file is uploaded to your own web deployment first, because
-Meta will not accept it any other way. While it is there it is publicly readable
-by anyone holding the URL — it has to be, since Meta fetches it anonymously — so
-the key is 32 random bytes and a bucket lifecycle rule expires it. See
+an attachment*: that file is uploaded to your own web deployment's storage
+first, because Meta will not accept it any other way. While it is there it is
+publicly readable by anyone holding the URL — it has to be, since Meta fetches
+it anonymously — so the key is 32 random bytes and a bucket lifecycle rule
+expires it. See
 [`site/app/legal/privacy/page.mdx`](site/app/legal/privacy/page.mdx).
