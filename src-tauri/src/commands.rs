@@ -560,7 +560,7 @@ pub fn delete_note(app: AppHandle, state: State<'_, AppState>, id: i64) -> Resul
 
 /// What every backend can do right now, for the Settings picker. Probing runs a
 /// `--version` per CLI, so this is a command rather than part of `get_settings`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ai_availability(app: AppHandle) -> Vec<Availability> {
     ai::all_availability(&app)
 }
@@ -570,7 +570,11 @@ pub fn ai_availability(app: AppHandle) -> Vec<Availability> {
 /// The drafts come back to the CALLER; nothing is written. They land in the
 /// composer, where the same validation and the same human click that guard every
 /// other post still apply — the assistant has no path to the queue.
-#[tauri::command]
+///
+/// `async` like every command here that waits on a process or the network:
+/// Tauri runs a plain command ON the main thread, which would freeze the window
+/// for as long as the CLI takes — up to three minutes.
+#[tauri::command(async)]
 pub fn suggest_posts(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -652,7 +656,7 @@ pub fn get_refresh_cost(state: State<'_, AppState>) -> Result<RefreshCost> {
 /// Fetches engagement for every published destination Windbag can read. Manual
 /// on purpose: a background poller against eight APIs spends a rate-limit
 /// budget on numbers nobody is looking at — and on X it spends real credits.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn refresh_engagement(app: AppHandle, state: State<'_, AppState>) -> Result<RefreshReport> {
     let report = stats::refresh_engagement(&state.db)?;
     let _ = app.emit(EVENT_QUEUE_CHANGED, ());
@@ -897,12 +901,12 @@ pub fn forget_web_host() -> Result<()> {
 
 /// Meta's current ads tool catalogue, fetched live rather than mirrored — see
 /// [`crate::metaads`] for why Windbag forwards instead of reimplementing.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn meta_ads_tools(state: State<'_, AppState>) -> Result<serde_json::Value> {
     crate::metaads::AdsClient::from_store(&state.db)?.list_tools()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn meta_ads_call(
     state: State<'_, AppState>,
     name: String,

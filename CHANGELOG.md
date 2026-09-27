@@ -176,6 +176,11 @@ All notable changes to Windbag are documented here. The format follows
   turning on *Insights access* or *Ads access* without retyping the Meta app
   secret wiped it and the reconnect that followed failed. A blank secret now
   keeps the stored one.
+- **Drafting and refreshing no longer freeze the window.** Asking the assistant
+  for drafts (up to three minutes), refreshing engagement (one request per
+  post on some platforms), probing the assistant CLIs and the Meta ads calls
+  ran on the main thread, so the whole app stopped responding until they
+  returned. They now run on a worker.
 
 ### Activation
 
