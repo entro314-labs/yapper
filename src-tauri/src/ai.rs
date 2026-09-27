@@ -23,7 +23,9 @@
 
 use std::fmt::Write as _;
 use std::io::{Read, Write as _};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -133,14 +135,35 @@ struct Cli {
     uses_output_file: bool,
 }
 
+// Both CLIs run with no tools at all. The material is the user's notes, which
+// can carry text written by someone else (a pasted thread, a link's preview),
+// and a draft is written straight back into the app: a model that can read
+// files, fetch URLs or call a connector turns a prompt injection in a note into
+// a draft carrying the contents of ~/.ssh. Each flag below was checked against
+// the installed CLI's `--help` and a live session's reported tool list.
+
 const CLAUDE: Cli = Cli {
     command: "claude",
-    // `--restricted` drops the tools that run commands or code: a prose prompt
-    // needs none of them, and the context here is the user's own notes.
-    // `--no-session-persistence` keeps a drafting turn out of their history.
+    // Checked against Claude Code 2.1.283. `--restricted` alone still left the
+    // file tools (Read, Write, Edit, Glob, Grep), WebSearch and every MCP server
+    // including claude.ai connectors; with the two flags after it the session
+    // reports `tools: []` and `mcp_servers: []`.
+    //   * `--restricted` ignores user, project and local settings files — the
+    //     hooks they declare included.
+    //   * `--no-session-persistence` keeps a drafting turn out of their history.
+    //   * `--tools ""` removes every built-in tool.
+    //   * `--strict-mcp-config` loads MCP servers only from `--mcp-config`,
+    //     which is never passed, so none.
     // Deliberately NOT `--bare`: it forces ANTHROPIC_API_KEY auth and would
     // break every user signed in with a subscription.
-    args: &["-p", "--restricted", "--no-session-persistence"],
+    args: &[
+        "-p",
+        "--restricted",
+        "--no-session-persistence",
+        "--tools",
+        "",
+        "--strict-mcp-config",
+    ],
     probe: &["--version"],
     model_flag: "--model",
     effort_flag: &["--effort"],
@@ -149,26 +172,58 @@ const CLAUDE: Cli = Cli {
 
 const CODEX: Cli = Cli {
     command: "codex",
-    // `codex exec` otherwise boots the user's whole session — plugins with their
-    // MCP servers, hooks, memories and apps — several thousand tokens and
-    // seconds of startup a one-shot prompt never uses. All four are stable
-    // flags; an unknown one on some future codex fails the draft rather than
-    // silently drafting with the wrong context.
+    // Checked against codex-cli 0.157.1. `codex exec` otherwise boots the
+    // user's whole session: config.toml's MCP servers and notify hook, plugins,
+    // hooks, memories, apps, a shell, a code-mode runtime, image viewing and web
+    // search. With all of this the model reports no shell and no file access,
+    // and a call to `exec` fails closed.
+    //   * `--ignore-user-config` skips config.toml — the only way to drop its
+    //     `[mcp_servers]`: `-c mcp_servers={}` merges into them rather than
+    //     replacing them. Auth still comes from CODEX_HOME. The user's default
+    //     model and effort go with it; Settings → Assistant supplies both.
+    //   * `--ephemeral` keeps the turn out of their session history.
+    //   * `--sandbox read-only` backstops anything that still executes.
+    //   * `--disable` turns off features on by default: `plugins`, `apps`
+    //     (connectors), `hooks`, `memories`, `shell_tool` and `unified_exec`
+    //     (commands), `code_mode_host` (the `exec` code runtime), `view_image`
+    //     (reads local images), `browser_use`, `computer_use` and
+    //     `image_generation`.
+    //   * `web_search="disabled"` turns off the hosted search tool.
+    // An unknown feature is a hard error ("Unknown feature flag"), so a codex
+    // too old for one of these fails the draft with that message rather than
+    // drafting with tools. Codex keeps removed features in its table, so a
+    // newer one keeps accepting them.
     args: &[
         "exec",
         "--skip-git-repo-check",
+        "--ignore-user-config",
+        "--ephemeral",
         "--sandbox",
         "read-only",
         "--disable",
         "plugins",
         "--disable",
+        "apps",
+        "--disable",
         "hooks",
         "--disable",
         "memories",
         "--disable",
-        "apps",
+        "shell_tool",
+        "--disable",
+        "unified_exec",
+        "--disable",
+        "code_mode_host",
+        "--disable",
+        "view_image",
+        "--disable",
+        "browser_use",
+        "--disable",
+        "computer_use",
+        "--disable",
+        "image_generation",
         "-c",
-        "notify=[]",
+        "web_search=\"disabled\"",
     ],
     probe: &["--version"],
     model_flag: "-m",
@@ -403,7 +458,55 @@ fn run_apple(_app: &AppHandle, _prompt: &str) -> Result<String> {
 /// `std::process::Command` has no timeout, so [`run_with_timeout`] enforces
 /// one. Without it, a CLI waiting on an auth prompt it can never receive would
 /// hold the request forever.
+///
+/// It runs in an empty directory made for this one draft. Inheriting the app's
+/// working directory would put it in `/` for a bundled app, or in this
+/// repository during development: places whose project config the CLI would
+/// pick up, and whose path it describes to the model.
 fn run_cli(cli: &Cli, prompt: &str, model: Option<&str>, effort: Option<&str>) -> Result<String> {
+    let scratch = Scratch::new()
+        .map_err(|e| AppError::Internal(format!("Could not make a scratch directory: {e}")))?;
+    let answer_file = cli.uses_output_file.then(|| scratch.0.join("answer.md"));
+    let args = build_args(cli, model, effort, answer_file.as_deref());
+
+    let mut command = Command::new(cli.command);
+    command.args(&args).current_dir(&scratch.0);
+    let finished = run_with_timeout(command, prompt.as_bytes(), TIMEOUT)
+        .map_err(|err| {
+            AppError::InvalidInput(format!(
+                "Could not run `{}` ({err}). Install it, or pick a different assistant \
+                 in Settings.",
+                cli.command
+            ))
+        })?
+        .ok_or_else(|| {
+            AppError::Platform(format!(
+                "`{}` did not answer within {} seconds.",
+                cli.command,
+                TIMEOUT.as_secs()
+            ))
+        })?;
+    check_finished(cli.command, &finished)?;
+
+    match &answer_file {
+        Some(path) => std::fs::read_to_string(path).map_err(|err| {
+            AppError::Platform(format!(
+                "`{}` finished without writing an answer: {err}",
+                cli.command
+            ))
+        }),
+        None => Ok(String::from_utf8_lossy(&finished.output.stdout).to_string()),
+    }
+}
+
+/// The full argv for one draft: the table row, then the user's model and
+/// effort, then where codex should write its answer.
+fn build_args(
+    cli: &Cli,
+    model: Option<&str>,
+    effort: Option<&str>,
+    answer_file: Option<&Path>,
+) -> Vec<String> {
     let mut args: Vec<String> = cli.args.iter().map(|arg| (*arg).to_string()).collect();
     if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
         args.push(cli.model_flag.to_string());
@@ -423,56 +526,40 @@ fn run_cli(cli: &Cli, prompt: &str, model: Option<&str>, effort: Option<&str>) -
             _ => {}
         }
     }
-
-    let answer_file = if cli.uses_output_file {
-        let dir = std::env::temp_dir().join(format!("windbag-draft-{}", std::process::id()));
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| AppError::Internal(format!("Could not make a scratch directory: {e}")))?;
-        let path = dir.join("answer.md");
+    if let Some(path) = answer_file {
         args.push("--output-last-message".to_string());
         args.push(path.to_string_lossy().to_string());
-        Some(path)
-    } else {
-        None
-    };
-
-    let mut command = Command::new(cli.command);
-    command.args(&args);
-    let finished = run_with_timeout(command, prompt.as_bytes(), TIMEOUT)
-        .map_err(|err| {
-            AppError::InvalidInput(format!(
-                "Could not run `{}` ({err}). Install it, or pick a different assistant \
-                 in Settings.",
-                cli.command
-            ))
-        })?
-        .ok_or_else(|| {
-            AppError::Platform(format!(
-                "`{}` did not answer within {} seconds.",
-                cli.command,
-                TIMEOUT.as_secs()
-            ))
-        })?;
-    check_finished(cli.command, &finished)?;
-
-    let answer = match &answer_file {
-        Some(path) => std::fs::read_to_string(path).map_err(|err| {
-            AppError::Platform(format!(
-                "`{}` finished without writing an answer: {err}",
-                cli.command
-            ))
-        }),
-        None => Ok(String::from_utf8_lossy(&finished.output.stdout).to_string()),
-    };
-    if let Some(path) = answer_file
-        && let Err(err) = std::fs::remove_file(&path)
-    {
-        log::warn!(
-            "could not remove the draft scratch file {}: {err}",
-            path.display()
-        );
     }
-    answer
+    args
+}
+
+/// A directory that exists for one draft and is removed with it. Numbered, not
+/// just per-process: two drafts in flight at once must not share codex's
+/// answer file.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> std::io::Result<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "windbag-draft-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir)?;
+        Ok(Self(dir))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if let Err(err) = std::fs::remove_dir_all(&self.0) {
+            log::warn!(
+                "could not remove the draft scratch directory {}: {err}",
+                self.0.display()
+            );
+        }
+    }
 }
 
 /// Whether a CLI that exited in time produced an answer worth reading.
@@ -908,6 +995,76 @@ mod tests {
             .expect_err("an answer to half a prompt is not an answer");
         assert!(err.to_string().contains("prompt"), "{err}");
         assert!(check_finished("codex", &finished(0, Ok(()), "")).is_ok());
+    }
+
+    /// Whether `args` carries `flag` immediately followed by `value`.
+    fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2)
+            .any(|pair| pair[0] == flag && pair[1] == value)
+    }
+
+    #[test]
+    fn claude_runs_with_no_tools_and_no_mcp_servers() {
+        let args = build_args(&CLAUDE, Some("sonnet"), Some("high"), None);
+        assert_eq!(args[0], "-p");
+        assert!(has_pair(&args, "--tools", ""), "{args:?}");
+        assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert!(!args.iter().any(|arg| arg == "--mcp-config"));
+        assert!(args.iter().any(|arg| arg == "--restricted"));
+        assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
+        assert!(has_pair(&args, "--model", "sonnet"));
+        assert!(has_pair(&args, "--effort", "high"));
+        assert!(!args.iter().any(|arg| arg == "--output-last-message"));
+    }
+
+    #[test]
+    fn codex_runs_sandboxed_without_user_config_or_tools() {
+        let answer = Path::new("/tmp/windbag-draft-1-0/answer.md");
+        let args = build_args(&CODEX, Some("gpt-5"), Some("low"), Some(answer));
+        assert_eq!(args[0], "exec");
+        assert!(args.iter().any(|arg| arg == "--ignore-user-config"));
+        assert!(args.iter().any(|arg| arg == "--ephemeral"));
+        assert!(has_pair(&args, "--sandbox", "read-only"));
+        for feature in [
+            "plugins",
+            "apps",
+            "hooks",
+            "memories",
+            "shell_tool",
+            "unified_exec",
+            "code_mode_host",
+            "view_image",
+            "browser_use",
+            "computer_use",
+            "image_generation",
+        ] {
+            assert!(has_pair(&args, "--disable", feature), "{feature} stays on");
+        }
+        assert!(has_pair(&args, "-c", r#"web_search="disabled""#));
+        assert!(has_pair(&args, "-m", "gpt-5"));
+        assert!(has_pair(&args, "-c", r#"model_reasoning_effort="low""#));
+        assert!(has_pair(
+            &args,
+            "--output-last-message",
+            "/tmp/windbag-draft-1-0/answer.md"
+        ));
+    }
+
+    #[test]
+    fn a_blank_model_or_effort_is_left_to_the_cli() {
+        let args = build_args(&CLAUDE, Some("  "), Some(""), None);
+        assert!(!args.iter().any(|arg| arg == "--model" || arg == "--effort"));
+    }
+
+    #[test]
+    fn concurrent_drafts_get_separate_empty_directories() {
+        let first = Scratch::new().expect("scratch");
+        let second = Scratch::new().expect("scratch");
+        assert_ne!(first.0, second.0);
+        assert_eq!(std::fs::read_dir(&first.0).expect("exists").count(), 0);
+        let path = first.0.clone();
+        drop(first);
+        assert!(!path.exists(), "the scratch directory outlived its draft");
     }
 
     #[test]

@@ -180,8 +180,8 @@ Settings → Assistant:
 | Backend | What it needs | Notes |
 | --- | --- | --- |
 | **Apple Intelligence** | macOS on Apple silicon | On-device, offline, keyless, free. |
-| **Claude Code** | `claude` on your PATH | Run one-shot and restricted: no tools, no session saved. |
-| **Codex** | `codex` on your PATH | Run with plugins, hooks, memories and apps disabled. |
+| **Claude Code** | `claude` on your PATH | Run one-shot with no tools and no MCP servers, in an empty directory; no session saved. |
+| **Codex** | `codex` on your PATH | Run in a read-only sandbox without your `config.toml`, MCP servers, plugins, shell or web search; no session saved. Set the model and effort in Settings. |
 
 The assistant reads notes you select plus anything you paste, is told your
 destinations' real character limits, and hands back three drafts. **It has no
