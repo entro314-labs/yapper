@@ -180,8 +180,19 @@ fn pass(app: &AppHandle, database: &Arc<Db>) -> Result<usize> {
         settle(database, target_id, post_id, attempts, outcome)?;
         settled += 1;
         let _ = app.emit(EVENT_QUEUE_CHANGED, post_id);
+        if newly_needs_reauth(database, &item.account)? {
+            let _ = app.emit(EVENT_ACCOUNTS_CHANGED, item.account.id);
+        }
     }
     Ok(settled)
+}
+
+/// Whether `before` — the account as it was read for this send — has been
+/// flagged `needs_reauth` since. Checked against the store rather than the
+/// outcome so it holds whatever [`settle`] decides counts as bad credentials.
+fn newly_needs_reauth(database: &Db, before: &db::Account) -> Result<bool> {
+    Ok(before.status != db::ACCOUNT_NEEDS_REAUTH
+        && database.get_account(before.id)?.status == db::ACCOUNT_NEEDS_REAUTH)
 }
 
 /// Everything between a claimed target and a result: fetch credentials, refresh
@@ -579,6 +590,42 @@ mod tests {
             database.get_account(account).expect("account").status,
             db::ACCOUNT_NEEDS_REAUTH
         );
+    }
+
+    #[test]
+    fn an_account_newly_flagged_for_reconnection_is_reported() {
+        // The pass emits accounts-changed on this, which is the only way the
+        // status bar learns an account needs reconnecting.
+        let (database, account, post, target) = store();
+        let before = database.get_account(account).expect("account");
+        settle(
+            &database,
+            target,
+            post,
+            1,
+            Err(AppError::Unauthorized("token revoked".into())),
+        )
+        .expect("settle");
+        assert!(newly_needs_reauth(&database, &before).expect("check"));
+
+        // Already flagged before this send: nothing new to report.
+        let flagged = database.get_account(account).expect("account");
+        assert!(!newly_needs_reauth(&database, &flagged).expect("check"));
+    }
+
+    #[test]
+    fn an_ordinary_failure_does_not_report_the_account() {
+        let (database, account, post, target) = store();
+        let before = database.get_account(account).expect("account");
+        settle(
+            &database,
+            target,
+            post,
+            1,
+            Err(AppError::Platform("503".into())),
+        )
+        .expect("settle");
+        assert!(!newly_needs_reauth(&database, &before).expect("check"));
     }
 
     #[test]
