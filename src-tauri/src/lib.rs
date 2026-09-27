@@ -31,29 +31,8 @@ use scheduler::Scheduler;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        // First, so every later plugin's setup is logged. stderr for `tauri dev`;
-        // the log directory (~/Library/Logs/com.entro314.windbag on macOS) for a
-        // bundled build, where stderr goes nowhere. Local time, because the
-        // question these answer is "what happened at 09:00".
-        .plugin(
-            tauri_plugin_log::Builder::new()
-                .clear_targets()
-                .target(Target::new(TargetKind::Stderr))
-                .target(Target::new(TargetKind::LogDir { file_name: None }))
-                .timezone_strategy(TimezoneStrategy::UseLocal)
-                .max_file_size(5_000_000)
-                .rotation_strategy(RotationStrategy::KeepSome(3))
-                .level(log::LevelFilter::Warn)
-                .level_for(
-                    "windbag_lib",
-                    if cfg!(debug_assertions) {
-                        log::LevelFilter::Debug
-                    } else {
-                        log::LevelFilter::Info
-                    },
-                )
-                .build(),
-        )
+        // First, so every later plugin's setup is logged.
+        .plugin(logger())
         // A second launch focuses the running window rather than starting a rival
         // scheduler against the same store.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -105,6 +84,7 @@ pub fn run() {
             commands::list_platforms,
             commands::list_accounts,
             commands::connect_account,
+            commands::deliver_auth_callback,
             commands::disconnect_account,
             commands::get_app_credentials,
             commands::save_app_credentials,
@@ -160,6 +140,29 @@ pub fn run() {
             tauri::RunEvent::ExitRequested { .. } => update::install_pending_on_exit(app),
             _ => {}
         });
+}
+
+/// stderr for `tauri dev`; the log directory (~/Library/Logs/com.entro314.windbag
+/// on macOS) for a bundled build, where stderr goes nowhere. Local time, because
+/// the question these answer is "what happened at 09:00".
+fn logger() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri_plugin_log::Builder::new()
+        .clear_targets()
+        .target(Target::new(TargetKind::Stderr))
+        .target(Target::new(TargetKind::LogDir { file_name: None }))
+        .timezone_strategy(TimezoneStrategy::UseLocal)
+        .max_file_size(5_000_000)
+        .rotation_strategy(RotationStrategy::KeepSome(3))
+        .level(log::LevelFilter::Warn)
+        .level_for(
+            "windbag_lib",
+            if cfg!(debug_assertions) {
+                log::LevelFilter::Debug
+            } else {
+                log::LevelFilter::Info
+            },
+        )
+        .build()
 }
 
 /// Everything the app needs standing up before the first frame: the store, the

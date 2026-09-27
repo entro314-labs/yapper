@@ -72,14 +72,6 @@ impl Platform for Bluesky {
                 )
                 .optional(),
                 FieldSpec::text(
-                    "callback_url",
-                    "Callback URL",
-                    "",
-                    "Only if your browser could not hand the sign-in back automatically: \
-                     paste the whole URL it failed to open.",
-                )
-                .optional(),
-                FieldSpec::text(
                     "pds",
                     "Server",
                     DEFAULT_PDS,
@@ -92,8 +84,9 @@ impl Platform for Bluesky {
                     "client_id",
                     "OAuth client metadata URL",
                     atproto::DEFAULT_CLIENT_ID,
-                    "Where Windbag's OAuth client document is published. Change it only if you \
-                     host your own copy.",
+                    "Where Windbag's OAuth client document is published. A copy must live on \
+                     entro314-labs.github.io (any path): the sign-in returns on a scheme derived \
+                     from that host, and it is the only one this build receives.",
                 )
                 .optional(),
             ],
@@ -149,7 +142,7 @@ impl Platform for Bluesky {
 
     fn refresh(
         &self,
-        _account: &crate::db::Account,
+        account: &crate::db::Account,
         secret: &AccountSecret,
         _app: Option<&AppCredentials>,
     ) -> Result<Option<AccountSecret>> {
@@ -158,7 +151,7 @@ impl Platform for Bluesky {
         if !is_oauth(secret) || !crate::oauth::needs_refresh(secret.expires_at.as_deref()) {
             return Ok(None);
         }
-        refresh_oauth(secret).map(Some)
+        refresh_oauth(&account.remote_id, secret).map(Some)
     }
 
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published> {
@@ -261,22 +254,6 @@ fn connect_oauth(input: &ConnectInput) -> Result<Connected> {
         .unwrap_or(atproto::DEFAULT_CLIENT_ID)
         .to_string();
 
-    // The escape hatch. A custom URI scheme only routes from a BUNDLED app — in
-    // a dev build, and anywhere scheme registration misbehaves, the browser
-    // shows a link it cannot open. Pasting it here finishes the same flow.
-    if let Some(pasted) = input.optional_field("callback_url") {
-        if !atproto::deliver_callback(pasted) {
-            return Err(AppError::InvalidInput(
-                "There is no sign-in waiting for that URL. Start the sign-in first, then paste \
-                 the callback here if your browser could not hand it back."
-                    .into(),
-            ));
-        }
-        return Err(AppError::InvalidInput(
-            "Callback delivered to the sign-in already in progress.".into(),
-        ));
-    }
-
     let session = atproto::authorize(&client_id, handle)?;
     // Best effort: a profile that will not load is no reason to refuse a
     // connection that otherwise worked.
@@ -330,7 +307,9 @@ fn oauth_context(secret: &AccountSecret) -> Result<OAuthContext> {
     })
 }
 
-fn refresh_oauth(secret: &AccountSecret) -> Result<AccountSecret> {
+/// `did` is the account's own: an OAuth account's remote id is the DID it
+/// signed in as.
+fn refresh_oauth(did: &str, secret: &AccountSecret) -> Result<AccountSecret> {
     let key = dpop::Key::from_base64(secret.extra_str("dpop_key").ok_or_else(|| {
         AppError::Unauthorized("This Bluesky connection lost its key. Reconnect it.".into())
     })?)?;
@@ -343,12 +322,19 @@ fn refresh_oauth(secret: &AccountSecret) -> Result<AccountSecret> {
     let refresh_token = secret.refresh_token.as_deref().ok_or_else(|| {
         AppError::Unauthorized("This Bluesky connection has no refresh token.".into())
     })?;
+    let issuer = secret.extra_str("issuer").ok_or_else(|| {
+        AppError::Unauthorized(
+            "This Bluesky connection does not record who issued it. Reconnect it.".into(),
+        )
+    })?;
 
-    // Rediscovered rather than stored: a `PDS` can move its authorization server,
-    // and a stale token endpoint would fail every refresh with nothing to
-    // explain it.
+    // Rediscovered rather than stored: a stale token endpoint would fail every
+    // refresh with nothing to explain it. But the server found must still be
+    // the one that issued these tokens, or it is not sent the refresh token.
     let server = atproto::discover_auth_server(pds)?;
+    atproto::check_refresh_issuer(issuer, &server.issuer)?;
     let tokens = atproto::refresh(&key, &server.token_endpoint, client_id, refresh_token)?;
+    atproto::check_refresh_subject(did, &tokens.sub)?;
 
     let expires_at = tokens.expires_at();
     Ok(AccountSecret {

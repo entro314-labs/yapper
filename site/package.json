@@ -10,18 +10,19 @@
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "lint": "pnpm run lint:check",
-    "lint:check": "oxlint -c .oxlintrc.json --type-aware --type-check -f stylish src/",
-    "lint:fix": "oxlint -c .oxlintrc.json --type-aware --type-check -f stylish --fix src/ && oxfmt --write src/",
-    "lint:github": "oxlint -c .oxlintrc.json --type-aware --type-check -f github src/ > lint.md 2>&1",
+    "lint:check": "oxlint -c .oxlintrc.json -f stylish",
+    "lint:fix": "oxlint -c .oxlintrc.json --fix && oxfmt --write .",
+    "lint:github": "oxlint -c .oxlintrc.json -f github > lint.md 2>&1",
     "start": "next start",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1132.0",
+    "@aws-sdk/client-s3": "^3.1141.0",
+    "@aws-sdk/s3-request-presigner": "^3.1141.0",
     "@mdx-js/loader": "^3.1.1",
     "@mdx-js/react": "^3.1.1",
-    "@next/mdx": "^16.3.5",
-    "next": "16.3.5",
+    "@next/mdx": "^16.3.6",
+    "next": "16.3.6",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
@@ -31,11 +32,14 @@
     "@types/node": "^26.5.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "oxfmt": "^0.70.0",
+    "oxlint": "^1.85.0",
+    "oxlint-tsgolint": "^7.0.2003",
     "tailwindcss": "^4.3.3",
     "typescript": "next"
   },
   "engines": {
     "node": ">=24"
   },
-  "packageManager": "pnpm@12.4.1"
+  "packageManager": "pnpm@12.6.0"
 }

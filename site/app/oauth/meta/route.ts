@@ -69,9 +69,10 @@ export function GET(request: Request): NextResponse {
     status: 200,
     headers: {
       'content-type': 'text/html; charset=utf-8',
-      // The URL carries a single-use authorization code.
+      // The URL carries a single-use authorization code: never cache it, and
+      // never hand it to anything this page links to as a Referer.
       'cache-control': 'no-store',
-      referrer: 'no-referrer',
+      'referrer-policy': 'no-referrer',
     },
   })
 }
