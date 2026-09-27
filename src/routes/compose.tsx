@@ -367,30 +367,6 @@ function ComposeScreen() {
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4">
-      {suggesting ? (
-        <SuggestPanel
-          accountIds={selected}
-          {...(noteId === undefined ? {} : { initialNoteId: noteId })}
-          onApply={applySuggestion}
-          onClose={() => {
-            setSuggesting(false)
-          }}
-        />
-      ) : assistantOn ? (
-        <Button
-          size="sm"
-          variant="outline"
-          className="self-start"
-          onClick={() => {
-            setSuggesting(true)
-          }}
-          {...assistantHover}
-        >
-          <SparklesIcon ref={assistantRef} data-icon="inline-start" />
-          Draft with the assistant
-        </Button>
-      ) : null}
-
       {needsTitle ? (
         <Input
           value={title}
@@ -508,6 +484,34 @@ function ComposeScreen() {
           }))
         }}
       />
+
+      {/* Below Destinations, not at the top: drafts are written to the picked
+          destinations' limits, so the picker has to come first. At the top, a
+          draft arriving from a note opened on "Pick destinations first" with
+          the picker out of sight below it. */}
+      {suggesting ? (
+        <SuggestPanel
+          accountIds={selected}
+          {...(noteId === undefined ? {} : { initialNoteId: noteId })}
+          onApply={applySuggestion}
+          onClose={() => {
+            setSuggesting(false)
+          }}
+        />
+      ) : assistantOn ? (
+        <Button
+          size="sm"
+          variant="outline"
+          className="self-start"
+          onClick={() => {
+            setSuggesting(true)
+          }}
+          {...assistantHover}
+        >
+          <SparklesIcon ref={assistantRef} data-icon="inline-start" />
+          Draft with the assistant
+        </Button>
+      ) : null}
 
       <div className="flex flex-wrap items-center gap-2 border-t border-border/50 pt-4">
         <label htmlFor="scheduled-at" className="text-xs text-muted-foreground">
