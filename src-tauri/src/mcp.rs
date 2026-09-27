@@ -275,6 +275,11 @@ impl Session {
         // still shorten it, rather than a silent failure tomorrow morning.
         for account_id in &account_ids {
             let account = self.db.get_account(*account_id)?;
+            let options = args
+                .get("options")
+                .and_then(|all| all.get(account_id.to_string()))
+                .cloned()
+                .unwrap_or(json!({}));
             let adapter = platforms::adapter(account.platform);
             platforms::validate(
                 account.platform,
@@ -282,6 +287,7 @@ impl Session {
                 title,
                 link,
                 &[],
+                &options,
                 scheduler::effective_char_limit(&account, adapter),
             )?;
         }

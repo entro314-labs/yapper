@@ -211,6 +211,7 @@ fn publish_one(database: &Arc<Db>, item: &DueTarget) -> Result<Published> {
         item.post.title.as_deref(),
         item.post.link.as_deref(),
         &specs,
+        &item.target.options,
         limit,
     )?;
 

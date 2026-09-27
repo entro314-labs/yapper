@@ -23,6 +23,7 @@ import type {
   StatsFilter,
   Suggestion,
   TargetCheck,
+  TargetInput,
   WebHostView,
 } from '@/lib/tauri/types'
 
@@ -113,19 +114,19 @@ export function useCheckPost(
   title: string | null,
   link: string | null,
   media: MediaSpec[],
-  accountIds: number[],
+  targets: TargetInput[],
 ) {
   return useQuery({
-    queryKey: queryKeys.queue.check(body, title, link, media, accountIds),
+    queryKey: queryKeys.queue.check(body, title, link, media, targets),
     queryFn: async () =>
       invokeCommand<TargetCheck[]>(IPC_COMMANDS.checkPost, {
         body,
         title,
         link,
         media,
-        accountIds,
+        targets,
       }),
-    enabled: accountIds.length > 0,
+    enabled: targets.length > 0,
     // A draft is only ever checked against what is on screen right now; keeping
     // old verdicts around would let a stale "fits" survive an edit.
     gcTime: 0,

@@ -80,9 +80,11 @@ impl Platform for Mastodon {
                     "spoiler_text",
                     "Content warning",
                     "",
-                    "Shown in place of the post until the reader expands it.",
+                    "Shown in place of the post until the reader expands it. Counts toward \
+                     the character limit.",
                 )
-                .optional(),
+                .optional()
+                .counted(),
             ],
             notes: "No developer app needed — Windbag registers itself with your instance.",
         }

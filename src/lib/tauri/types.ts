@@ -30,6 +30,8 @@ export interface FieldSpec {
   required: boolean
   /** A closed set of allowed values, drawn as a picker. Empty means free text. */
   choices: string[]
+  /** Billed to the body's character budget (Mastodon's content warning). */
+  counted: boolean
 }
 
 /** `platforms::MediaRule` — one attachment type a platform takes. */
@@ -44,6 +46,12 @@ export interface MediaRule {
 export interface MediaSpec {
   mime: string
   bytes: number
+}
+
+/** `commands::TargetInput` — one destination and its per-destination options. */
+export interface TargetInput {
+  accountId: number
+  options: Record<string, string>
 }
 
 /** `platforms::Limits` */
@@ -244,7 +252,7 @@ export interface SavePostInput {
   title: string | null
   link: string | null
   scheduledAt: string | null
-  targets: Array<{ accountId: number; options: Record<string, string> }>
+  targets: TargetInput[]
   media: Array<{ path: string; altText: string | null }>
 }
 

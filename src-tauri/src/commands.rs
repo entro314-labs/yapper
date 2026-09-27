@@ -365,6 +365,7 @@ pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInpu
             title,
             link,
             &specs,
+            &target.options,
             scheduler::effective_char_limit(&account, adapter),
         )?;
     }
@@ -477,7 +478,7 @@ pub fn check_post(
     title: Option<String>,
     link: Option<String>,
     media: Vec<MediaSpec>,
-    account_ids: Vec<i64>,
+    targets: Vec<TargetInput>,
 ) -> Result<Vec<TargetCheck>> {
     let title = title
         .as_deref()
@@ -487,20 +488,28 @@ pub fn check_post(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    account_ids
+    targets
         .into_iter()
-        .map(|account_id| {
-            let account = state.db.get_account(account_id)?;
+        .map(|target| {
+            let account = state.db.get_account(target.account_id)?;
             let adapter = platforms::adapter(account.platform);
             let limit = scheduler::effective_char_limit(&account, adapter);
-            let error = platforms::validate(account.platform, &body, title, link, &media, limit)
-                .err()
-                .map(|err| err.to_string());
+            let error = platforms::validate(
+                account.platform,
+                &body,
+                title,
+                link,
+                &media,
+                &target.options,
+                limit,
+            )
+            .err()
+            .map(|err| err.to_string());
             Ok(TargetCheck {
-                account_id,
+                account_id: target.account_id,
                 platform: account.platform,
                 handle: account.handle,
-                used: adapter.count_body(&body),
+                used: platforms::counted_length(account.platform, &body, &target.options),
                 limit,
                 error,
             })

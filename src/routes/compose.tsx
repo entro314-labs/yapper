@@ -120,12 +120,18 @@ function ComposeScreen() {
     setBody((current) => current || note.body)
   }, [id, noteId, seededNote, notes.data, openSuggest])
 
+  // Checked with the same options that will be saved: a required subreddit or
+  // an over-long content warning is an error here, not at publish time.
+  const targets = React.useMemo(
+    () => selected.map((accountId) => ({ accountId, options: options[accountId] ?? {} })),
+    [selected, options],
+  )
   const checks = useCheckPost(
     body,
     title || null,
     link.trim() || null,
     media.map(({ mime, bytes }) => ({ mime, bytes })),
-    selected,
+    targets,
   )
   const platformById = React.useMemo(
     () => new Map((platforms.data ?? []).map((info) => [info.id, info])),
@@ -142,16 +148,13 @@ function ComposeScreen() {
       title: title.trim() || null,
       link: link.trim() || null,
       scheduledAt: when ? fromLocalInputValue(when) : null,
-      targets: selected.map((accountId) => ({
-        accountId,
-        options: options[accountId] ?? {},
-      })),
+      targets,
       media: media.map((item) => ({
         path: item.path,
         altText: item.altText.trim() || null,
       })),
     }),
-    [id, body, title, link, when, selected, options, media],
+    [id, body, title, link, when, targets, media],
   )
 
   const save = React.useCallback(
