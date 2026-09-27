@@ -31,11 +31,12 @@ import {
   useSettings,
 } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
-import type { PlatformInfo, Suggestion } from '@/lib/tauri/types'
+import type { PlatformInfo, PostDetail, Suggestion } from '@/lib/tauri/types'
+import { useUnsavedGuard } from '@/lib/unsaved'
 import { cn, formatBytes, fromLocalInputValue, toLocalInputValue } from '@/lib/utils'
 
 export const Route = createFileRoute('/compose')({
-  component: ComposeScreen,
+  component: ComposeRoute,
   validateSearch: (
     search: Record<string, unknown>,
   ): { id?: number; from?: number; noteId?: number; suggest?: boolean } => {
@@ -57,6 +58,60 @@ interface Attachment {
   altText: string
   mime: string
   bytes: number
+}
+
+/** Everything the composer edits — what a post seeds, and what "unsaved" is measured against. */
+interface Form {
+  body: string
+  title: string
+  link: string
+  when: string
+  selected: number[]
+  options: Record<number, Record<string, string>>
+  media: Attachment[]
+}
+
+const EMPTY_FORM: Form = {
+  body: '',
+  title: '',
+  link: '',
+  when: '',
+  selected: [],
+  options: {},
+  media: [],
+}
+
+/**
+ * The form a stored post opens as. `keepTime` is false for a copy, which starts as a draft: the
+ * original's time is the original's, and on a published post it is already in the past.
+ */
+function formFromPost(post: PostDetail, keepTime: boolean): Form {
+  return {
+    body: post.body,
+    title: post.title ?? '',
+    link: post.link ?? '',
+    when: keepTime && post.scheduledAt ? toLocalInputValue(new Date(post.scheduledAt)) : '',
+    selected: post.targets.map((target) => target.accountId),
+    options: Object.fromEntries(
+      post.targets.map((target) => [target.accountId, target.options ?? {}]),
+    ),
+    media: post.media.map((item) => ({
+      path: item.path,
+      altText: item.altText ?? '',
+      mime: item.mime,
+      bytes: item.bytes,
+    })),
+  }
+}
+
+/**
+ * A different post, copy or note is a different form, so the screen is remounted per visit. Staying
+ * mounted would carry one visit's edits into the next — leaving an edit for a blank compose, even
+ * after "Discard", would keep the old text and save it as a new post.
+ */
+function ComposeRoute() {
+  const { id, from, noteId } = Route.useSearch()
+  return <ComposeScreen key={`${id ?? ''}:${from ?? ''}:${noteId ?? ''}`} />
 }
 
 function ComposeScreen() {
@@ -98,26 +153,14 @@ function ComposeScreen() {
   // whatever was being typed.
   React.useEffect(() => {
     if (!source || loadedId === source.id) return
-    setBody(source.body)
-    setTitle(source.title ?? '')
-    setLink(source.link ?? '')
-    // A copy starts as a draft: the original's time is the original's, and on
-    // a published post it is already in the past.
-    setWhen(
-      id !== undefined && source.scheduledAt ? toLocalInputValue(new Date(source.scheduledAt)) : '',
-    )
-    setSelected(source.targets.map((target) => target.accountId))
-    setOptions(
-      Object.fromEntries(source.targets.map((target) => [target.accountId, target.options ?? {}])),
-    )
-    setMedia(
-      source.media.map((item) => ({
-        path: item.path,
-        altText: item.altText ?? '',
-        mime: item.mime,
-        bytes: item.bytes,
-      })),
-    )
+    const form = formFromPost(source, id !== undefined)
+    setBody(form.body)
+    setTitle(form.title)
+    setLink(form.link)
+    setWhen(form.when)
+    setSelected(form.selected)
+    setOptions(form.options)
+    setMedia(form.media)
     setLoadedId(source.id)
   }, [source, loadedId, id])
 
@@ -133,6 +176,22 @@ function ComposeScreen() {
     setTitle((current) => current || note.title)
     setBody((current) => current || note.body)
   }, [sourceId, noteId, seededNote, notes.data, openSuggest])
+
+  // Unsaved means "differs from what this visit opened with" — the stored post,
+  // the note it was seeded from, or nothing — derived rather than tracked, so
+  // no edit path can forget to mark the form dirty.
+  const seedNote =
+    sourceId === undefined && noteId !== undefined && !openSuggest
+      ? notes.data?.find((note) => note.id === noteId)
+      : undefined
+  const pristine: Form = source
+    ? formFromPost(source, id !== undefined)
+    : seedNote
+      ? { ...EMPTY_FORM, title: seedNote.title, body: seedNote.body }
+      : EMPTY_FORM
+  const edited: Form = { body, title, link, when, selected, options, media }
+  const dirty = JSON.stringify(edited) !== JSON.stringify(pristine)
+  const { allowNextNavigation } = useUnsavedGuard(dirty, 'this post')
 
   const checks = useCheckPost(body, title || null, media.length, selected)
   const platformById = React.useMemo(
@@ -172,12 +231,13 @@ function ComposeScreen() {
         } else {
           toast.success(when ? 'Scheduled' : 'Saved as a draft')
         }
+        allowNextNavigation()
         void navigate({ to: '/' })
       } catch (err) {
         toast.error(humanMessage(err))
       }
     },
-    [collect, savePost, publishNow, navigate, when],
+    [collect, savePost, publishNow, navigate, when, allowNextNavigation],
   )
 
   // Cmd/Ctrl+Enter is the Schedule / Save draft button, behind the same guard.

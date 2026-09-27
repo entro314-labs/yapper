@@ -15,6 +15,7 @@ import { IS_MACOS } from '@/lib/chrome'
 import { useDeleteNote, useNotes, useSaveNote, useSettings } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
 import type { Note } from '@/lib/tauri/types'
+import { useUnsavedGuard } from '@/lib/unsaved'
 import { cn, formatRelative } from '@/lib/utils'
 
 export const Route = createFileRoute('/notes')({ component: NotesScreen })
@@ -57,7 +58,14 @@ function NotesScreen() {
     setLoaded(current.id)
   }, [current, loaded])
 
-  const startNew = React.useCallback(() => {
+  // Compared trimmed, the way Rust stores a note, so a trailing newline left
+  // after saving does not read as an unsaved edit.
+  const dirty = current
+    ? title.trim() !== current.title || body.trim() !== current.body
+    : selected === null && (title.trim() !== '' || body.trim() !== '')
+  const { confirmDiscard, allowNextNavigation } = useUnsavedGuard(dirty, 'this note')
+
+  const resetEditor = React.useCallback(() => {
     setConfirmingDelete(false)
     setSelected(null)
     setLoaded(null)
@@ -65,11 +73,26 @@ function NotesScreen() {
     setBody('')
   }, [])
 
+  const startNew = React.useCallback(async () => {
+    if (await confirmDiscard()) resetEditor()
+  }, [confirmDiscard, resetEditor])
+
+  const openNote = React.useCallback(
+    async (id: number) => {
+      if (id === selected || !(await confirmDiscard())) return
+      // An armed delete belongs to the note it was armed on.
+      setConfirmingDelete(false)
+      setSelected(id)
+    },
+    [selected, confirmDiscard],
+  )
+
+  /** Resolves to whether the note was saved, so a caller can go on only after it was. */
   const save = React.useCallback(
-    async (pinned?: boolean) => {
+    async (pinned?: boolean): Promise<boolean> => {
       if (!body.trim()) {
         toast.error('A note needs some text.')
-        return
+        return false
       }
       try {
         const id = await saveNote.mutateAsync({
@@ -80,8 +103,10 @@ function NotesScreen() {
         })
         setSelected(id)
         setLoaded(id)
+        return true
       } catch (err) {
         toast.error(humanMessage(err))
+        return false
       }
     },
     [body, title, selected, current, saveNote],
@@ -116,7 +141,14 @@ function NotesScreen() {
           <h2 className="font-display text-xs font-semibold tracking-wide text-muted-foreground uppercase">
             Notes
           </h2>
-          <Button size="xs" variant="outline" className="ml-auto" onClick={startNew}>
+          <Button
+            size="xs"
+            variant="outline"
+            className="ml-auto"
+            onClick={() => {
+              void startNew()
+            }}
+          >
             New
           </Button>
         </div>
@@ -127,9 +159,7 @@ function NotesScreen() {
               <button
                 type="button"
                 onClick={() => {
-                  // An armed delete belongs to the note it was armed on.
-                  setConfirmingDelete(false)
-                  setSelected(note.id)
+                  void openNote(note.id)
                 }}
                 className={cn(
                   'flex w-full flex-col gap-0.5 rounded-md px-2.5 py-2 text-left transition-colors',
@@ -157,7 +187,7 @@ function NotesScreen() {
             icon={IconNotebook}
             title="No notes yet"
             description="Park a thought, a link, a half-formed argument. Notes are also what the assistant reads when it drafts a post for you."
-            action={<Button onClick={startNew}>Write one</Button>}
+            action={<Button onClick={resetEditor}>Write one</Button>}
           />
         ) : (
           <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
@@ -200,7 +230,7 @@ function NotesScreen() {
                       void (async () => {
                         try {
                           await deleteNote.mutateAsync(current.id)
-                          startNew()
+                          resetEditor()
                           toast.success('Deleted')
                         } catch (err) {
                           toast.error(humanMessage(err))
@@ -235,10 +265,17 @@ function NotesScreen() {
                   <Button
                     variant="outline"
                     onClick={() => {
-                      void navigate({
-                        to: '/compose',
-                        search: aiOn ? { noteId: selected, suggest: true } : { noteId: selected },
-                      })
+                      void (async () => {
+                        // Saved first rather than asked about: the composer and
+                        // the assistant read the STORED note, and this click
+                        // asks for what is on screen to become a post.
+                        if (dirty && !(await save())) return
+                        allowNextNavigation()
+                        void navigate({
+                          to: '/compose',
+                          search: aiOn ? { noteId: selected, suggest: true } : { noteId: selected },
+                        })
+                      })()
                     }}
                     {...draftHover}
                   >
