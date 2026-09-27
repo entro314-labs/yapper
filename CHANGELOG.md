@@ -160,6 +160,12 @@ All notable changes to Windbag are documented here. The format follows
   check runs before each publishing pass, so with the window at 0 a post was
   marked missed in the pass that should have sent it — "Post now" included. The
   window now has a one-minute floor, in Settings and in the scheduler.
+- **A send interrupted by a crash no longer sticks.** A destination claimed by a
+  run that then died stayed in `publishing` forever: never retried, with no
+  Retry button, and on a single-destination post later offered "Post now",
+  which could send a second copy. At launch such destinations are now failed
+  with a message saying to check the platform before retrying, and the attempt
+  is logged.
 
 ### Activation
 

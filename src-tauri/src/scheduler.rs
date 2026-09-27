@@ -92,6 +92,13 @@ impl Scheduler {
     pub fn start(app: AppHandle, database: Arc<Db>) -> Self {
         let (wake, wakeups) = channel();
 
+        // Before anything else touches the queue: a target left mid-send by the
+        // last run would otherwise sit in `publishing` forever.
+        match recover_interrupted(&database) {
+            Ok(0) => {}
+            Ok(count) => log::warn!("{count} destination(s) were interrupted mid-send"),
+            Err(err) => log::error!("recovering interrupted sends failed: {err}"),
+        }
         if let Err(err) = catch_up(&database) {
             log::error!("catch-up pass failed: {err}");
         }
@@ -303,6 +310,24 @@ pub fn catch_up(database: &Arc<Db>) -> Result<usize> {
         );
     }
     Ok(overdue.len())
+}
+
+/// The launch pass over destinations the previous run claimed and never
+/// settled — a crash, a force-quit or a failed write after the send. Each is
+/// failed with a message that says to check the platform first, and its post's
+/// status is recomputed. Returns how many destinations it failed.
+pub fn recover_interrupted(database: &Arc<Db>) -> Result<usize> {
+    let mut posts = database.fail_interrupted_targets(
+        "Interrupted mid-send: Windbag quit before the platform answered. \
+         Check whether it went out before retrying.",
+    )?;
+    let failed = posts.len();
+    posts.sort_unstable();
+    posts.dedup();
+    for post_id in posts {
+        database.reconcile_post_status(post_id)?;
+    }
+    Ok(failed)
 }
 
 /// Puts a missed or failed post back in the queue at a new time. Targets that
@@ -563,6 +588,36 @@ mod tests {
             database.get_post(post).expect("post").status,
             POST_SCHEDULED,
             "closing the laptop for three minutes must not cost a post"
+        );
+    }
+
+    #[test]
+    fn a_send_interrupted_by_a_crash_fails_instead_of_sticking_or_reposting() {
+        // A target claimed and never settled: the process died mid-send. The
+        // remote may or may not have the post, so it must neither stay stuck in
+        // `publishing` nor go back to `pending` and risk a second copy.
+        let (database, _, post, target) = store();
+        assert!(database.claim_target(target).expect("claim"));
+
+        assert_eq!(recover_interrupted(&database).expect("recover"), 1);
+
+        let targets = database.list_targets(post).expect("targets");
+        assert_eq!(targets[0].status, TARGET_FAILED);
+        assert!(
+            targets[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("Check whether it went out"))
+        );
+        assert_eq!(database.get_post(post).expect("post").status, POST_FAILED);
+        let attempts = database.list_attempts(post).expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        assert!(!attempts[0].ok);
+
+        assert_eq!(
+            recover_interrupted(&database).expect("recover again"),
+            0,
+            "a second launch finds nothing left to recover"
         );
     }
 

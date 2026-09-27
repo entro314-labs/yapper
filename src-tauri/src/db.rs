@@ -653,6 +653,37 @@ impl Db {
         Ok(())
     }
 
+    /// Fails every target still marked `publishing` — at launch, the only way
+    /// one can be is a process that died between the claim and the settle — and
+    /// logs the attempt. Returns the post of each failed target, one entry per
+    /// target, so their status can be recomputed. Failed rather than requeued: the send may have landed, and
+    /// only the user can check before a retry risks a second copy.
+    pub fn fail_interrupted_targets(&self, message: &str) -> Result<Vec<i64>> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let interrupted = {
+            let mut stmt = tx.prepare("SELECT id, post_id FROM post_targets WHERE status = ?1")?;
+            stmt.query_map(params![TARGET_PUBLISHING], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let now = now_rfc3339();
+        for (target_id, _) in &interrupted {
+            tx.execute(
+                "UPDATE post_targets SET status = ?2, error = ?3, next_attempt_at = NULL
+                  WHERE id = ?1",
+                params![target_id, TARGET_FAILED, message],
+            )?;
+            tx.execute(
+                "INSERT INTO attempts (target_id, at, ok, detail) VALUES (?1, ?2, 0, ?3)",
+                params![target_id, now, message],
+            )?;
+        }
+        tx.commit()?;
+        Ok(interrupted.into_iter().map(|(_, post)| post).collect())
+    }
+
     /// Clears the error and backoff so the scheduler picks the target up again.
     pub fn requeue_target(&self, target_id: i64) -> Result<()> {
         self.lock().execute(
