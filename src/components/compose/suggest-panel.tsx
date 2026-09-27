@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 
 import { RefreshCwIcon } from '@/components/icons/refresh-cw'
 import { SparklesIcon } from '@/components/icons/sparkles'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { useAnimatedIcon } from '@/lib/animated-icon'
@@ -97,6 +98,8 @@ export function SuggestPanel({
           <IconX />
         </Button>
       </header>
+
+      {notes.isError ? <QueryErrorState compact what="your notes" queries={[notes]} /> : null}
 
       {(notes.data ?? []).length > 0 ? (
         <div className="flex flex-col gap-1.5">

@@ -7,6 +7,7 @@ import { toast } from 'sonner'
 import { CheckIcon } from '@/components/icons/check'
 import { CopyIcon } from '@/components/icons/copy'
 import { ExternalLinkIcon } from '@/components/icons/external-link'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Progress } from '@/components/ui/progress'
@@ -54,6 +55,10 @@ function SettingsScreen() {
     },
     [settings.data, update],
   )
+
+  if (settings.isError) {
+    return <QueryErrorState what="settings" queries={[settings]} />
+  }
 
   const current = settings.data
   if (!current) return null
@@ -221,6 +226,14 @@ function SettingsScreen() {
         title="Platform apps"
         note="X, Reddit, LinkedIn and all three Meta surfaces gate posting behind a developer app that has to be registered to a person. Windbag cannot ship one, so you register your own and paste its client id here — it is stored in your OS keychain, never in the app's database."
       >
+        {platforms.isError || redirectUri.isError ? (
+          <QueryErrorState
+            compact
+            what="the platform apps"
+            queries={[platforms, redirectUri]}
+            className="px-3 py-2.5"
+          />
+        ) : null}
         {redirectUri.data ? <RedirectUriRow uri={redirectUri.data} /> : null}
         {(platforms.data ?? [])
           .filter((info) => info.appFields.length > 0)
@@ -463,6 +476,19 @@ function WebDeploymentRow() {
     })()
   }, [save, token, value])
 
+  // A blank form over an unreadable store would invite saving over whatever
+  // is actually there.
+  if (stored.isError) {
+    return (
+      <QueryErrorState
+        compact
+        what="the web deployment"
+        queries={[stored]}
+        className="px-3 py-2.5"
+      />
+    )
+  }
+
   return (
     <div className="flex flex-col gap-3 px-3 py-2.5">
       <label className="flex flex-col gap-1 text-xs" htmlFor="web-host-base-url">
@@ -580,21 +606,30 @@ function AssistantRow({
         </Select>
       </Row>
 
-      <ul className="mt-1 flex flex-col gap-1 border-t border-border/50 pt-2.5">
-        {(availability.data ?? []).map((entry) => (
-          <li key={entry.backend} className="flex items-start gap-1.5 text-xs">
-            {entry.available ? (
-              <IconCircleCheck className="mt-px size-3.5 shrink-0 text-success" />
-            ) : (
-              <IconAlertTriangle className="mt-px size-3.5 shrink-0 text-muted-foreground" />
-            )}
-            <span className="font-medium">{entry.label}</span>
-            <span className="min-w-0 flex-1 leading-relaxed text-muted-foreground">
-              {entry.reason}
-            </span>
-          </li>
-        ))}
-      </ul>
+      {availability.isError ? (
+        <QueryErrorState
+          compact
+          what="which assistants are available"
+          queries={[availability]}
+          className="mt-1 border-t border-border/50 pt-2.5"
+        />
+      ) : (
+        <ul className="mt-1 flex flex-col gap-1 border-t border-border/50 pt-2.5">
+          {(availability.data ?? []).map((entry) => (
+            <li key={entry.backend} className="flex items-start gap-1.5 text-xs">
+              {entry.available ? (
+                <IconCircleCheck className="mt-px size-3.5 shrink-0 text-success" />
+              ) : (
+                <IconAlertTriangle className="mt-px size-3.5 shrink-0 text-muted-foreground" />
+              )}
+              <span className="font-medium">{entry.label}</span>
+              <span className="min-w-0 flex-1 leading-relaxed text-muted-foreground">
+                {entry.reason}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
@@ -672,6 +707,19 @@ function AppCredentialsRow({ info }: { info: PlatformInfo }) {
       }
     })()
   }, [draft, stored.data, info, save, value])
+
+  // "Not set up" over a keychain that could not be read would be a lie, and
+  // the form behind it would invite overwriting a stored app.
+  if (stored.isError) {
+    return (
+      <QueryErrorState
+        compact
+        what={`your ${info.name} app`}
+        queries={[stored]}
+        className="px-3 py-2.5"
+      />
+    )
+  }
 
   return (
     <div className="px-3 py-2.5">

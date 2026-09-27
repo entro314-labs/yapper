@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 
 import { SparklesIcon } from '@/components/icons/sparkles'
 import { EmptyState } from '@/components/shell/empty-state'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -83,6 +84,10 @@ function NotesScreen() {
   )
 
   const aiOn = settings.data ? settings.data.aiBackend !== 'off' : false
+
+  if (notes.isError) {
+    return <QueryErrorState what="your notes" queries={[notes]} />
+  }
 
   return (
     <div className="grid h-full grid-cols-[minmax(200px,280px)_1fr] overflow-hidden">

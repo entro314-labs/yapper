@@ -30,7 +30,14 @@ export function StatusBar() {
   return (
     <footer className="flex h-6 shrink-0 items-center gap-3 border-t border-border/50 px-3 text-[11px] text-muted-foreground">
       <span className="flex items-center gap-1.5">
-        {next ? (
+        {/* "Nothing scheduled" over a queue that could not be read would be the
+            one reassurance this bar must never give falsely. */}
+        {posts.isError ? (
+          <Link to="/" className="flex items-center gap-1.5 text-destructive hover:underline">
+            <IconAlertTriangle className="size-3" />
+            Could not read the queue
+          </Link>
+        ) : next ? (
           <>
             <IconClock className="size-3" />
             <span className="tabular-nums">Next {formatRelative(next.scheduledAt)}</span>

@@ -5,6 +5,7 @@ import * as React from 'react'
 import { toast } from 'sonner'
 
 import { EmptyState } from '@/components/shell/empty-state'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -15,11 +16,12 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
+import { Skeleton } from '@/components/ui/skeleton'
 import { brandOf } from '@/lib/platform-brand'
 import { useAccounts, useConnectAccount, useDisconnectAccount, usePlatforms } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
 import type { PlatformInfo } from '@/lib/tauri/types'
-import { cn, formatAbsolute } from '@/lib/utils'
+import { cn, formatAbsolute, repeatKeys } from '@/lib/utils'
 
 export const Route = createFileRoute('/accounts')({ component: AccountsScreen })
 
@@ -35,7 +37,19 @@ function AccountsScreen() {
         <h2 className="font-display mb-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
           Connected
         </h2>
-        {accounts.data && accounts.data.length > 0 ? (
+        {accounts.isError ? (
+          <QueryErrorState
+            what="your accounts"
+            queries={[accounts]}
+            className="rounded-lg border border-dashed border-border/60 py-12"
+          />
+        ) : accounts.isLoading ? (
+          <div className="flex flex-col gap-2">
+            {repeatKeys(2, 'account').map((key) => (
+              <Skeleton key={key} className="h-[3.25rem] w-full rounded-lg" />
+            ))}
+          </div>
+        ) : accounts.data && accounts.data.length > 0 ? (
           <ul className="flex flex-col gap-2">
             {accounts.data.map((account) => {
               const brand = brandOf(account.platform)
@@ -126,6 +140,14 @@ function AccountsScreen() {
         <h2 className="font-display mb-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
           Add
         </h2>
+        {platforms.isError ? (
+          <QueryErrorState
+            compact
+            what="the platform list"
+            queries={[platforms]}
+            className="rounded-lg border border-border/60 px-3 py-2.5"
+          />
+        ) : null}
         <div className="grid gap-2 sm:grid-cols-2">
           {(platforms.data ?? []).map((info) => {
             const brand = brandOf(info.id)

@@ -1,4 +1,4 @@
-import { IconTrash, IconUsers } from '@tabler/icons-react'
+import { IconFileOff, IconTrash, IconUsers } from '@tabler/icons-react'
 import { Link, createFileRoute, useNavigate } from '@tanstack/react-router'
 import { open } from '@tauri-apps/plugin-dialog'
 import * as React from 'react'
@@ -8,9 +8,12 @@ import { SuggestPanel } from '@/components/compose/suggest-panel'
 import { AttachFileIcon } from '@/components/icons/attach-file'
 import { SendIcon } from '@/components/icons/send'
 import { SparklesIcon } from '@/components/icons/sparkles'
+import { EmptyState } from '@/components/shell/empty-state'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { useAnimatedIcon } from '@/lib/animated-icon'
 import { brandOf } from '@/lib/platform-brand'
@@ -208,6 +211,38 @@ function ComposeScreen() {
     if (suggestion.title) setTitle(suggestion.title)
     setSuggesting(false)
   }, [])
+
+  // Only the reads this visit actually depends on: the queue matters when a
+  // post is being opened, the notes when one is being drafted from.
+  const reads = [
+    accounts,
+    platforms,
+    ...(id === undefined ? [] : [posts]),
+    ...(noteId === undefined ? [] : [notes]),
+  ]
+  if (reads.some((query) => query.isError)) {
+    return (
+      <QueryErrorState what={id === undefined ? 'the composer' : 'this post'} queries={reads} />
+    )
+  }
+
+  // An edit opened before the queue arrives would otherwise show an empty
+  // form, indistinguishable from the post having no text.
+  if (id !== undefined && !editing) {
+    return posts.isLoading ? (
+      <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4">
+        <Skeleton className="h-52 w-full rounded-lg" />
+        <Skeleton className="h-8 w-full rounded-md" />
+      </div>
+    ) : (
+      <EmptyState
+        icon={IconFileOff}
+        title="This post no longer exists"
+        description="It was deleted from the queue, so there is nothing here to edit."
+        action={<Button render={<Link to="/" />}>Back to the queue</Button>}
+      />
+    )
+  }
 
   if (accounts.data?.length === 0) {
     return (

@@ -13,6 +13,7 @@ import { openUrl } from '@tauri-apps/plugin-opener'
 import * as React from 'react'
 import { toast } from 'sonner'
 
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
 import { STATUS_LABEL, StatusDot } from '@/components/ui/status-dot'
 import { brandOf } from '@/lib/platform-brand'
@@ -262,7 +263,11 @@ function AttemptLog({
         History
       </button>
 
-      {open ? (
+      {open && attempts.isError ? (
+        <QueryErrorState compact what="the history" queries={[attempts]} className="mt-1.5" />
+      ) : null}
+
+      {open && !attempts.isError ? (
         <ol className="mt-1.5 flex flex-col gap-1 border-l border-border/60 pl-2.5">
           {(attempts.data ?? []).map((attempt) => (
             <li key={attempt.id} className="flex gap-2 text-[11px] leading-relaxed">

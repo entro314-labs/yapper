@@ -6,7 +6,9 @@ import { toast } from 'sonner'
 import { ChevronLeftIcon } from '@/components/icons/chevron-left'
 import { ChevronRightIcon } from '@/components/icons/chevron-right'
 import { EmptyState } from '@/components/shell/empty-state'
+import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import { STATUS_LABEL, StatusDot } from '@/components/ui/status-dot'
 import { useAnimatedIcon } from '@/lib/animated-icon'
 import { brandOf } from '@/lib/platform-brand'
@@ -56,6 +58,20 @@ function CalendarScreen() {
   )
 
   const days = React.useMemo(() => buildGrid(monthStart, scheduled), [monthStart, scheduled])
+
+  if (posts.isError || accounts.isError) {
+    return <QueryErrorState what="the calendar" queries={[posts, accounts]} />
+  }
+
+  // Loading is not "nothing on the calendar": the empty state would flash on
+  // every visit before the queue arrived.
+  if (posts.isLoading) {
+    return (
+      <div className="p-4">
+        <Skeleton className="h-[36rem] w-full rounded-lg" />
+      </div>
+    )
+  }
 
   if (scheduled.length === 0) {
     return (
