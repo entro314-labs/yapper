@@ -235,14 +235,23 @@ function StatsScreen() {
                     if (!proceed) return
                   }
                   const report = await refresh.mutateAsync()
-                  const skipped = report.skipped > 0 ? `, skipped ${report.skipped}` : ''
+                  // Every part is said, even on failure: rows written before an error are in the
+                  // store, and X reads made before it are on the bill.
                   const plural = report.updated === 1 ? '' : 's'
-                  toast.success(
-                    `Updated ${report.updated} destination${plural}${skipped}`,
+                  const summary = [
+                    `Updated ${report.updated} destination${plural}`,
+                    report.skipped > 0 ? `skipped ${report.skipped}` : null,
+                    report.failed > 0 ? `failed ${report.failed}` : null,
+                    report.billedReads > 0 ? `${report.billedReads} billed X reads` : null,
+                  ]
+                    .filter((part) => part !== null)
+                    .join(', ')
+                  const detail =
                     report.problems.length > 0
                       ? { description: report.problems.join('\n'), duration: 10_000 }
-                      : undefined,
-                  )
+                      : undefined
+                  if (report.failed > 0) toast.warning(summary, detail)
+                  else toast.success(summary, detail)
                 } catch (err) {
                   toast.error(humanMessage(err))
                 }

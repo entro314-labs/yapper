@@ -640,13 +640,54 @@ impl Grouper {
 
 /// What one refresh did. Reported rather than silently absorbed: a refresh that
 /// updated three of eleven destinations needs to say so.
+///
+/// `updated + skipped + failed` is every published destination, so nothing a
+/// refresh touched goes unaccounted for.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshReport {
+    /// Destinations whose counts were written — including those an account's
+    /// pass wrote before it stopped on an error.
     pub updated: usize,
+    /// Destinations not read: accounts Windbag cannot read engagement for, and
+    /// posts that no longer exist on the platform.
     pub skipped: usize,
+    /// Destinations an account's pass had not reached when it stopped on an
+    /// error.
+    pub failed: usize,
+    /// X ids sent in lookups X answered successfully. Each is billed against the
+    /// app's credits whether or not the refresh finished, so it is reported even
+    /// when the pass then failed.
+    pub billed_reads: usize,
     /// One line per platform or account that could not be read.
     pub problems: Vec<String>,
+}
+
+/// What one account's pass got through, filled as it goes so an error midway
+/// cannot erase the rows already written.
+#[derive(Default)]
+struct Tally {
+    updated: usize,
+    billed: usize,
+}
+
+impl RefreshReport {
+    /// Folds one account's pass in: what it wrote counts as updated whether or
+    /// not it finished, and the rest of its destinations count as failed if it
+    /// stopped on an error, or as skipped if it finished without them (a post
+    /// deleted on the platform).
+    fn record(&mut self, handle: &str, total: usize, tally: &Tally, outcome: Result<()>) {
+        self.updated += tally.updated;
+        self.billed_reads += tally.billed;
+        let rest = total.saturating_sub(tally.updated);
+        match outcome {
+            Ok(()) => self.skipped += rest,
+            Err(err) => {
+                self.failed += rest;
+                self.problems.push(format!("{handle}: {err}"));
+            }
+        }
+    }
 }
 
 /// What a refresh would read, before it runs.
@@ -718,24 +759,19 @@ pub fn refresh_engagement(database: &Db) -> Result<RefreshReport> {
     }
 
     for (account, targets) in by_account.into_values() {
+        let mut tally = Tally::default();
         let outcome = match account.platform {
-            PlatformId::Bluesky => refresh_bluesky(database, &targets),
-            PlatformId::Mastodon => refresh_mastodon(database, &account, &targets),
-            PlatformId::Threads => refresh_threads(database, &account, &targets),
-            PlatformId::Instagram => refresh_instagram(database, &account, &targets),
-            PlatformId::Facebook => refresh_facebook(database, &account, &targets),
-            PlatformId::X => refresh_x(database, &account, &targets),
-            // Gated above; a new variant lands here rather than silently
-            // counting as a success.
-            PlatformId::Reddit | PlatformId::Linkedin => Ok(0),
+            PlatformId::Bluesky => refresh_bluesky(database, &targets, &mut tally),
+            PlatformId::Mastodon => refresh_mastodon(database, &account, &targets, &mut tally),
+            PlatformId::Threads => refresh_threads(database, &account, &targets, &mut tally),
+            PlatformId::Instagram => refresh_instagram(database, &account, &targets, &mut tally),
+            PlatformId::Facebook => refresh_facebook(database, &account, &targets, &mut tally),
+            PlatformId::X => refresh_x(database, &account, &targets, &mut tally),
+            // Gated above; a new variant lands here and is reported as skipped
+            // rather than silently counting as updated.
+            PlatformId::Reddit | PlatformId::Linkedin => Ok(()),
         };
-        match outcome {
-            Ok(count) => report.updated += count,
-            Err(err) => {
-                report.skipped += targets.len();
-                report.problems.push(format!("{}: {err}", account.handle));
-            }
-        }
+        report.record(&account.handle, targets.len(), &tally, outcome);
     }
     Ok(report)
 }
@@ -747,9 +783,8 @@ pub fn refresh_engagement(database: &Db) -> Result<RefreshReport> {
 /// no reason — and once "Sign in with Bluesky" became the default there IS no
 /// stored app password, which would have failed the refresh for every new
 /// account with a message about a credential the user never created.
-fn refresh_bluesky(database: &Db, targets: &[PostTarget]) -> Result<usize> {
+fn refresh_bluesky(database: &Db, targets: &[PostTarget], tally: &mut Tally) -> Result<()> {
     let now = db::now_rfc3339();
-    let mut updated = 0usize;
 
     for chunk in targets.chunks(BLUESKY_LOOKUP_BATCH) {
         let query: Vec<(&str, &str)> = chunk
@@ -800,10 +835,10 @@ fn refresh_bluesky(database: &Db, targets: &[PostTarget]) -> Result<usize> {
                 // Bluesky publishes no impression count.
                 views: None,
             })?;
-            updated += 1;
+            tally.updated += 1;
         }
     }
-    Ok(updated)
+    Ok(())
 }
 
 /// The unauthenticated `AppView`. Not the account's PDS: a PDS serves the
@@ -815,7 +850,12 @@ const BLUESKY_LOOKUP_BATCH: usize = 25;
 
 /// Mastodon's per-status counts. One call each; a deleted status 404s and is
 /// skipped rather than failing the account.
-fn refresh_mastodon(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Result<usize> {
+fn refresh_mastodon(
+    database: &Db,
+    account: &db::Account,
+    targets: &[PostTarget],
+    tally: &mut Tally,
+) -> Result<()> {
     let instance = account
         .instance
         .as_deref()
@@ -823,7 +863,6 @@ fn refresh_mastodon(database: &Db, account: &db::Account, targets: &[PostTarget]
     let secret = secrets::load_account_secret(account.platform, &account.remote_id)?;
 
     let now = db::now_rfc3339();
-    let mut updated = 0usize;
     for target in targets {
         let Some(id) = target.remote_id.as_deref() else {
             continue;
@@ -853,19 +892,23 @@ fn refresh_mastodon(database: &Db, account: &db::Account, targets: &[PostTarget]
             // Mastodon publishes no impression count.
             views: None,
         })?;
-        updated += 1;
+        tally.updated += 1;
     }
-    Ok(updated)
+    Ok(())
 }
 
 /// Threads' per-media `/insights`, one call per post.
 ///
 /// Requires `threads_manage_insights`, which [`engagement_gap`] has already
 /// checked was granted before this runs.
-fn refresh_threads(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Result<usize> {
+fn refresh_threads(
+    database: &Db,
+    account: &db::Account,
+    targets: &[PostTarget],
+    tally: &mut Tally,
+) -> Result<()> {
     let secret = platforms::live_secret(database, account)?;
     let now = db::now_rfc3339();
-    let mut updated = 0usize;
 
     for target in targets {
         let Some(id) = target.remote_id.as_deref() else {
@@ -891,9 +934,9 @@ fn refresh_threads(database: &Db, account: &db::Account, targets: &[PostTarget])
             quotes: named.get("quotes").copied(),
             views: named.get("views").copied(),
         })?;
-        updated += 1;
+        tally.updated += 1;
     }
-    Ok(updated)
+    Ok(())
 }
 
 /// Instagram's per-media `/insights`.
@@ -906,10 +949,10 @@ fn refresh_instagram(
     database: &Db,
     account: &db::Account,
     targets: &[PostTarget],
-) -> Result<usize> {
+    tally: &mut Tally,
+) -> Result<()> {
     let secret = platforms::live_secret(database, account)?;
     let now = db::now_rfc3339();
-    let mut updated = 0usize;
 
     for target in targets {
         let Some(id) = target.remote_id.as_deref() else {
@@ -935,9 +978,9 @@ fn refresh_instagram(
             quotes: None,
             views: named.get("views").copied(),
         })?;
-        updated += 1;
+        tally.updated += 1;
     }
-    Ok(updated)
+    Ok(())
 }
 
 /// A Page post's own summary counts.
@@ -946,7 +989,12 @@ fn refresh_instagram(
 /// already holds, where Page-level insights would need `read_insights` and the
 /// App Review that permission carries. `shares` is Facebook's nearest thing to
 /// a repost; it publishes no impression count on a post without insights.
-fn refresh_facebook(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Result<usize> {
+fn refresh_facebook(
+    database: &Db,
+    account: &db::Account,
+    targets: &[PostTarget],
+    tally: &mut Tally,
+) -> Result<()> {
     // The Page token IS the stored `access_token` — `connect` swaps the user
     // token for the Page's own one and keeps the user token in `extra`. So the
     // post reads back on exactly the credential that wrote it.
@@ -954,7 +1002,6 @@ fn refresh_facebook(database: &Db, account: &db::Account, targets: &[PostTarget]
     let token = secret.access_token.clone();
 
     let now = db::now_rfc3339();
-    let mut updated = 0usize;
     for target in targets {
         let Some(id) = target.remote_id.as_deref() else {
             continue;
@@ -985,19 +1032,23 @@ fn refresh_facebook(database: &Db, account: &db::Account, targets: &[PostTarget]
             quotes: None,
             views: None,
         })?;
-        updated += 1;
+        tally.updated += 1;
     }
-    Ok(updated)
+    Ok(())
 }
 
 /// X's `public_metrics`, 100 ids per call.
 ///
 /// Every id in the request is a billed read, which is why this is only ever
 /// reached from a manual refresh the user confirmed the cost of.
-fn refresh_x(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Result<usize> {
+fn refresh_x(
+    database: &Db,
+    account: &db::Account,
+    targets: &[PostTarget],
+    tally: &mut Tally,
+) -> Result<()> {
     let secret = platforms::live_secret(database, account)?;
     let now = db::now_rfc3339();
-    let mut updated = 0usize;
 
     for chunk in targets.chunks(X_LOOKUP_BATCH) {
         let ids: Vec<&str> = chunk
@@ -1021,6 +1072,9 @@ fn refresh_x(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Re
         if !(200..300).contains(&status) {
             return Err(from_status(status, &body, "X"));
         }
+        // Counted the moment X answers, before anything below can fail: this
+        // lookup is on the bill whether or not its rows get written.
+        tally.billed += ids.len();
         let parsed: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| AppError::Platform(format!("X returned unreadable posts: {e}")))?;
         let Some(posts) = parsed.get("data").and_then(serde_json::Value::as_array) else {
@@ -1054,10 +1108,10 @@ fn refresh_x(database: &Db, account: &db::Account, targets: &[PostTarget]) -> Re
                 quotes: count(m, "quote_count"),
                 views: count(m, "impression_count"),
             })?;
-            updated += 1;
+            tally.updated += 1;
         }
     }
-    Ok(updated)
+    Ok(())
 }
 
 /// How many ids one `GET /2/tweets` accepts.
@@ -1431,6 +1485,42 @@ mod tests {
             stats.engagement.oldest_fetch.as_deref(),
             Some("2026-01-01T00:00:00+00:00")
         );
+    }
+
+    #[test]
+    fn a_pass_that_fails_midway_still_reports_what_it_wrote_and_billed() {
+        // The regression this guards: an error after 150 billed X reads used to
+        // report "updated 0, skipped 250", discarding rows already written and
+        // hiding money already spent.
+        let mut report = RefreshReport::default();
+        let tally = Tally {
+            updated: 150,
+            billed: 200,
+        };
+        report.record(
+            "@me",
+            250,
+            &tally,
+            Err(AppError::Platform("rate limited".into())),
+        );
+        assert_eq!(report.updated, 150);
+        assert_eq!(report.failed, 100, "the destinations it never reached");
+        assert_eq!(report.skipped, 0);
+        assert_eq!(report.billed_reads, 200);
+        assert_eq!(report.problems.len(), 1);
+        assert!(report.problems[0].starts_with("@me: "));
+    }
+
+    #[test]
+    fn a_finished_pass_counts_what_it_could_not_find_as_skipped() {
+        let mut report = RefreshReport::default();
+        let tally = Tally {
+            updated: 9,
+            billed: 0,
+        };
+        report.record("me.bsky.social", 10, &tally, Ok(()));
+        assert_eq!((report.updated, report.skipped, report.failed), (9, 1, 0));
+        assert!(report.problems.is_empty());
     }
 
     #[test]

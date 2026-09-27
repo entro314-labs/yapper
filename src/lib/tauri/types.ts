@@ -376,7 +376,13 @@ export interface RefreshCost {
 
 /** `stats::RefreshReport` */
 export interface RefreshReport {
+  /** Written — including what an account's pass wrote before it stopped on an error. */
   updated: number
+  /** Not read: unreadable accounts, and posts gone from the platform. */
   skipped: number
+  /** Not reached, because that account's pass stopped on an error. */
+  failed: number
+  /** X ids in lookups X answered — billed whether or not the refresh finished. */
+  billedReads: number
   problems: string[]
 }
