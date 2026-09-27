@@ -173,8 +173,9 @@ impl Platform for Facebook {
                 access_token: page.access_token,
                 refresh_token: None,
                 expires_at: None,
-                // Kept so a revoked Page token can be re-derived without a full
-                // reconnect, and so the connection can be audited.
+                // Kept for Meta's ads tools (`crate::metaads`), which need the
+                // USER token: ad accounts refuse a Page token. Nothing re-derives
+                // a Page token from it — a revoked one means reconnecting.
                 extra: json!({ "user_token": long_user.access_token }),
             },
         })

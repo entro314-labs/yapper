@@ -18,8 +18,9 @@
 //! credit" from "bad credentials": the first is not something reconnecting fixes,
 //! and not something retrying fixes either.
 //!
-//! The 280-character default is the standard one. Premium accounts get far more,
-//! which is what the per-account `char_limit` override is for.
+//! The 280-character default is the standard one. Premium accounts get far more;
+//! X does not report the tier at connect, so the per-account limit is whatever
+//! is stored in the account's `char_limit`, and 280 when nothing is.
 
 use serde::Deserialize;
 use serde_json::json;
