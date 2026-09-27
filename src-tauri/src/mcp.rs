@@ -692,14 +692,14 @@ mod tests {
             json!({
                 "body": "offset",
                 "accountIds": [account],
-                "scheduledAt": "2026-12-01T09:00:00+02:00"
+                "scheduledAt": "2099-12-01T09:00:00+02:00"
             }),
         );
         let stored = session.db.list_posts().expect("posts")[0]
             .post
             .scheduled_at
             .clone();
-        assert_eq!(stored.as_deref(), Some("2026-12-01T07:00:00+00:00"));
+        assert_eq!(stored.as_deref(), Some("2099-12-01T07:00:00+00:00"));
     }
 
     #[test]
@@ -711,7 +711,7 @@ mod tests {
             json!({
                 "body": "from an agent",
                 "accountIds": [account],
-                "scheduledAt": "2026-12-01T09:00:00Z"
+                "scheduledAt": "2099-12-01T09:00:00Z"
             }),
         );
         let text = text_of(&frame);

@@ -527,14 +527,18 @@ pub fn validate(
     let stands_on_link =
         info.limits.link_is_content && link.is_some_and(|url| !url.trim().is_empty());
     if body.trim().is_empty() && media.is_empty() && !stands_on_link {
+        // Only what this platform can actually carry is offered as the fix.
+        let mut options = vec!["text"];
+        if info.limits.max_media > 0 {
+            options.push("an attachment");
+        }
+        if info.limits.link_is_content {
+            options.push("a link");
+        }
         return Err(AppError::InvalidInput(format!(
-            "{} needs text or an attachment{}.",
+            "{} needs {}.",
             info.name,
-            if info.limits.link_is_content {
-                ", or a link"
-            } else {
-                ""
-            }
+            options.join(" or ")
         )));
     }
     if length > effective_char_limit {
@@ -576,6 +580,12 @@ pub fn validate(
             info.name
         )));
     }
+    check_media(&info, media)
+}
+
+/// Count, type, size and pairing of the attachments against what this
+/// platform (and its adapter) can carry.
+fn check_media(info: &PlatformInfo, media: &[MediaSpec]) -> Result<()> {
     if media.len() > info.limits.max_media {
         return Err(AppError::InvalidInput(format!(
             "{} takes at most {} attachment(s); this has {}.",
