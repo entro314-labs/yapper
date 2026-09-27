@@ -212,8 +212,9 @@ impl FieldSpec {
 #[expect(clippy::struct_excessive_bools)]
 pub struct Limits {
     /// Body length the platform accepts. Counted in Unicode scalar values, which
-    /// is what most of them actually measure; Bluesky counts graphemes and
-    /// Threads bills emoji by UTF-8 byte, so both override `count_body`.
+    /// is what most of them actually measure; Bluesky counts graphemes, X
+    /// weighs URLs and wide characters, and Threads bills emoji by UTF-8 byte,
+    /// so those three override `count_body`.
     pub max_chars: usize,
     pub max_media: usize,
     /// Every attachment type the ADAPTER can actually post, with the size the
@@ -476,8 +477,8 @@ pub trait Platform: Send + Sync {
 
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published>;
 
-    /// How this platform counts a body against its own limit. Four of the five
-    /// count Unicode scalar values; Bluesky counts graphemes.
+    /// How this platform counts a body against its own limit. Most count
+    /// Unicode scalar values; Bluesky, X and Threads override it.
     fn count_body(&self, body: &str) -> usize {
         body.chars().count()
     }

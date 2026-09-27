@@ -462,7 +462,9 @@ fn store_tools() -> Vec<Value> {
                         "type": "string",
                         "description":
                             "Optional URL. Becomes a card on LinkedIn, a link post on Reddit, \
-                             a link attachment on a text-only Threads post."
+                             a link share on Facebook and a link attachment on Threads when \
+                             the post has no attachments; everywhere else it is appended to \
+                             the text on its own line and counts toward the limit."
                     },
                     "scheduledAt": {
                         "type": "string",

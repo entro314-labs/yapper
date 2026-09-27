@@ -9,10 +9,14 @@ in a local SQLite store and every credential in your OS keychain.
 
 - **One composer, eight destinations.** Per-destination character counters that
   run the *same* validation the scheduler will — Bluesky's 300 graphemes, X's
-  280, LinkedIn's 3,000, Threads' 500 with emoji billed by byte, your Mastodon
+  280 weighted the way X weighs them (every URL 23, CJK and emoji 2),
+  LinkedIn's 3,000, Threads' 500 with emoji billed by byte, your Mastodon
   instance's own limit, Reddit's title, Instagram's insistence on an image.
 - **A real scheduler.** A worker thread publishes due posts, retries on rate
-  limits and outages with backoff, and records every attempt.
+  limits and outages with backoff (waiting out a reset the platform names), and
+  records every attempt. A send whose answer was lost is never retried blind:
+  Bluesky, Threads and Instagram resume the post they already started, the rest
+  stop and ask you to check.
 - **Per-destination truth.** Three platforms accepting and the fourth being
   rate-limited is the normal case, so the queue shows each destination's own
   status, permalink, error and retry — never a single collapsed "failed".
