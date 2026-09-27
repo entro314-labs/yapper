@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 
 use crate::commands::{self, SavePostInput, TargetInput};
 use crate::db::Db;
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::platforms::{self, PlatformId};
 use crate::scheduler;
 use crate::stats::{self, StatsFilter};
@@ -337,26 +337,42 @@ impl Session {
         Ok(serde_json::to_string_pretty(&result)?)
     }
 
+    /// Every argument is checked rather than dropped when it does not parse: a
+    /// filter that silently ignores a typo answers a different question than
+    /// the one asked, and the model reports those numbers as the answer.
     fn get_stats(&self, args: &Value) -> Result<String> {
-        let filter = StatsFilter {
-            since: args
-                .get("since")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| Some(stats::default_since())),
-            until: args.get("until").and_then(Value::as_str).map(str::to_owned),
-            platforms: args
-                .get("platforms")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .filter_map(|value| PlatformId::parse(value).ok())
-                        .collect()
+        let platforms = array(args, "platforms")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .and_then(|name| PlatformId::parse(name).ok())
+                    .ok_or_else(|| {
+                        let valid: Vec<&str> =
+                            PlatformId::ALL.iter().map(|id| id.as_str()).collect();
+                        AppError::InvalidInput(format!(
+                            "`platforms` has {value}, which is not a platform. Valid: {}.",
+                            valid.join(", ")
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let account_ids = array(args, "accountIds")?
+            .iter()
+            .map(|value| {
+                value.as_i64().ok_or_else(|| {
+                    AppError::InvalidInput(format!(
+                        "`accountIds` has {value}, which is not an integer account id from \
+                         list_accounts."
+                    ))
                 })
-                .unwrap_or_default(),
-            account_ids: Vec::new(),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let filter = StatsFilter {
+            since: Some(bound(args, "since")?.unwrap_or_else(stats::default_since)),
+            until: bound(args, "until")?,
+            platforms,
+            account_ids,
         };
         let computed = stats::compute(&self.db, &filter)?;
         Ok(serde_json::to_string_pretty(&json!({
@@ -411,6 +427,38 @@ impl Session {
             // platform never reports, as a zero.
             "unreadable": unreadable(&computed),
         }))?)
+    }
+}
+
+/// A `get_stats` date bound, in the store's canonical UTC form.
+///
+/// The stats filter compares timestamps as strings, which orders correctly only
+/// when both sides share one form — `2026-09-01T00:00:00+02:00` kept verbatim
+/// would sort two hours away from the instant it names. So the bound goes
+/// through the same parse the app's own stats command uses and comes out as
+/// `to_rfc3339` in UTC, exactly as every stored timestamp was written.
+fn bound(args: &Value, key: &str) -> Result<Option<String>> {
+    let raw = match args.get(key) {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(raw)) => raw.as_str(),
+        Some(other) => {
+            return Err(AppError::InvalidInput(format!(
+                "`{key}` must be an RFC 3339 timestamp string, not {other}."
+            )));
+        }
+    };
+    Ok(stats::parse_bound(Some(raw))?.map(|at| at.to_rfc3339()))
+}
+
+/// An optional array argument. Absent is empty; present but not an array is
+/// refused rather than read as "no filter".
+fn array<'a>(args: &'a Value, key: &str) -> Result<&'a [Value]> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(&[]),
+        Some(Value::Array(values)) => Ok(values),
+        Some(other) => Err(AppError::InvalidInput(format!(
+            "`{key}` must be an array, not {other}."
+        ))),
     }
 }
 
@@ -534,33 +582,54 @@ fn store_tools() -> Vec<Value> {
                 "required": ["body", "accountIds"]
             }),
         ),
-        tool(
-            "get_stats",
-            "Publishing statistics from Windbag's own records: how much published, what \
-             failed and why, which hours the user posts at, the best-performing posts, and \
-             engagement counts per platform as of the last refresh. Engagement is read from \
-             Bluesky, Mastodon, Threads, Instagram, Facebook and X; Reddit and LinkedIn come \
-             back under `unreadable` with a reason rather than as zero. A count a platform \
-             does not report (impressions on Bluesky, reposts on Instagram) is null, never 0, \
-             and is listed under `unreadable` with its `dimension`. Reads only the local \
-             store — it never calls a platform, so the numbers are as of the user's last \
-             refresh (`engagement.asOf`).",
-            json!({
-                "type": "object",
-                "properties": {
-                    "since": { "type": "string", "description": "RFC 3339 lower bound. Defaults to 30 days ago." },
-                    "until": { "type": "string", "description": "RFC 3339 upper bound." },
-                    "platforms": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description":
-                            "bluesky | mastodon | reddit | x | linkedin | threads | \
-                             instagram | facebook"
-                    }
-                }
-            }),
-        ),
+        stats_tool(),
     ]
+}
+
+/// `get_stats`, apart from [`store_tools`] only because its filter schema is the
+/// longest in the catalogue.
+fn stats_tool() -> Value {
+    tool(
+        "get_stats",
+        "Publishing statistics from Windbag's own records: how much published, what \
+         failed and why, which hours the user posts at, the best-performing posts, and \
+         engagement counts per platform as of the last refresh. Engagement is read from \
+         Bluesky, Mastodon, Threads, Instagram, Facebook and X; Reddit and LinkedIn come \
+         back under `unreadable` with a reason rather than as zero. A count a platform \
+         does not report (impressions on Bluesky, reposts on Instagram) is null, never 0, \
+         and is listed under `unreadable` with its `dimension`. Reads only the local \
+         store — it never calls a platform, so the numbers are as of the user's last \
+         refresh (`engagement.asOf`).",
+        json!({
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "description":
+                        "Inclusive lower bound, RFC 3339 with an offset, e.g. \
+                         2026-09-01T00:00:00Z or 2026-09-01T00:00:00+02:00; compared as \
+                         the same instant in UTC. Defaults to 30 days ago. An unparseable \
+                         value is refused."
+                },
+                "until": {
+                    "type": "string",
+                    "description": "Exclusive upper bound, in the same form as `since`."
+                },
+                "platforms": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description":
+                        "Only these platforms: bluesky | mastodon | reddit | x | linkedin | \
+                         threads | instagram | facebook. An unknown name is refused."
+                },
+                "accountIds": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "description": "Only these account ids, from list_accounts."
+                }
+            }
+        }),
+    )
 }
 
 /// The passthrough to Meta's hosted ads MCP server.
@@ -884,9 +953,8 @@ mod tests {
         assert!(text_of(&frame).contains("title"));
     }
 
-    #[test]
-    fn an_unreported_engagement_count_is_null_and_explained_not_zero() {
-        let (mut session, account) = session();
+    /// One post published to `account` just now. Returns the destination id.
+    fn publish_one(session: &Session, account: i64) -> i64 {
         let post = session
             .db
             .create_post(
@@ -906,6 +974,91 @@ mod tests {
             .db
             .finish_target_ok(target, "at://1", None)
             .expect("ok");
+        target
+    }
+
+    fn published_in(session: &mut Session, args: Value) -> i64 {
+        let text = text_of(&call(session, "get_stats", args));
+        serde_json::from_str::<Value>(&text)
+            .unwrap_or_else(|_| panic!("not stats: {text}"))["published"]
+            .as_i64()
+            .expect("published")
+    }
+
+    #[test]
+    fn a_stats_bound_with_an_offset_is_compared_as_the_same_instant() {
+        // The regression this guards: bounds were compared verbatim, so half an
+        // hour ago written at +05:00 sorted after a destination stored in UTC
+        // and excluded it.
+        let (mut session, account) = session();
+        publish_one(&session, account);
+        let offset = chrono::FixedOffset::east_opt(5 * 3600).expect("offset");
+        let since = (chrono::Utc::now() - chrono::Duration::minutes(30))
+            .with_timezone(&offset)
+            .to_rfc3339();
+        assert_eq!(published_in(&mut session, json!({ "since": since })), 1);
+    }
+
+    #[test]
+    fn an_unparseable_stats_bound_is_refused() {
+        let (mut session, _) = session();
+        let frame = call(&mut session, "get_stats", json!({ "since": "last week" }));
+        assert_eq!(
+            frame.pointer("/result/isError").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(text_of(&frame).contains("RFC 3339"), "{}", text_of(&frame));
+    }
+
+    #[test]
+    fn an_unknown_stats_platform_is_refused_with_the_valid_names() {
+        let (mut session, _) = session();
+        let frame = call(
+            &mut session,
+            "get_stats",
+            json!({ "platforms": ["bluesky", "twitter"] }),
+        );
+        let text = text_of(&frame);
+        assert_eq!(
+            frame.pointer("/result/isError").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(text.contains("twitter"), "{text}");
+        assert!(
+            text.contains("mastodon") && text.contains("facebook"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn stats_honour_account_ids_and_refuse_non_integer_ones() {
+        let (mut session, account) = session();
+        publish_one(&session, account);
+        assert_eq!(
+            published_in(&mut session, json!({ "accountIds": [account] })),
+            1
+        );
+        assert_eq!(
+            published_in(&mut session, json!({ "accountIds": [account + 1] })),
+            0,
+            "another account's view is empty"
+        );
+        let frame = call(
+            &mut session,
+            "get_stats",
+            json!({ "accountIds": [account.to_string()] }),
+        );
+        assert_eq!(
+            frame.pointer("/result/isError").and_then(Value::as_bool),
+            Some(true),
+            "a string id is refused, not dropped"
+        );
+    }
+
+    #[test]
+    fn an_unreported_engagement_count_is_null_and_explained_not_zero() {
+        let (mut session, account) = session();
+        let target = publish_one(&session, account);
         session
             .db
             .save_metrics(&db::Metrics {
