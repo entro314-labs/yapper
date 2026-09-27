@@ -210,13 +210,14 @@ impl Db {
 
     /// The schema ladder.
     ///
-    /// Each step is applied once, in order, and the version is written after
-    /// each one — so an interrupted upgrade resumes rather than re-running a
-    /// step that already landed. `CREATE TABLE IF NOT EXISTS` alone stops being
-    /// enough the first time a column is added to a table that already holds a
-    /// user's scheduled posts, which is why this exists before that happens.
+    /// Each step is applied once, in order, and commits together with the
+    /// version it produces (see [`apply_step`]) — so an interrupted upgrade
+    /// resumes rather than re-running a step that already landed. `CREATE TABLE
+    /// IF NOT EXISTS` alone stops being enough the first time a column is added
+    /// to a table that already holds a user's scheduled posts, which is why this
+    /// exists before that happens.
     fn migrate(&self) -> Result<()> {
-        let conn = self.lock();
+        let mut conn = self.lock();
 
         // `meta` first and unconditionally: it is where the version lives, so it
         // cannot itself be gated on the version.
@@ -239,12 +240,7 @@ impl Db {
 
         while version < SCHEMA_VERSION {
             let next = version + 1;
-            conn.execute_batch(step_sql(next))?;
-            conn.execute(
-                "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![next.to_string()],
-            )?;
+            apply_step(&mut conn, next, step_sql(next))?;
             version = next;
         }
         Ok(())
@@ -909,6 +905,25 @@ impl Db {
     }
 }
 
+/// Runs one ladder step and stamps the version it produces, as ONE transaction.
+///
+/// SQLite DDL is transactional, so a step that dies half-way — a crash, a full
+/// disk, a statement that fails — rolls back whole and the next launch runs it
+/// again from the top. Committed apart, the step's first statements would
+/// survive under the old version and the re-run would hit "duplicate column"
+/// on every launch after.
+fn apply_step(conn: &mut Connection, version: i64, sql: &str) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute_batch(sql)?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![version.to_string()],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// The SQL for one ladder step. Steps are append-only: once a version has
 /// shipped its statement never changes, because a store that already ran it
 /// will never run it again.
@@ -1237,6 +1252,38 @@ mod tests {
         // And v3's `views` column is selectable, which `list_metrics` would
         // fail on if the ALTER had not run.
         assert!(db.list_metrics().expect("metrics").is_empty());
+    }
+
+    #[test]
+    fn a_step_that_fails_part_way_leaves_neither_its_changes_nor_its_version() {
+        // The first statement lands, the second fails. Were the two not one
+        // transaction with the version stamp, the table would survive and the
+        // next launch would re-run the step into "table already exists" — or,
+        // for an ALTER, "duplicate column" — and never open the store again.
+        let db = Db::open_in_memory().expect("store");
+        let mut conn = db.lock();
+        let err = apply_step(
+            &mut conn,
+            SCHEMA_VERSION + 1,
+            "CREATE TABLE half_done (x INTEGER); ALTER TABLE no_such_table ADD COLUMN y;",
+        );
+        assert!(err.is_err());
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        let leftover: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'half_done'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema");
+        assert_eq!(leftover, 0, "the half-applied step was not rolled back");
     }
 
     #[test]
