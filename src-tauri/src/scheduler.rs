@@ -149,8 +149,14 @@ fn pass(app: &AppHandle, database: &Arc<Db>) -> Result<usize> {
     // prevent — a policy that only holds at boot is not the policy Settings
     // describes. It is idempotent, costs one indexed query, and returns
     // immediately under `PostLate`.
-    if let Err(err) = catch_up(database) {
-        log::error!("catch-up inside the scheduler pass failed: {err}");
+    match catch_up(database) {
+        Ok(0) => {}
+        // Nothing else would tell the open UI: a post just marked missed kept
+        // showing as upcoming until something unrelated refetched the queue.
+        Ok(_) => {
+            let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+        }
+        Err(err) => log::error!("catch-up inside the scheduler pass failed: {err}"),
     }
 
     let due = database.due_targets(Utc::now(), BATCH)?;
@@ -299,7 +305,10 @@ pub fn backoff(attempts: i64) -> chrono::Duration {
 /// Inside the grace window nothing happens and the normal pass picks them up.
 /// Past it, [`MissedPolicy`] decides: `PostLate` also leaves them for the normal
 /// pass, `Skip` marks them `missed` so they show up as something that did not go
-/// out rather than quietly arriving hours late.
+/// out rather than quietly arriving hours late. That includes a retry whose
+/// backoff ended while the app was closed (see [`Db::overdue_posts`]); its
+/// unpublished destinations are left for the user to re-time. Returns how many
+/// posts it marked.
 pub fn catch_up(database: &Arc<Db>) -> Result<usize> {
     let policy = MissedPolicy::parse(database.get_meta(META_MISSED_POLICY)?.as_deref());
     if policy == MissedPolicy::PostLate {
@@ -649,6 +658,98 @@ mod tests {
         // and a claimed one has moved to `publishing`.
         let (database, _, post, target) = store();
         assert!(database.claim_target(target).expect("claim"));
+
+        assert_eq!(catch_up(&database).expect("catch up"), 0);
+        assert_eq!(
+            database.get_post(post).expect("post").status,
+            POST_PUBLISHING
+        );
+    }
+
+    /// A post whose one destination is waiting out a backoff that ends at
+    /// `retry_at`.
+    fn backing_off(retry_at: chrono::DateTime<Utc>) -> (Arc<Db>, i64) {
+        let (database, _, post, target) = store();
+        database
+            .finish_target_err(target, "429", Some(retry_at))
+            .expect("park");
+        assert_eq!(
+            database.reconcile_post_status(post).expect("status"),
+            POST_PUBLISHING
+        );
+        (database, post)
+    }
+
+    #[test]
+    fn catch_up_marks_a_retry_the_app_was_not_running_for_missed() {
+        // Decision H-2: the policy covers a retry that fell due while Windbag
+        // was closed, not only a first send — otherwise a rate-limited post
+        // goes out hours late despite Skip.
+        let (database, post) = backing_off(Utc::now() - chrono::Duration::hours(2));
+
+        assert_eq!(catch_up(&database).expect("catch up"), 1);
+        assert_eq!(database.get_post(post).expect("post").status, POST_MISSED);
+        assert_eq!(
+            database.list_targets(post).expect("targets")[0].status,
+            TARGET_PENDING,
+            "left for the user to re-time"
+        );
+        assert!(
+            database
+                .due_targets(Utc::now(), 10)
+                .expect("due")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn catch_up_leaves_a_retry_still_waiting_its_backoff_alone() {
+        let (database, post) = backing_off(Utc::now() + chrono::Duration::minutes(5));
+        assert_eq!(catch_up(&database).expect("catch up"), 0);
+        assert_eq!(
+            database.get_post(post).expect("post").status,
+            POST_PUBLISHING
+        );
+    }
+
+    #[test]
+    fn catch_up_leaves_a_post_with_a_destination_mid_send_alone() {
+        let (database, first, post, parked) = store();
+        let second = database
+            .upsert_account(
+                PlatformId::Mastodon,
+                &Connected {
+                    remote_id: "id:2".into(),
+                    handle: "other".into(),
+                    display_name: None,
+                    avatar_url: None,
+                    instance: None,
+                    scopes: None,
+                    char_limit: None,
+                    secret: AccountSecret::default(),
+                },
+            )
+            .expect("account");
+        database
+            .set_targets(
+                post,
+                &[
+                    (first, serde_json::json!({})),
+                    (second, serde_json::json!({})),
+                ],
+            )
+            .expect("targets");
+        database
+            .finish_target_err(parked, "429", Some(Utc::now() - chrono::Duration::hours(2)))
+            .expect("park");
+        let sending = database
+            .list_targets(post)
+            .expect("targets")
+            .into_iter()
+            .find(|t| t.account_id == second)
+            .expect("second")
+            .id;
+        assert!(database.claim_target(sending).expect("claim"));
 
         assert_eq!(catch_up(&database).expect("catch up"), 0);
         assert_eq!(

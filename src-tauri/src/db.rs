@@ -621,16 +621,29 @@ impl Db {
         .map_err(Into::into)
     }
 
-    /// Scheduled posts whose time passed while the app was not running. The
-    /// scheduler decides what to do with them; this only finds them.
+    /// Posts whose time passed while the app was not running: a scheduled post
+    /// due before `before`, or a post in flight whose retry fell due before it
+    /// (decision H-2 — the missed policy covers retries too). A post with a
+    /// destination mid-send is never one of them, and neither is a retry
+    /// still waiting out its backoff or one re-queued by hand (no
+    /// `next_attempt_at`). The scheduler decides what to do with them; this
+    /// only finds them.
     pub fn overdue_posts(&self, before: DateTime<Utc>) -> Result<Vec<Post>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
-            "SELECT {POST_COLUMNS} FROM posts
-              WHERE status = '{POST_SCHEDULED}'
-                AND scheduled_at IS NOT NULL
-                AND scheduled_at < ?1
-              ORDER BY scheduled_at"
+            "SELECT {POST_COLUMNS} FROM posts p
+              WHERE (p.status = '{POST_SCHEDULED}'
+                     AND p.scheduled_at IS NOT NULL
+                     AND p.scheduled_at < ?1)
+                 OR (p.status = '{POST_PUBLISHING}'
+                     AND EXISTS (SELECT 1 FROM post_targets t
+                                  WHERE t.post_id = p.id
+                                    AND t.status = '{TARGET_PENDING}'
+                                    AND t.next_attempt_at < ?1)
+                     AND NOT EXISTS (SELECT 1 FROM post_targets t
+                                      WHERE t.post_id = p.id
+                                        AND t.status = '{TARGET_PUBLISHING}'))
+              ORDER BY p.scheduled_at"
         ))?;
         stmt.query_map(params![before.to_rfc3339()], map_post)?
             .collect::<rusqlite::Result<Vec<_>>>()
