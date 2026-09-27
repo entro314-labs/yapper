@@ -13,12 +13,14 @@
 //!
 //! ## Auth
 //!
-//! Bearer, using a connected Facebook Page account's own token — the "connect
-//! with your own developer app" route, which fits Windbag's credential model
-//! exactly and needs no second sign-in. The ads permissions are NOT part of the
-//! ordinary Page connection: `ads_access` on the Meta app credentials opts into
-//! them, so a user who only schedules posts is never shown an ads consent
-//! screen.
+//! Bearer, using the long-lived USER token a Facebook Page connection keeps
+//! alongside the Page token it publishes with — the "connect with your own
+//! developer app" route, which fits Windbag's credential model exactly and
+//! needs no second sign-in. Not the Page token itself: that one is scoped to
+//! the Page, and Meta refuses it for ad accounts. The ads permissions are NOT
+//! part of the ordinary Page connection: `ads_access` on the Meta app
+//! credentials opts into them, so a user who only schedules posts is never
+//! shown an ads consent screen.
 //!
 //! ## Transport
 //!
@@ -77,9 +79,9 @@ pub struct AdsClient {
 impl AdsClient {
     /// Builds a client from the first connected Facebook Page account.
     ///
-    /// The token is the PAGE token stored for that account — the same credential
-    /// that publishes — so an ads call needs no separate connection, only the
-    /// broader permissions the app asked for at connect time.
+    /// The token is the USER token that connection stored next to its Page
+    /// token, so an ads call needs no separate connection, only the broader
+    /// permissions the app asked for at connect time.
     pub fn from_store(db: &Db) -> Result<Self> {
         let account = db
             .list_accounts()?
