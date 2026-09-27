@@ -15,6 +15,9 @@ All notable changes to Windbag are documented here. The format follows
   with a progress bar, and the restart that applies it. The status bar carries
   the ambient half — an available, downloading or staged update stays visible
   without ever interrupting a compose.
+- **Logs you can actually read.** A bundled app has no terminal, so every
+  scheduler and platform error used to vanish. They are now also written to the
+  OS log directory, rotated at 5 MB with three files kept.
 - **An update must name its own version.** The updater refuses a download
   whose signature does not carry the version it was signed for, which closes the
   replay of an older signed build as a newer one.

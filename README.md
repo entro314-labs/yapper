@@ -246,6 +246,12 @@ pnpm check              # lint, format, types, build, clippy, rustfmt, rust test
 Requires Node 24+, Rust 1.98 and pnpm 12 — `mise install` picks all three up
 from `mise.toml` and `rust-toolchain.toml`.
 
+Logs go to stderr under `tauri dev` and, in every build, to the OS log
+directory — `~/Library/Logs/com.entro314.windbag` on macOS,
+`%LOCALAPPDATA%\com.entro314.windbag\logs` on Windows,
+`~/.local/share/com.entro314.windbag/logs` on Linux. They hold scheduler and
+platform errors, never a token.
+
 ### Layout
 
 ```

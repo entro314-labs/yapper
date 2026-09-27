@@ -94,7 +94,10 @@ unicode-segmentation = "1"
 opener = "0.8"
 dirs = "7"
 log = "0.4"
-env_logger = "0.11"
+# The `log` backend: a bundled GUI app has no terminal, so stderr is thrown
+# away. This writes to the OS log directory as well, which is the only place a
+# scheduler failure at 03:00 can be read afterwards.
+tauri-plugin-log = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Vibrancy behind the transparent window. Taken direct rather than through

@@ -23,22 +23,37 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use tauri::{Manager, WindowEvent};
+use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 use commands::AppState;
 use scheduler::Scheduler;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
-        if cfg!(debug_assertions) {
-            "windbag=debug,warn"
-        } else {
-            "windbag=info,warn"
-        },
-    ))
-    .init();
-
     tauri::Builder::default()
+        // First, so every later plugin's setup is logged. stderr for `tauri dev`;
+        // the log directory (~/Library/Logs/com.entro314.windbag on macOS) for a
+        // bundled build, where stderr goes nowhere. Local time, because the
+        // question these answer is "what happened at 09:00".
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .clear_targets()
+                .target(Target::new(TargetKind::Stderr))
+                .target(Target::new(TargetKind::LogDir { file_name: None }))
+                .timezone_strategy(TimezoneStrategy::UseLocal)
+                .max_file_size(5_000_000)
+                .rotation_strategy(RotationStrategy::KeepSome(3))
+                .level(log::LevelFilter::Warn)
+                .level_for(
+                    "windbag_lib",
+                    if cfg!(debug_assertions) {
+                        log::LevelFilter::Debug
+                    } else {
+                        log::LevelFilter::Info
+                    },
+                )
+                .build(),
+        )
         // A second launch focuses the running window rather than starting a rival
         // scheduler against the same store.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
