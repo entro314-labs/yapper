@@ -20,10 +20,11 @@
 //! But nothing PUBLISHES until the app next runs, so `create_post` says so in
 //! its own answer rather than letting an agent believe a post went out.
 //!
-//! **It cannot queue what the scheduler would bounce.** `create_post` runs the
-//! same [`platforms::validate`] the composer runs and refuses with the
-//! platform's own message. An over-limit draft rejected at 09:00 tomorrow, with
-//! nobody watching, is the failure this prevents.
+//! **It cannot queue what the scheduler would bounce.** `create_post` goes
+//! through the composer's own save path, [`commands::store_post`], which runs
+//! the same [`platforms::validate`] and refuses with the platform's own
+//! message. An over-limit draft rejected at 09:00 tomorrow, with nobody
+//! watching, is the failure this prevents.
 //!
 //! The transport is newline-delimited JSON-RPC on stdin/stdout. Diagnostics go
 //! to stderr; stdout carries protocol frames only, because anything else on it
@@ -33,7 +34,8 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use crate::db::{self, Db};
+use crate::commands::{self, SavePostInput, TargetInput};
+use crate::db::Db;
 use crate::error::Result;
 use crate::platforms::{self, PlatformId};
 use crate::scheduler;
@@ -233,32 +235,7 @@ impl Session {
     }
 
     fn create_post(&self, args: &Value) -> Result<String> {
-        let body = args
-            .get("body")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let title = args
-            .get("title")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        let link = args
-            .get("link")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        let scheduled_at = args
-            .get("scheduledAt")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            // Stored as the same instant in canonical UTC: the due query
-            // compares strings, so `09:00+02:00` kept verbatim would fire at
-            // 09:00Z, two hours late.
-            .map(|at| db::parse_rfc3339(at).map(|parsed| parsed.to_rfc3339()))
-            .transpose()?;
-
+        let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_owned);
         let account_ids: Vec<i64> = args
             .get("accountIds")
             .and_then(Value::as_array)
@@ -270,42 +247,36 @@ impl Session {
             ));
         }
 
-        // Validated BEFORE anything is written. An agent that queues an
-        // over-limit post gets the platform's own message now, while it can
-        // still shorten it, rather than a silent failure tomorrow morning.
-        for account_id in &account_ids {
-            let account = self.db.get_account(*account_id)?;
-            let adapter = platforms::adapter(account.platform);
-            platforms::validate(
-                account.platform,
-                &body,
-                title,
-                0,
-                scheduler::effective_char_limit(&account, adapter),
-            )?;
-        }
-
-        let status = if scheduled_at.is_some() {
-            db::POST_SCHEDULED
-        } else {
-            db::POST_DRAFT
-        };
-        let post_id = self
-            .db
-            .create_post(&body, title, link, scheduled_at.as_deref(), status)?;
-
-        let targets: Vec<(i64, Value)> = account_ids
-            .iter()
-            .map(|id| {
-                let options = args
-                    .get("options")
-                    .and_then(|all| all.get(id.to_string()))
-                    .cloned()
-                    .unwrap_or(json!({}));
-                (*id, options)
-            })
-            .collect();
-        self.db.set_targets(post_id, &targets)?;
+        // The composer's own save path, so an agent's post is held to exactly
+        // the same rules and validated BEFORE anything is written: an agent
+        // that queues an over-limit post gets the platform's own message now,
+        // while it can still shorten it, rather than a silent failure tomorrow
+        // morning.
+        let post_id = commands::store_post(
+            &self.db,
+            &SavePostInput {
+                id: None,
+                body: text("body").unwrap_or_default(),
+                title: text("title"),
+                link: text("link"),
+                scheduled_at: text("scheduledAt"),
+                targets: account_ids
+                    .iter()
+                    .map(|id| TargetInput {
+                        account_id: *id,
+                        options: args
+                            .get("options")
+                            .and_then(|all| all.get(id.to_string()))
+                            .cloned()
+                            .unwrap_or(json!({})),
+                    })
+                    .collect(),
+                media: Vec::new(),
+            },
+        )?;
+        // Read back rather than re-derived: the answer names the instant as
+        // stored, in canonical UTC.
+        let scheduled_at = self.db.get_post(post_id)?.scheduled_at;
 
         Ok(match scheduled_at {
             Some(at) => format!(
@@ -721,14 +692,14 @@ mod tests {
             json!({
                 "body": "offset",
                 "accountIds": [account],
-                "scheduledAt": "2026-12-01T09:00:00+02:00"
+                "scheduledAt": "2099-12-01T09:00:00+02:00"
             }),
         );
         let stored = session.db.list_posts().expect("posts")[0]
             .post
             .scheduled_at
             .clone();
-        assert_eq!(stored.as_deref(), Some("2026-12-01T07:00:00+00:00"));
+        assert_eq!(stored.as_deref(), Some("2099-12-01T07:00:00+00:00"));
     }
 
     #[test]
@@ -740,7 +711,7 @@ mod tests {
             json!({
                 "body": "from an agent",
                 "accountIds": [account],
-                "scheduledAt": "2026-12-01T09:00:00Z"
+                "scheduledAt": "2099-12-01T09:00:00Z"
             }),
         );
         let text = text_of(&frame);
@@ -768,6 +739,32 @@ mod tests {
         // And nothing was queued.
         let listed = text_of(&call(&mut session, "list_posts", json!({})));
         assert_eq!(listed.trim(), "[]");
+    }
+
+    #[test]
+    fn a_time_already_past_is_refused_before_anything_is_written() {
+        // catch_up would mark it missed within one tick while the agent was
+        // told "Scheduled".
+        let (mut session, account) = session();
+        let frame = call(
+            &mut session,
+            "create_post",
+            json!({
+                "body": "too late",
+                "accountIds": [account],
+                "scheduledAt": "2020-01-01T09:00:00Z"
+            }),
+        );
+        assert_eq!(
+            frame.pointer("/result/isError").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            text_of(&frame).contains("already passed"),
+            "{}",
+            text_of(&frame)
+        );
+        assert!(session.db.list_posts().expect("posts").is_empty());
     }
 
     #[test]

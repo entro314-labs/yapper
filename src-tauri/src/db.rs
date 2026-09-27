@@ -387,14 +387,16 @@ impl Db {
         scheduled_at: Option<&str>,
         status: &str,
     ) -> Result<i64> {
-        let conn = self.lock();
-        let now = now_rfc3339();
-        conn.execute(
-            "INSERT INTO posts (body, title, link, scheduled_at, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-            params![body, title, link, scheduled_at, status, now],
-        )?;
-        Ok(conn.last_insert_rowid())
+        insert_post(
+            &self.lock(),
+            &PostFields {
+                body,
+                title,
+                link,
+                scheduled_at,
+                status,
+            },
+        )
     }
 
     pub fn update_post(
@@ -406,17 +408,45 @@ impl Db {
         scheduled_at: Option<&str>,
         status: &str,
     ) -> Result<()> {
-        let changed = self.lock().execute(
-            "UPDATE posts
-                SET body = ?2, title = ?3, link = ?4, scheduled_at = ?5, status = ?6,
-                    updated_at = ?7
-              WHERE id = ?1",
-            params![id, body, title, link, scheduled_at, status, now_rfc3339()],
-        )?;
-        if changed == 0 {
-            return Err(AppError::NotFound(format!("No post with id {id}.")));
-        }
-        Ok(())
+        update_post_row(
+            &self.lock(),
+            id,
+            &PostFields {
+                body,
+                title,
+                link,
+                scheduled_at,
+                status,
+            },
+        )
+    }
+
+    /// Creates (`id` is `None`) or updates a post together with its
+    /// attachments and destinations, in ONE transaction. Three separate
+    /// commits left a window where a failure after the first — a disk error,
+    /// a destination whose account was just disconnected — stored a post
+    /// without its media or targets; a new one was then duplicated by the
+    /// next save, because the composer never learned its id.
+    pub fn save_post(
+        &self,
+        id: Option<i64>,
+        fields: &PostFields<'_>,
+        media: &[MediaInput],
+        targets: &[(i64, serde_json::Value)],
+    ) -> Result<i64> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let post_id = match id {
+            Some(id) => {
+                update_post_row(&tx, id, fields)?;
+                id
+            }
+            None => insert_post(&tx, fields)?,
+        };
+        write_media(&tx, post_id, media)?;
+        write_targets(&tx, post_id, targets)?;
+        tx.commit()?;
+        Ok(post_id)
     }
 
     pub fn set_post_status(&self, id: i64, status: &str) -> Result<()> {
@@ -492,43 +522,11 @@ impl Db {
 
     // ─── Targets ────────────────────────────────────────────────────────────
 
-    /// Replaces a post's destinations wholesale. Targets that already published
-    /// are kept whatever the new selection says — un-posting is not a thing, and
-    /// dropping the row would lose the permalink.
+    /// [`write_targets`] on its own, for a post whose fields are not changing.
     pub fn set_targets(&self, post_id: i64, targets: &[(i64, serde_json::Value)]) -> Result<()> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
-        {
-            // Account ids are i64 read back from this same store, never user text,
-            // so interpolating them into the NOT IN list cannot carry SQL.
-            let keep: Vec<String> = targets
-                .iter()
-                .map(|(account_id, _)| account_id.to_string())
-                .collect();
-            tx.execute(
-                &format!(
-                    "DELETE FROM post_targets
-                      WHERE post_id = ?1
-                        AND status != '{TARGET_PUBLISHED}'
-                        AND account_id NOT IN ({})",
-                    if keep.is_empty() {
-                        "NULL".into()
-                    } else {
-                        keep.join(",")
-                    }
-                ),
-                params![post_id],
-            )?;
-            for (account_id, options) in targets {
-                tx.execute(
-                    "INSERT INTO post_targets (post_id, account_id, options)
-                     VALUES (?1, ?2, ?3)
-                     ON CONFLICT(post_id, account_id) DO UPDATE SET options = excluded.options
-                     WHERE post_targets.status != ?4",
-                    params![post_id, account_id, options.to_string(), TARGET_PUBLISHED],
-                )?;
-            }
-        }
+        write_targets(&tx, post_id, targets)?;
         tx.commit()?;
         Ok(())
     }
@@ -756,29 +754,6 @@ impl Db {
     }
 
     // ─── Media ──────────────────────────────────────────────────────────────
-
-    pub fn set_media(&self, post_id: i64, items: &[MediaInput]) -> Result<()> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM media WHERE post_id = ?1", params![post_id])?;
-        for (position, item) in items.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO media (post_id, path, mime, bytes, alt_text, position, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    post_id,
-                    item.path,
-                    item.mime,
-                    item.bytes,
-                    item.alt_text,
-                    i64::try_from(position).unwrap_or(i64::MAX),
-                    now_rfc3339()
-                ],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
 
     pub fn list_media(&self, post_id: i64) -> Result<Vec<Media>> {
         let conn = self.lock();
@@ -1029,6 +1004,120 @@ const V3_METRIC_VIEWS: &str = r"
     ALTER TABLE metrics ADD COLUMN views INTEGER;
 ";
 
+/// The editable fields of a post, as one write.
+pub struct PostFields<'a> {
+    pub body: &'a str,
+    pub title: Option<&'a str>,
+    pub link: Option<&'a str>,
+    pub scheduled_at: Option<&'a str>,
+    pub status: &'a str,
+}
+
+// ─── Post writes ────────────────────────────────────────────────────────────
+//
+// Free functions over a connection so the single-write methods and
+// `Db::save_post`'s transaction run the same SQL.
+
+fn insert_post(conn: &Connection, fields: &PostFields<'_>) -> Result<i64> {
+    let now = now_rfc3339();
+    conn.execute(
+        "INSERT INTO posts (body, title, link, scheduled_at, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![
+            fields.body,
+            fields.title,
+            fields.link,
+            fields.scheduled_at,
+            fields.status,
+            now
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn update_post_row(conn: &Connection, id: i64, fields: &PostFields<'_>) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE posts
+            SET body = ?2, title = ?3, link = ?4, scheduled_at = ?5, status = ?6,
+                updated_at = ?7
+          WHERE id = ?1",
+        params![
+            id,
+            fields.body,
+            fields.title,
+            fields.link,
+            fields.scheduled_at,
+            fields.status,
+            now_rfc3339()
+        ],
+    )?;
+    if changed == 0 {
+        return Err(AppError::NotFound(format!("No post with id {id}.")));
+    }
+    Ok(())
+}
+
+/// Replaces a post's attachments wholesale, in order.
+fn write_media(conn: &Connection, post_id: i64, items: &[MediaInput]) -> Result<()> {
+    conn.execute("DELETE FROM media WHERE post_id = ?1", params![post_id])?;
+    for (position, item) in items.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO media (post_id, path, mime, bytes, alt_text, position, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                post_id,
+                item.path,
+                item.mime,
+                item.bytes,
+                item.alt_text,
+                i64::try_from(position).unwrap_or(i64::MAX),
+                now_rfc3339()
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Replaces a post's destinations wholesale. Targets that already published
+/// are kept whatever the new selection says — un-posting is not a thing, and
+/// dropping the row would lose the permalink.
+fn write_targets(
+    conn: &Connection,
+    post_id: i64,
+    targets: &[(i64, serde_json::Value)],
+) -> Result<()> {
+    // Account ids are i64 read back from this same store, never user text,
+    // so interpolating them into the NOT IN list cannot carry SQL.
+    let keep: Vec<String> = targets
+        .iter()
+        .map(|(account_id, _)| account_id.to_string())
+        .collect();
+    conn.execute(
+        &format!(
+            "DELETE FROM post_targets
+              WHERE post_id = ?1
+                AND status != '{TARGET_PUBLISHED}'
+                AND account_id NOT IN ({})",
+            if keep.is_empty() {
+                "NULL".into()
+            } else {
+                keep.join(",")
+            }
+        ),
+        params![post_id],
+    )?;
+    for (account_id, options) in targets {
+        conn.execute(
+            "INSERT INTO post_targets (post_id, account_id, options)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(post_id, account_id) DO UPDATE SET options = excluded.options
+             WHERE post_targets.status != ?4",
+            params![post_id, account_id, options.to_string(), TARGET_PUBLISHED],
+        )?;
+    }
+    Ok(())
+}
+
 /// One attachment as the renderer hands it over: a path on disk the user picked,
 /// resolved to its type and size by [`crate::media`] before it is stored.
 pub struct MediaInput {
@@ -1195,6 +1284,84 @@ mod tests {
         db.set_targets(post, &[(account, serde_json::json!({}))])
             .expect("targets");
         (db, account, post)
+    }
+
+    #[test]
+    fn a_post_that_cannot_keep_its_destinations_is_not_created() {
+        // Account 999 does not exist, so the targets write fails on its foreign
+        // key. The post row and its media must go with it — a post without
+        // them would be duplicated by the next save.
+        let db = Db::open_in_memory().expect("store");
+        let media = [MediaInput {
+            path: "/a.png".into(),
+            mime: "image/png".into(),
+            bytes: 1,
+            alt_text: None,
+        }];
+        let fields = PostFields {
+            body: "hi",
+            title: None,
+            link: None,
+            scheduled_at: None,
+            status: POST_DRAFT,
+        };
+        assert!(
+            db.save_post(None, &fields, &media, &[(999, serde_json::json!({}))])
+                .is_err()
+        );
+        assert!(db.list_posts().expect("posts").is_empty());
+    }
+
+    #[test]
+    fn a_failed_update_leaves_the_previous_version_whole() {
+        let (db, account, post) = seeded();
+        let fields = PostFields {
+            body: "rewritten",
+            title: None,
+            link: None,
+            scheduled_at: None,
+            status: POST_DRAFT,
+        };
+        assert!(
+            db.save_post(Some(post), &fields, &[], &[(999, serde_json::json!({}))])
+                .is_err()
+        );
+        assert_eq!(db.get_post(post).expect("post").body, "hello");
+        assert_eq!(
+            db.list_targets(post).expect("targets")[0].account_id,
+            account
+        );
+    }
+
+    #[test]
+    fn a_saved_post_carries_its_media_and_destinations() {
+        let (db, account, _) = seeded();
+        let media = [MediaInput {
+            path: "/a.png".into(),
+            mime: "image/png".into(),
+            bytes: 1,
+            alt_text: Some("alt".into()),
+        }];
+        let fields = PostFields {
+            body: "new",
+            title: Some("T"),
+            link: None,
+            scheduled_at: None,
+            status: POST_DRAFT,
+        };
+        let id = db
+            .save_post(
+                None,
+                &fields,
+                &media,
+                &[(account, serde_json::json!({ "k": "v" }))],
+            )
+            .expect("save");
+        assert_eq!(
+            db.list_media(id).expect("media")[0].alt_text.as_deref(),
+            Some("alt")
+        );
+        assert_eq!(db.list_targets(id).expect("targets")[0].options["k"], "v");
     }
 
     #[test]

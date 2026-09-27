@@ -1,3 +1,5 @@
+import type { MediaSpec, TargetInput } from '@/lib/tauri/types'
+
 /**
  * Centralised query keys.
  *
@@ -25,9 +27,15 @@ export const queryKeys = {
     posts: () => [...queryKeys.queue.root, 'posts'] as const,
     attempts: (postId: number) => [...queryKeys.queue.root, 'attempts', postId] as const,
     // Keyed on the draft itself: the composer's counters must re-run whenever
-    // the body, the title, the attachments or the destinations change.
-    check: (body: string, title: string | null, mediaCount: number, accountIds: number[]) =>
-      [...queryKeys.queue.root, 'check', body, title, mediaCount, accountIds] as const,
+    // the body, the title, the link, the attachments, the destinations or their
+    // options change.
+    check: (
+      body: string,
+      title: string | null,
+      link: string | null,
+      media: MediaSpec[],
+      targets: TargetInput[],
+    ) => [...queryKeys.queue.root, 'check', body, title, link, media, targets] as const,
   },
   notes: {
     root: ['notes'] as const,

@@ -193,14 +193,30 @@ function ComposeScreen() {
   const dirty = JSON.stringify(edited) !== JSON.stringify(pristine)
   const { allowNextNavigation } = useUnsavedGuard(dirty, 'this post')
 
-  const checks = useCheckPost(body, title || null, media.length, selected)
+  // Checked with the same options that will be saved: a required subreddit or
+  // an over-long content warning is an error here, not at publish time.
+  const targets = React.useMemo(
+    () => selected.map((accountId) => ({ accountId, options: options[accountId] ?? {} })),
+    [selected, options],
+  )
+  const checks = useCheckPost(
+    body,
+    title || null,
+    link.trim() || null,
+    media.map(({ mime, bytes }) => ({ mime, bytes })),
+    targets,
+  )
   const platformById = React.useMemo(
     () => new Map((platforms.data ?? []).map((info) => [info.id, info])),
     [platforms.data],
   )
 
   const blocking = checks.data?.filter((check) => check.error) ?? []
-  const canSave = selected.length > 0 && blocking.length === 0
+  // Only a verdict on what is on screen NOW can unlock saving. While a new
+  // check runs, the previous one is kept as placeholder data for the counters —
+  // and its "fits" must not let an edit that does not fit through.
+  const checked = checks.isSuccess && !checks.isPlaceholderData
+  const canSave = selected.length > 0 && checked && blocking.length === 0
 
   const collect = React.useCallback(
     () => ({
@@ -209,22 +225,24 @@ function ComposeScreen() {
       title: title.trim() || null,
       link: link.trim() || null,
       scheduledAt: when ? fromLocalInputValue(when) : null,
-      targets: selected.map((accountId) => ({
-        accountId,
-        options: options[accountId] ?? {},
-      })),
+      targets,
       media: media.map((item) => ({
         path: item.path,
         altText: item.altText.trim() || null,
       })),
     }),
-    [id, body, title, link, when, selected, options, media],
+    [id, body, title, link, when, targets, media],
   )
 
   const save = React.useCallback(
     async (thenPublish: boolean) => {
       try {
-        const savedId = await savePost.mutateAsync(collect())
+        // "Post now" sends at once whatever the time field says, so the time is
+        // not saved with it — a stale past time would otherwise be refused.
+        const input = collect()
+        const savedId = await savePost.mutateAsync(
+          thenPublish ? { ...input, scheduledAt: null } : input,
+        )
         if (thenPublish) {
           await publishNow.mutateAsync(savedId)
           toast.success('Sending now')
