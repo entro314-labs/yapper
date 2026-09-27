@@ -275,6 +275,12 @@ fn wait_for_code(
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
+                // An accepted stream inherits the listener's non-blocking mode
+                // on macOS and the BSDs, and a read that races the browser's
+                // request would then come back empty and drop the callback.
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
                 let Some(target) = request_target(&mut stream) else {
                     continue;
                 };
@@ -283,8 +289,10 @@ fn wait_for_code(
                     respond(&mut stream, "Not found.");
                     continue;
                 }
-                let parsed = url::Url::parse(&format!("http://127.0.0.1{target}"))
-                    .map_err(|e| AppError::Platform(format!("Malformed callback: {e}")))?;
+                let Ok(parsed) = url::Url::parse(&format!("http://127.0.0.1{target}")) else {
+                    respond(&mut stream, "Not a sign-in callback.");
+                    continue;
+                };
                 let param = |name: &str| {
                     parsed
                         .query_pairs()
@@ -292,6 +300,19 @@ fn wait_for_code(
                         .map(|(_, value)| value.into_owned())
                 };
 
+                // The state check is the CSRF defence for the whole flow: without
+                // it an attacker-supplied code could be exchanged into this app's
+                // account. A request that fails it is not part of THIS sign-in —
+                // a stale tab, or anything else that found the port — so it is
+                // turned away and the wait goes on. Checked before `error`, so
+                // only this flow's own provider can cancel it.
+                if param("state").as_deref() != Some(expected_state) {
+                    respond(
+                        &mut stream,
+                        "This link is not from the sign-in Windbag is waiting for. It was ignored.",
+                    );
+                    continue;
+                }
                 if let Some(error) = param("error") {
                     respond(
                         &mut stream,
@@ -304,17 +325,6 @@ fn wait_for_code(
                         ),
                         other => format!("{} returned an error: {other}", platform.label()),
                     }));
-                }
-                // The state check is the CSRF defence for the whole flow: without
-                // it an attacker-supplied code could be exchanged into this app's
-                // account. A mismatch aborts rather than retries.
-                if param("state").as_deref() != Some(expected_state) {
-                    respond(&mut stream, "State mismatch — sign-in aborted.");
-                    return Err(AppError::Unauthorized(
-                        "The sign-in callback did not match the request Windbag started. \
-                         Nothing was connected; try again."
-                            .into(),
-                    ));
                 }
                 let Some(code) = param("code") else {
                     respond(&mut stream, "Missing authorization code.");
@@ -385,6 +395,64 @@ pub fn needs_refresh(expires_at: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs [`wait_for_code`] on an ephemeral port against a scripted browser,
+    /// and gives up after five seconds rather than the real five minutes, so a
+    /// dropped callback fails the test instead of hanging it.
+    fn wait_with(requests: Vec<(Duration, &'static str)>) -> Option<Result<String>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(wait_for_code(&listener, "RIGHT", PlatformId::Reddit));
+        });
+        for (delay, target) in requests {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            std::thread::sleep(delay);
+            let request = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+            if stream.write_all(request.as_bytes()).is_err() {
+                continue;
+            }
+            let mut response = String::new();
+            let _ = stream.read_to_string(&mut response);
+        }
+        receiver.recv_timeout(Duration::from_secs(5)).ok()
+    }
+
+    #[test]
+    fn a_callback_for_another_sign_in_is_ignored_rather_than_fatal() {
+        // A stale tab from an earlier attempt, or anything else that finds the
+        // port, must not be able to end the flow the user is in the middle of.
+        let outcome = wait_with(vec![
+            (Duration::ZERO, "/callback?state=WRONG&code=stale"),
+            (Duration::ZERO, "/callback?state=WRONG&error=access_denied"),
+            (Duration::ZERO, "/callback?state=RIGHT&code=abc"),
+        ]);
+        assert_eq!(outcome.expect("finished").expect("code"), "abc");
+    }
+
+    #[test]
+    fn an_error_for_this_sign_in_still_ends_it() {
+        let err = wait_with(vec![(
+            Duration::ZERO,
+            "/callback?state=RIGHT&error=access_denied",
+        )])
+        .expect("finished")
+        .expect_err("cancelled");
+        assert!(err.to_string().contains("cancelled"), "{err}");
+    }
+
+    #[test]
+    fn a_browser_that_writes_after_connecting_is_still_heard() {
+        // The accepted stream inherits the listener's non-blocking mode on
+        // macOS; there a read before the request arrives returns WouldBlock and
+        // the callback is dropped. Only reproduces on platforms that inherit.
+        let outcome = wait_with(vec![(
+            Duration::from_millis(300),
+            "/callback?state=RIGHT&code=late",
+        )]);
+        assert_eq!(outcome.expect("finished").expect("code"), "late");
+    }
 
     #[test]
     fn a_refresh_rejection_flags_a_dead_grant_and_retries_an_outage() {
