@@ -56,6 +56,7 @@
       "endpoints": [
         "https://github.com/entro314-labs/windbag-releases/releases/latest/download/latest.json"
       ],
+      "requireSignedVersion": true,
       "windows": {
         "installMode": "passive"
       }

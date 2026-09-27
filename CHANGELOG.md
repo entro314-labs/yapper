@@ -15,6 +15,9 @@ All notable changes to Windbag are documented here. The format follows
   with a progress bar, and the restart that applies it. The status bar carries
   the ambient half — an available, downloading or staged update stays visible
   without ever interrupting a compose.
+- **An update must name its own version.** The updater refuses a download
+  whose signature does not carry the version it was signed for, which closes the
+  replay of an older signed build as a newer one.
 - **A downloaded update is never installed while the app runs.** Replacing a
   live bundle breaks the running process's code signature, so a verified
   download is staged and swapped in on quit — or immediately, if you ask for the

@@ -61,6 +61,12 @@ breaks the pipeline in a way the error messages will not explain.
   machine. There is deliberately no `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
   secret — the key is passwordless, and the kit sets that variable to the empty
   string, which is what a passwordless key expects.
+- **`requireSignedVersion`** is on in `src-tauri/tauri.conf.json`: an update is
+  installed only if its signature names the version it was signed for, so an
+  old signed build cannot be served back as a "new" one. The Tauri CLI (2.11.5
+  and later) writes that version into every updater signature it makes, so the
+  pipeline needs nothing extra — but an artifact signed any other way, or by an
+  older CLI, is refused by every installed copy.
 - **`RELEASES_TOKEN` / `HOMEBREW_TAP_TOKEN`** — currently both hold the same
   broad classic PAT, which is org-wide (`repo`, `admin:org`, `delete_repo`) and
   lives in a *public* repo's Actions secrets. It works, and it is more access
