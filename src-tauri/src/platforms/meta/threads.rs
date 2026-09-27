@@ -266,7 +266,11 @@ impl Platform for Threads {
                     ("children".to_string(), children.join(",")),
                     ("access_token".to_string(), token.clone()),
                 ]
-            } else if let Some((item, url)) = host_all()?.pop() {
+            } else if !request.media.is_empty() {
+                // Only a post with media needs the web deployment at all.
+                let (item, url) = host_all()?.pop().ok_or_else(|| {
+                    AppError::Internal("The hosted attachment went missing.".into())
+                })?;
                 single_media_form(item, &url, token)
             } else {
                 let mut form = vec![
