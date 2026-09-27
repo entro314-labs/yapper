@@ -16,7 +16,7 @@ import { toast } from 'sonner'
 
 import { QueryErrorState } from '@/components/shell/error-screen'
 import { Button } from '@/components/ui/button'
-import { STATUS_LABEL, StatusDot } from '@/components/ui/status-dot'
+import { STATUS_LABEL, StatusDot, isEditable } from '@/components/ui/status-dot'
 import { brandOf } from '@/lib/platform-brand'
 import { useAttempts, useDeletePost, usePublishNow, useRetryTarget } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
@@ -41,7 +41,7 @@ export function PostCard({ post, accounts }: { post: PostDetail; accounts: Map<n
 
   const needsAttention =
     post.status === 'failed' || post.status === 'partial' || post.status === 'missed'
-  const editable = post.status !== 'published' && post.status !== 'publishing'
+  const editable = isEditable(post.status)
 
   const run = React.useCallback(async (action: Promise<unknown>, success: string) => {
     try {
