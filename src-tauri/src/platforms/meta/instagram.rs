@@ -228,9 +228,7 @@ impl Platform for Instagram {
             host_all()?
                 .iter()
                 .map(|(item, url)| {
-                    let mut form = single_media_form(item, url, token);
-                    form.push(("is_carousel_item".into(), "true".into()));
-                    create_container(&containers, &form)
+                    create_container(&containers, &single_media_form(item, url, token, true))
                 })
                 .collect()
         };
@@ -239,7 +237,7 @@ impl Platform for Instagram {
                 let (item, url) = host_all()?.pop().ok_or_else(|| {
                     AppError::Internal("An Instagram post reached publishing with no media.".into())
                 })?;
-                single_media_form(item, &url, token)
+                single_media_form(item, &url, token, false)
             } else {
                 vec![
                     ("media_type".to_string(), "CAROUSEL".to_string()),
@@ -267,16 +265,26 @@ impl Platform for Instagram {
     }
 }
 
-/// A video item is posted as a REEL — since 2024 that is what a feed video IS on
-/// Instagram, and `media_type=VIDEO` is the deprecated spelling of it.
-fn single_media_form(item: &MediaItem, url: &str, token: &str) -> Vec<(String, String)> {
+/// A video on its own is posted as a REEL — since 2024 that is what a feed video
+/// IS on Instagram. Inside a carousel it cannot be: a carousel item takes
+/// `media_type=VIDEO`, and a REELS item is rejected.
+fn single_media_form(
+    item: &MediaItem,
+    url: &str,
+    token: &str,
+    in_carousel: bool,
+) -> Vec<(String, String)> {
     let is_video = item.mime.starts_with("video/");
     let mut form = vec![("access_token".to_string(), token.to_string())];
     if is_video {
-        form.push(("media_type".into(), "REELS".into()));
+        let kind = if in_carousel { "VIDEO" } else { "REELS" };
+        form.push(("media_type".into(), kind.into()));
         form.push(("video_url".into(), url.to_string()));
     } else {
         form.push(("image_url".into(), url.to_string()));
+    }
+    if in_carousel {
+        form.push(("is_carousel_item".into(), "true".into()));
     }
     form
 }
@@ -372,9 +380,25 @@ mod tests {
             mime: "video/mp4".into(),
             alt_text: None,
         };
-        let form = single_media_form(&item, "https://x/y.mp4", "tok");
+        let form = single_media_form(&item, "https://x/y.mp4", "tok", false);
         assert!(form.iter().any(|(k, v)| k == "media_type" && v == "REELS"));
         assert!(form.iter().any(|(k, _)| k == "video_url"));
+    }
+
+    #[test]
+    fn a_video_inside_a_carousel_is_a_video_not_a_reel() {
+        // A carousel item cannot be a reel; Meta rejects the container.
+        let item = MediaItem {
+            bytes: Vec::new(),
+            mime: "video/mp4".into(),
+            alt_text: None,
+        };
+        let form = single_media_form(&item, "https://x/y.mp4", "tok", true);
+        assert!(form.iter().any(|(k, v)| k == "media_type" && v == "VIDEO"));
+        assert!(
+            form.iter()
+                .any(|(k, v)| k == "is_carousel_item" && v == "true")
+        );
     }
 
     #[test]
@@ -385,7 +409,7 @@ mod tests {
             mime: "image/jpeg".into(),
             alt_text: None,
         };
-        let form = single_media_form(&item, "https://x/y.jpg", "tok");
+        let form = single_media_form(&item, "https://x/y.jpg", "tok", false);
         assert!(!form.iter().any(|(k, _)| k == "media_type"));
         assert!(form.iter().any(|(k, _)| k == "image_url"));
     }
