@@ -142,7 +142,7 @@ impl Platform for Bluesky {
 
     fn refresh(
         &self,
-        _account: &crate::db::Account,
+        account: &crate::db::Account,
         secret: &AccountSecret,
         _app: Option<&AppCredentials>,
     ) -> Result<Option<AccountSecret>> {
@@ -151,7 +151,7 @@ impl Platform for Bluesky {
         if !is_oauth(secret) || !crate::oauth::needs_refresh(secret.expires_at.as_deref()) {
             return Ok(None);
         }
-        refresh_oauth(secret).map(Some)
+        refresh_oauth(&account.remote_id, secret).map(Some)
     }
 
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published> {
@@ -307,7 +307,9 @@ fn oauth_context(secret: &AccountSecret) -> Result<OAuthContext> {
     })
 }
 
-fn refresh_oauth(secret: &AccountSecret) -> Result<AccountSecret> {
+/// `did` is the account's own: an OAuth account's remote id is the DID it
+/// signed in as.
+fn refresh_oauth(did: &str, secret: &AccountSecret) -> Result<AccountSecret> {
     let key = dpop::Key::from_base64(secret.extra_str("dpop_key").ok_or_else(|| {
         AppError::Unauthorized("This Bluesky connection lost its key. Reconnect it.".into())
     })?)?;
@@ -320,12 +322,19 @@ fn refresh_oauth(secret: &AccountSecret) -> Result<AccountSecret> {
     let refresh_token = secret.refresh_token.as_deref().ok_or_else(|| {
         AppError::Unauthorized("This Bluesky connection has no refresh token.".into())
     })?;
+    let issuer = secret.extra_str("issuer").ok_or_else(|| {
+        AppError::Unauthorized(
+            "This Bluesky connection does not record who issued it. Reconnect it.".into(),
+        )
+    })?;
 
-    // Rediscovered rather than stored: a `PDS` can move its authorization server,
-    // and a stale token endpoint would fail every refresh with nothing to
-    // explain it.
+    // Rediscovered rather than stored: a stale token endpoint would fail every
+    // refresh with nothing to explain it. But the server found must still be
+    // the one that issued these tokens, or it is not sent the refresh token.
     let server = atproto::discover_auth_server(pds)?;
+    atproto::check_refresh_issuer(issuer, &server.issuer)?;
     let tokens = atproto::refresh(&key, &server.token_endpoint, client_id, refresh_token)?;
+    atproto::check_refresh_subject(did, &tokens.sub)?;
 
     let expires_at = tokens.expires_at();
     Ok(AccountSecret {

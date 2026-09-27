@@ -487,6 +487,33 @@ pub fn refresh(
     )
 }
 
+/// Checked BEFORE a refresh token is sent. The token endpoint is rediscovered
+/// from the account's `PDS` on every refresh, so a `PDS` that now names another
+/// authorization server — moved, or taken over — would otherwise be handed a
+/// refresh token it never issued.
+pub fn check_refresh_issuer(stored: &str, discovered: &str) -> Result<()> {
+    if stored.trim_end_matches('/') == discovered.trim_end_matches('/') {
+        return Ok(());
+    }
+    Err(AppError::Unauthorized(format!(
+        "This Bluesky account's server now names {discovered} as its sign-in server, not \
+         {stored}, which issued this connection. Nothing was sent to it; reconnect the account."
+    )))
+}
+
+/// Refreshed tokens are only this account's if they say so. The same check a
+/// fresh sign-in makes, repeated because a refresh is a new grant.
+pub fn check_refresh_subject(did: &str, sub: &str) -> Result<()> {
+    if sub == did {
+        return Ok(());
+    }
+    Err(AppError::Unauthorized(format!(
+        "Bluesky refreshed this connection as {} rather than {did}. The tokens were discarded; \
+         reconnect the account.",
+        if sub.is_empty() { "nobody" } else { sub }
+    )))
+}
+
 fn push_authorization_request(
     key: &dpop::Key,
     endpoint: &str,
@@ -956,6 +983,26 @@ mod tests {
         )
         .expect_err("cancelled");
         assert!(err.to_string().contains("cancelled"), "{err}");
+    }
+
+    #[test]
+    fn a_refresh_goes_only_to_the_server_that_issued_the_tokens() {
+        check_refresh_issuer("https://bsky.social", "https://bsky.social/").expect("same");
+        let err =
+            check_refresh_issuer("https://bsky.social", "https://evil.test").expect_err("moved");
+        assert!(matches!(err, AppError::Unauthorized(_)), "{err}");
+        assert!(err.to_string().contains("evil.test"), "{err}");
+    }
+
+    #[test]
+    fn refreshed_tokens_must_belong_to_the_account() {
+        check_refresh_subject("did:plc:me", "did:plc:me").expect("same");
+        let err = check_refresh_subject("did:plc:me", "did:plc:someone").expect_err("other");
+        assert!(matches!(err, AppError::Unauthorized(_)), "{err}");
+        assert!(
+            check_refresh_subject("did:plc:me", "").is_err(),
+            "a response naming nobody is not this account"
+        );
     }
 
     #[test]
