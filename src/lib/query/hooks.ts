@@ -87,6 +87,14 @@ export function useRedirectUri() {
   })
 }
 
+export function useMcpCommand() {
+  return useQuery({
+    queryKey: queryKeys.platforms.mcpCommand(),
+    queryFn: async () => invokeCommand<string>(IPC_COMMANDS.mcpCommand),
+    staleTime: Number.POSITIVE_INFINITY,
+  })
+}
+
 export function useAppCredentials(platform: PlatformId, instance?: string | null) {
   return useQuery({
     queryKey: queryKeys.platforms.appCredentials(platform, instance),

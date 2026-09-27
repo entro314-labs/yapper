@@ -38,6 +38,7 @@ export const IPC_COMMANDS = {
   getSettings: 'get_settings',
   updateSettings: 'update_settings',
   oauthRedirectUri: 'oauth_redirect_uri',
+  mcpCommand: 'mcp_command',
 
   getWebHost: 'get_web_host',
   saveWebHost: 'save_web_host',

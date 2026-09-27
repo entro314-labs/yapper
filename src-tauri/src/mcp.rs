@@ -1,10 +1,10 @@
 //! The agent door: an MCP server over the same store the app uses.
 //!
-//! Run as `windbag-mcp`, a stdio JSON-RPC 2.0 server any agent host can spawn:
+//! Run as `windbag --mcp`, a stdio JSON-RPC 2.0 server any agent host can spawn:
 //!
 //! ```text
-//! claude mcp add windbag -- /path/to/windbag-mcp
-//! codex mcp add windbag -- /path/to/windbag-mcp
+//! claude mcp add windbag -- /path/to/windbag --mcp
+//! codex mcp add windbag -- /path/to/windbag --mcp
 //! ```
 //!
 //! This is where "give it context and let it schedule things" actually lives.

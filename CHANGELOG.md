@@ -135,6 +135,10 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Changed
 
+- **The agent door ships with every install.** It used to be a separate
+  `windbag-mcp` binary you had to build from source; it is now the app's own
+  executable run with `--mcp`. Settings → Agent door shows the exact
+  `claude mcp add` and `codex mcp add` commands for this machine.
 - **Claude Code and Codex drafts run with no tools and no MCP servers.**
   Claude's `--restricted` still let the model read and write files, search the
   web and call every claude.ai connector, so a prompt injection in a selected

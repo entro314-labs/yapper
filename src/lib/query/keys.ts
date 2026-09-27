@@ -12,6 +12,7 @@ export const queryKeys = {
     root: ['platforms'] as const,
     list: () => [...queryKeys.platforms.root, 'list'] as const,
     redirectUri: () => [...queryKeys.platforms.root, 'redirectUri'] as const,
+    mcpCommand: () => [...queryKeys.platforms.root, 'mcpCommand'] as const,
     appCredentials: (platform: string, instance?: string | null) =>
       [...queryKeys.platforms.root, 'appCredentials', platform, instance ?? null] as const,
     // Under the platforms root because saving it changes what `list_platforms`
