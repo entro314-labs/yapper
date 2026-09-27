@@ -18,7 +18,7 @@ use serde::Serialize;
 use crate::error::{AppError, Result, internal};
 use crate::platforms::PlatformId;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -87,6 +87,11 @@ pub struct PostTarget {
     pub attempts: i64,
     pub next_attempt_at: Option<String>,
     pub published_at: Option<String>,
+    /// What the last attempt left for the next one to resume from instead of
+    /// starting over (see [`crate::platforms::PublishRequest::resume_key`]).
+    /// The scheduler's business only, so it never crosses to the renderer.
+    #[serde(skip)]
+    pub resume_key: Option<String>,
 }
 
 pub const TARGET_PENDING: &str = "pending";
@@ -402,7 +407,19 @@ impl Db {
         scheduled_at: Option<&str>,
         status: &str,
     ) -> Result<()> {
-        let changed = self.lock().execute(
+        let conn = self.lock();
+        // A resume key points at something built from the post's OLD words
+        // (a Meta container carries its caption), so changing them forgets it.
+        // A new time alone does not: rescheduling is not a different post.
+        conn.execute(
+            "UPDATE post_targets SET resume_key = NULL
+              WHERE post_id = ?1
+                AND EXISTS (SELECT 1 FROM posts
+                             WHERE id = ?1
+                               AND (body IS NOT ?2 OR title IS NOT ?3 OR link IS NOT ?4))",
+            params![id, body, title, link],
+        )?;
+        let changed = conn.execute(
             "UPDATE posts
                 SET body = ?2, title = ?3, link = ?4, scheduled_at = ?5, status = ?6,
                     updated_at = ?7
@@ -517,9 +534,14 @@ impl Db {
             )?;
             for (account_id, options) in targets {
                 tx.execute(
+                    // New options mean a resumed container would carry the
+                    // old ones, so the resume key goes with them.
                     "INSERT INTO post_targets (post_id, account_id, options)
                      VALUES (?1, ?2, ?3)
-                     ON CONFLICT(post_id, account_id) DO UPDATE SET options = excluded.options
+                     ON CONFLICT(post_id, account_id) DO UPDATE SET
+                         options = excluded.options,
+                         resume_key = CASE WHEN post_targets.options = excluded.options
+                                           THEN post_targets.resume_key END
                      WHERE post_targets.status != ?4",
                     params![post_id, account_id, options.to_string(), TARGET_PUBLISHED],
                 )?;
@@ -609,7 +631,7 @@ impl Db {
         self.lock().execute(
             "UPDATE post_targets
                 SET status = ?2, remote_id = ?3, remote_url = ?4, error = NULL,
-                    next_attempt_at = NULL, published_at = ?5
+                    next_attempt_at = NULL, published_at = ?5, resume_key = NULL
               WHERE id = ?1",
             params![
                 target_id,
@@ -680,7 +702,18 @@ impl Db {
         Ok(interrupted.into_iter().map(|(_, post)| post).collect())
     }
 
+    /// Records (or with `None`, forgets) what the next attempt at this target
+    /// resumes from. Written mid-publish, the moment the handle exists.
+    pub fn set_resume_key(&self, target_id: i64, key: Option<&str>) -> Result<()> {
+        self.lock().execute(
+            "UPDATE post_targets SET resume_key = ?2 WHERE id = ?1",
+            params![target_id, key],
+        )?;
+        Ok(())
+    }
+
     /// Clears the error and backoff so the scheduler picks the target up again.
+    /// The resume key stays: a retry should pick up the post already started.
     pub fn requeue_target(&self, target_id: i64) -> Result<()> {
         self.lock().execute(
             "UPDATE post_targets
@@ -756,6 +789,31 @@ impl Db {
     pub fn set_media(&self, post_id: i64, items: &[MediaInput]) -> Result<()> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
+        // Different attachments make a resumed container the wrong post; see
+        // `update_post`. Saving the same ones again changes nothing.
+        let current = {
+            let mut stmt = tx.prepare(
+                "SELECT path, mime, alt_text FROM media WHERE post_id = ?1 ORDER BY position, id",
+            )?;
+            stmt.query_map(params![post_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let unchanged = current.len() == items.len()
+            && current.iter().zip(items).all(|((path, mime, alt), item)| {
+                *path == item.path && *mime == item.mime && *alt == item.alt_text
+            });
+        if !unchanged {
+            tx.execute(
+                "UPDATE post_targets SET resume_key = NULL WHERE post_id = ?1",
+                params![post_id],
+            )?;
+        }
         tx.execute("DELETE FROM media WHERE post_id = ?1", params![post_id])?;
         for (position, item) in items.iter().enumerate() {
             tx.execute(
@@ -932,6 +990,7 @@ fn step_sql(version: i64) -> &'static str {
         1 => V1_INITIAL,
         2 => V2_NOTES_AND_METRICS,
         3 => V3_METRIC_VIEWS,
+        4 => V4_TARGET_RESUME_KEY,
         // Unreachable while `SCHEMA_VERSION` and this match move together, and a
         // no-op rather than a panic if they ever do not: a store one version
         // ahead of the binary (a downgrade) is better left alone than crashed on.
@@ -1044,6 +1103,13 @@ const V3_METRIC_VIEWS: &str = r"
     ALTER TABLE metrics ADD COLUMN views INTEGER;
 ";
 
+/// The handle a retry resumes from — a Meta media container, a Bluesky record
+/// key — written the moment it exists, so a retry after a lost answer checks
+/// on the post it already started instead of building a second one.
+const V4_TARGET_RESUME_KEY: &str = r"
+    ALTER TABLE post_targets ADD COLUMN resume_key TEXT;
+";
+
 /// One attachment as the renderer hands it over: a path on disk the user picked,
 /// resolved to its type and size by [`crate::media`] before it is stored.
 pub struct MediaInput {
@@ -1060,14 +1126,14 @@ pub struct MediaInput {
 // given offset. The `_COUNT` constants keep those offsets honest; adding a
 // column means updating its list AND its count.
 
-const TARGET_COLUMN_COUNT: usize = 11;
+const TARGET_COLUMN_COUNT: usize = 12;
 const POST_COLUMN_COUNT: usize = 8;
 
 const TARGET_COLUMNS: &str = "id, post_id, account_id, options, status, remote_id, remote_url, \
-                              error, attempts, next_attempt_at, published_at";
+                              error, attempts, next_attempt_at, published_at, resume_key";
 const TARGET_COLUMNS_T: &str = "t.id, t.post_id, t.account_id, t.options, t.status, t.remote_id, \
                                 t.remote_url, t.error, t.attempts, t.next_attempt_at, \
-                                t.published_at";
+                                t.published_at, t.resume_key";
 const POST_COLUMNS: &str = "id, body, title, link, scheduled_at, status, created_at, updated_at";
 const POST_COLUMNS_P: &str = "p.id, p.body, p.title, p.link, p.scheduled_at, p.status, \
                               p.created_at, p.updated_at";
@@ -1131,6 +1197,7 @@ fn map_target(row: &rusqlite::Row<'_>) -> rusqlite::Result<PostTarget> {
         attempts: row.get(8)?,
         next_attempt_at: row.get(9)?,
         published_at: row.get(10)?,
+        resume_key: row.get(11)?,
     })
 }
 
@@ -1244,7 +1311,7 @@ mod tests {
         let db = Db::from_connection(conn).expect("upgrade");
         assert_eq!(
             db.get_meta("schema_version").expect("version"),
-            Some("3".to_string())
+            Some(SCHEMA_VERSION.to_string())
         );
         assert_eq!(db.list_posts().expect("posts").len(), 1);
         // The v2 tables now exist and are empty.
@@ -1284,6 +1351,74 @@ mod tests {
             )
             .expect("schema");
         assert_eq!(leftover, 0, "the half-applied step was not rolled back");
+    }
+
+    fn resume_key(db: &Db, post: i64) -> Option<String> {
+        db.list_targets(post).expect("targets")[0]
+            .resume_key
+            .clone()
+    }
+
+    #[test]
+    fn a_resume_key_survives_failure_and_retry_but_not_success() {
+        let (db, _, post) = seeded();
+        let target = db.list_targets(post).expect("targets")[0].id;
+        db.set_resume_key(target, Some("container-1"))
+            .expect("keep");
+        db.finish_target_err(target, "still processing", Some(Utc::now()))
+            .expect("park");
+        db.requeue_target(target).expect("retry");
+        assert_eq!(resume_key(&db, post).as_deref(), Some("container-1"));
+
+        db.finish_target_ok(target, "media-1", None).expect("done");
+        assert_eq!(resume_key(&db, post), None);
+    }
+
+    #[test]
+    fn editing_what_a_post_says_forgets_its_resume_keys() {
+        // A container holds the caption and media it was built with; resuming
+        // it after an edit would publish the old post.
+        let (db, account, post) = seeded();
+        let target = db.list_targets(post).expect("targets")[0].id;
+        let keep = |db: &Db| db.set_resume_key(target, Some("c")).expect("keep");
+
+        keep(&db);
+        let at = Some("2026-01-01T00:00:00+00:00");
+        db.update_post(post, "hello", None, None, at, POST_SCHEDULED)
+            .expect("reschedule");
+        assert!(
+            resume_key(&db, post).is_some(),
+            "a new time is not a new post"
+        );
+        db.update_post(post, "edited", None, None, at, POST_SCHEDULED)
+            .expect("edit");
+        assert_eq!(resume_key(&db, post), None);
+
+        keep(&db);
+        db.set_media(post, &[]).expect("same media");
+        assert!(resume_key(&db, post).is_some(), "nothing changed");
+        db.set_media(
+            post,
+            &[MediaInput {
+                path: "/a.png".into(),
+                mime: "image/png".into(),
+                bytes: 1,
+                alt_text: None,
+            }],
+        )
+        .expect("new media");
+        assert_eq!(resume_key(&db, post), None);
+
+        keep(&db);
+        db.set_targets(post, &[(account, serde_json::json!({}))])
+            .expect("same options");
+        assert!(resume_key(&db, post).is_some(), "nothing changed");
+        db.set_targets(
+            post,
+            &[(account, serde_json::json!({ "topic_tag": "rust" }))],
+        )
+        .expect("new options");
+        assert_eq!(resume_key(&db, post), None);
     }
 
     #[test]

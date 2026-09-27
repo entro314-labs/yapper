@@ -356,6 +356,15 @@ pub struct PublishRequest<'a> {
     pub media: &'a [MediaItem],
     /// Per-target options, keyed by the platform's own `target_fields`.
     pub options: &'a serde_json::Value,
+    /// What an earlier attempt at this target left behind to resume from —
+    /// Meta's media container, Bluesky's record key — or `None` when there is
+    /// nothing to pick up. Resuming is what lets a retry after a lost answer
+    /// find the post it already made instead of making a second one.
+    pub resume_key: Option<&'a str>,
+    /// Stores (or with `None`, forgets) the resume key for the next attempt.
+    /// Called BEFORE the request it guards, so a crash in between still leaves
+    /// it behind.
+    pub keep_resume_key: &'a dyn Fn(Option<&str>) -> Result<()>,
 }
 
 impl PublishRequest<'_> {

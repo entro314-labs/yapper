@@ -28,6 +28,7 @@ use serde::Deserialize;
 
 use crate::error::{AppError, Result};
 use crate::http;
+use crate::platforms::PublishRequest;
 
 pub mod facebook;
 pub mod instagram;
@@ -191,6 +192,239 @@ pub fn id_of(value: &serde_json::Value, label: &str, what: &str) -> Result<Strin
         .ok_or_else(|| AppError::Platform(format!("{label} returned no id for the {what}.")))
 }
 
+// ─── Media containers (Threads and Instagram) ───────────────────────────────
+//
+// Both publish in two steps — build a container, then publish it by id — and
+// both process media off the request path. The container id is stored on the
+// target as soon as it exists, which buys two things:
+//
+//   * A container still processing when this attempt's wait ends is not thrown
+//     away: the attempt fails retryably and the next one checks on the SAME
+//     container. Meta's own guidance is to wait about 30 s on Threads and to
+//     check an Instagram container once a minute for up to five, far longer
+//     than one pass of a serial scheduler should block.
+//   * A retry after a publish whose answer was lost finds the container
+//     `PUBLISHED` and stops, rather than building and posting a second copy.
+//
+// A carousel is stored in two stages: its children first (`children:a,b,c`),
+// then the carousel container that names them.
+
+/// How one container host spells status, where it publishes, and how long a
+/// single attempt waits.
+pub struct Containers {
+    pub label: &'static str,
+    pub api_base: String,
+    /// Threads says `status` and `error_message`; Instagram `status_code` and
+    /// `status`.
+    pub state_field: &'static str,
+    pub detail_field: &'static str,
+    /// `threads_publish` or `media_publish`, under the user's id.
+    pub publish_edge: &'static str,
+    pub tries: usize,
+    pub interval: std::time::Duration,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ContainerState {
+    Finished,
+    Published,
+    Processing,
+    Failed(String),
+    Expired,
+}
+
+const CHILDREN_PREFIX: &str = "children:";
+
+/// Builds the containers of one post. `children` is `Some` for a carousel and
+/// makes its item containers; `container` makes the container that gets
+/// published, given the finished children (empty for anything else).
+pub struct ContainerBuild<'a> {
+    pub children: Option<&'a dyn Fn() -> Result<Vec<String>>>,
+    pub container: &'a dyn Fn(&[String]) -> Result<String>,
+}
+
+impl Containers {
+    /// Builds (or resumes), waits for and publishes one post's container, and
+    /// returns the id of the published media.
+    pub fn publish(
+        &self,
+        request: &PublishRequest<'_>,
+        build: &ContainerBuild<'_>,
+    ) -> Result<String> {
+        let token = request.secret.access_token.as_str();
+        let keep = request.keep_resume_key;
+        let mut resumed = request.resume_key.map(str::to_owned);
+        // A resumed container that expired (Meta keeps them 24 hours) never
+        // went out, so it is rebuilt once; one built this attempt that expires
+        // is a real failure.
+        let mut rebuilt = false;
+
+        loop {
+            let container = if let Some(key) = resumed.take() {
+                if let Some(list) = key.strip_prefix(CHILDREN_PREFIX) {
+                    let children: Vec<String> = list.split(',').map(str::to_owned).collect();
+                    match self.wait(&children, token)? {
+                        ContainerState::Finished | ContainerState::Published => {
+                            let id = (build.container)(&children)?;
+                            keep(Some(&id))?;
+                            id
+                        }
+                        ContainerState::Processing => return Err(self.still_processing()),
+                        ContainerState::Failed(detail) => {
+                            keep(None)?;
+                            return Err(self.failed(&detail));
+                        }
+                        ContainerState::Expired if !rebuilt => {
+                            keep(None)?;
+                            rebuilt = true;
+                            continue;
+                        }
+                        ContainerState::Expired => {
+                            keep(None)?;
+                            return Err(self.expired());
+                        }
+                    }
+                } else {
+                    key
+                }
+            } else {
+                rebuilt = true;
+                if let Some(children) = build.children {
+                    let ids = children()?;
+                    let key = format!("{CHILDREN_PREFIX}{}", ids.join(","));
+                    keep(Some(&key))?;
+                    resumed = Some(key);
+                    continue;
+                }
+                let id = (build.container)(&[])?;
+                keep(Some(&id))?;
+                id
+            };
+
+            match self.wait(std::slice::from_ref(&container), token)? {
+                ContainerState::Finished => return self.publish_container(request, &container),
+                ContainerState::Processing => return Err(self.still_processing()),
+                ContainerState::Published => {
+                    return Err(AppError::Conflict(format!(
+                        "{} already published this post: its media container reports \
+                         PUBLISHED, but the post's id was never recorded. It will not be \
+                         posted again — find it on the account.",
+                        self.label
+                    )));
+                }
+                ContainerState::Failed(detail) => {
+                    keep(None)?;
+                    return Err(self.failed(&detail));
+                }
+                ContainerState::Expired if !rebuilt => {
+                    keep(None)?;
+                    rebuilt = true;
+                }
+                ContainerState::Expired => {
+                    keep(None)?;
+                    return Err(self.expired());
+                }
+            }
+        }
+    }
+
+    /// Polls containers until every one is publishable, one fails, or this
+    /// attempt's window closes (then `Processing`).
+    fn wait(&self, ids: &[String], token: &str) -> Result<ContainerState> {
+        let fields = format!("{},{}", self.state_field, self.detail_field);
+        let mut pending: Vec<&String> = ids.iter().collect();
+        let mut published = false;
+        for attempt in 0..self.tries {
+            let mut still = Vec::new();
+            for id in pending {
+                let status = get_json(
+                    &format!("{}/{id}", self.api_base),
+                    &[("fields", fields.as_str()), ("access_token", token)],
+                    self.label,
+                )?;
+                match read_state(&status, self.state_field, self.detail_field) {
+                    ContainerState::Finished => {}
+                    ContainerState::Published => published = true,
+                    ContainerState::Processing => still.push(id),
+                    ended => return Ok(ended),
+                }
+            }
+            pending = still;
+            if pending.is_empty() {
+                return Ok(if published {
+                    ContainerState::Published
+                } else {
+                    ContainerState::Finished
+                });
+            }
+            if attempt + 1 < self.tries {
+                std::thread::sleep(self.interval);
+            }
+        }
+        Ok(ContainerState::Processing)
+    }
+
+    /// The publish call itself. Ordinary retry semantics on purpose: if its
+    /// answer is lost, the next attempt reads the container and finds it
+    /// `PUBLISHED` rather than sending it again.
+    fn publish_container(&self, request: &PublishRequest<'_>, container: &str) -> Result<String> {
+        let published = post_form(
+            &format!(
+                "{}/{}/{}",
+                self.api_base, request.account.remote_id, self.publish_edge
+            ),
+            &[
+                ("creation_id", container),
+                ("access_token", request.secret.access_token.as_str()),
+            ],
+            self.label,
+        )?;
+        id_of(&published, self.label, "published post")
+    }
+
+    fn still_processing(&self) -> AppError {
+        AppError::Platform(format!(
+            "{} is still processing the attachment. The next attempt checks on the same \
+             upload rather than starting over.",
+            self.label
+        ))
+    }
+
+    fn failed(&self, detail: &str) -> AppError {
+        AppError::InvalidInput(format!(
+            "{} could not process the attachment: {detail}",
+            self.label
+        ))
+    }
+
+    fn expired(&self) -> AppError {
+        AppError::InvalidInput(format!(
+            "The {} media container expired before it was published.",
+            self.label
+        ))
+    }
+}
+
+/// One container's state from its status read. Anything not yet final —
+/// `IN_PROGRESS`, or no status at all — is still processing.
+fn read_state(status: &serde_json::Value, state_field: &str, detail_field: &str) -> ContainerState {
+    let detail = status
+        .get(detail_field)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("no reason given");
+    match status
+        .get(state_field)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("IN_PROGRESS")
+    {
+        "FINISHED" => ContainerState::Finished,
+        "PUBLISHED" => ContainerState::Published,
+        "ERROR" => ContainerState::Failed(detail.to_string()),
+        "EXPIRED" => ContainerState::Expired,
+        _ => ContainerState::Processing,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +527,108 @@ mod tests {
                 .to_string()
                 .contains("human text")
         );
+    }
+
+    #[test]
+    fn container_states_read_both_spellings() {
+        let threads = serde_json::json!({ "status": "ERROR", "error_message": "bad codec" });
+        assert_eq!(
+            read_state(&threads, "status", "error_message"),
+            ContainerState::Failed("bad codec".into())
+        );
+        let instagram = serde_json::json!({ "status_code": "PUBLISHED", "status": "Published" });
+        assert_eq!(
+            read_state(&instagram, "status_code", "status"),
+            ContainerState::Published
+        );
+        assert_eq!(
+            read_state(&serde_json::json!({}), "status", "error_message"),
+            ContainerState::Processing,
+            "no status yet is not a failure"
+        );
+    }
+
+    #[test]
+    fn a_container_already_published_is_not_published_again() {
+        // A retry after a publish whose answer was lost: the stored container
+        // reports PUBLISHED, so nothing is sent, the key is kept, and the
+        // outcome is terminal. Answered from a local stand-in for the Graph
+        // host so the whole resume path runs.
+        let (base, server) = serve_once(r#"{"status":"PUBLISHED","id":"c1"}"#);
+        let containers = Containers {
+            label: "Threads",
+            api_base: base,
+            state_field: "status",
+            detail_field: "error_message",
+            publish_edge: "threads_publish",
+            tries: 1,
+            interval: std::time::Duration::ZERO,
+        };
+        let account = crate::db::Account {
+            id: 1,
+            platform: crate::platforms::PlatformId::Threads,
+            remote_id: "u1".into(),
+            handle: "@me".into(),
+            display_name: None,
+            avatar_url: None,
+            instance: None,
+            scopes: None,
+            char_limit: None,
+            token_expires_at: None,
+            status: crate::db::ACCOUNT_OK.into(),
+            created_at: crate::db::now_rfc3339(),
+        };
+        let secret = crate::platforms::AccountSecret::default();
+        let options = serde_json::json!({});
+        let kept = std::cell::RefCell::new(Vec::new());
+        let keep = |key: Option<&str>| {
+            kept.borrow_mut().push(key.map(str::to_owned));
+            Ok(())
+        };
+        let request = PublishRequest {
+            target_id: 1,
+            account: &account,
+            secret: &secret,
+            body: "hello",
+            title: None,
+            link: None,
+            media: &[],
+            options: &options,
+            resume_key: Some("c1"),
+            keep_resume_key: &keep,
+        };
+        let never = |_: &[String]| -> Result<String> { panic!("must not build a new container") };
+        let err = containers
+            .publish(
+                &request,
+                &ContainerBuild {
+                    children: None,
+                    container: &never,
+                },
+            )
+            .expect_err("already out");
+        assert!(matches!(err, AppError::Conflict(_)), "{err}");
+        assert!(kept.borrow().is_empty(), "the key must survive");
+        server.join().expect("server");
+    }
+
+    /// Answers exactly one HTTP request with `body`, and returns the base URL.
+    fn serve_once(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer).expect("request");
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(reply.as_bytes()).expect("reply");
+        });
+        (base, server)
     }
 
     #[test]

@@ -213,6 +213,8 @@ fn publish_one(database: &Arc<Db>, item: &DueTarget) -> Result<Published> {
         link: item.post.link.as_deref(),
         media: &media,
         options: &item.target.options,
+        resume_key: item.target.resume_key.as_deref(),
+        keep_resume_key: &|key| database.set_resume_key(item.target.id, key),
     })
 }
 
