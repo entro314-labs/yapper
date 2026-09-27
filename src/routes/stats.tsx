@@ -15,7 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
 import { useAnimatedIcon } from '@/lib/animated-icon'
 import { brandOf } from '@/lib/platform-brand'
-import { useAccounts, usePosts, useRefreshCost, useRefreshEngagement, useStats } from '@/lib/query'
+import { readRefreshCost, useAccounts, usePosts, useRefreshEngagement, useStats } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
 import type { Bucket, EngagementRow, PlatformId, StatsFilter } from '@/lib/tauri/types'
 import { cn, formatRelative } from '@/lib/utils'
@@ -48,7 +48,6 @@ function StatsScreen() {
   const accounts = useAccounts()
   const posts = usePosts()
   const refresh = useRefreshEngagement()
-  const cost = useRefreshCost()
   const [refreshRef, refreshHover] = useAnimatedIcon()
 
   const [range, setRange] = React.useState<string>('30')
@@ -219,17 +218,17 @@ function StatsScreen() {
                 // X is the only platform that bills per read, so it is the only one that gets a
                 // confirmation. Asking before every free refresh would train the click away.
                 //
-                // The cost is fetched HERE rather than read off the cached query: a click that
-                // lands before the query resolves would otherwise see zero billed reads and spend
-                // the money without asking. `ask` rather than `window.confirm` for the same class
-                // of reason — the webview's own confirm resolves to a Promise, which is truthy
-                // whatever the user clicked, so the guard would never once have held.
+                // The cost is read HERE, at the click, and a failure to read it aborts the refresh
+                // with its error: a cached, pending or failed count defaulting to zero billed reads
+                // would spend the money without asking. `ask` rather than `window.confirm` for the
+                // same class of reason — the webview's own confirm resolves to a Promise, which is
+                // truthy whatever the user clicked, so the guard would never once have held.
                 try {
-                  const spend = await cost.refetch()
-                  const billed = spend.data?.billedReads ?? 0
+                  const spend = await readRefreshCost()
+                  const billed = spend.billedReads
                   if (billed > 0) {
                     const proceed = await ask(
-                      `This reads ${billed} post${billed === 1 ? '' : 's'} from X, which bills against your app's credits. The other ${spend.data?.freeReads ?? 0} are free.`,
+                      `This reads ${billed} post${billed === 1 ? '' : 's'} from X, which bills against your app's credits. The other ${spend.freeReads} are free.`,
                       { title: 'Refresh engagement', kind: 'warning' },
                     )
                     if (!proceed) return
