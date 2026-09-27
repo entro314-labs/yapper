@@ -88,28 +88,43 @@ function NotesScreen() {
   )
 
   /** Resolves to whether the note was saved, so a caller can go on only after it was. */
-  const save = React.useCallback(
-    async (pinned?: boolean): Promise<boolean> => {
-      if (!body.trim()) {
-        toast.error('A note needs some text.')
-        return false
-      }
+  const save = React.useCallback(async (): Promise<boolean> => {
+    if (!body.trim()) {
+      toast.error('A note needs some text.')
+      return false
+    }
+    try {
+      const id = await saveNote.mutateAsync({
+        id: selected,
+        title,
+        body,
+        pinned: current?.pinned ?? false,
+      })
+      setSelected(id)
+      setLoaded(id)
+      return true
+    } catch (err) {
+      toast.error(humanMessage(err))
+      return false
+    }
+  }, [body, title, selected, current, saveNote])
+
+  // Pinning sends the STORED title and body: it is a flag on the note, and
+  // using it must not also save whatever half-edit is in the editor.
+  const togglePin = React.useCallback(
+    async (note: Note) => {
       try {
-        const id = await saveNote.mutateAsync({
-          id: selected,
-          title,
-          body,
-          pinned: pinned ?? current?.pinned ?? false,
+        await saveNote.mutateAsync({
+          id: note.id,
+          title: note.title,
+          body: note.body,
+          pinned: !note.pinned,
         })
-        setSelected(id)
-        setLoaded(id)
-        return true
       } catch (err) {
         toast.error(humanMessage(err))
-        return false
       }
     },
-    [body, title, selected, current, saveNote],
+    [saveNote],
   )
 
   // Cmd/Ctrl+S saves, behind the same guard as the Save button. Default
@@ -208,7 +223,7 @@ function NotesScreen() {
                     variant="ghost"
                     aria-label={current.pinned ? 'Unpin' : 'Pin'}
                     onClick={() => {
-                      void save(!current.pinned)
+                      void togglePin(current)
                     }}
                   >
                     {current.pinned ? <IconPinFilled className="text-primary" /> : <IconPin />}
