@@ -299,7 +299,10 @@ Posts, schedules and account metadata live in one SQLite file in your app data
 directory. Tokens, app passwords and your developer-app client ids live in the
 OS credential store. Nothing is sent anywhere except to the platform you are
 posting to, and every one of those requests is made from Rust — the webview
-never sees a token, and its CSP allows no outbound connections at all.
+never sees a token, and its CSP gives scripts no network access beyond Tauri's
+own IPC (`connect-src`). The one thing it loads from the web is images over
+HTTPS (`img-src https:`), which is how account avatars display; those are plain
+GETs of the avatar URL and carry no credentials.
 
 The one exception is Meta, and only when you post to Threads or Instagram *with
 an attachment*: that file is uploaded to your own web deployment's storage
