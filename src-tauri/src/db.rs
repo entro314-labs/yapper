@@ -263,6 +263,15 @@ impl Db {
             .optional()?)
     }
 
+    /// SQLite's `data_version` for this connection: it moves when ANOTHER
+    /// connection commits, never for this one's own writes — which is exactly
+    /// the signal for "the MCP process changed something behind the UI".
+    pub fn data_version(&self) -> Result<i64> {
+        Ok(self
+            .lock()
+            .query_row("PRAGMA data_version", [], |row| row.get(0))?)
+    }
+
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.lock().execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)
@@ -365,15 +374,60 @@ impl Db {
         Ok(())
     }
 
-    /// Removes the row. The caller is responsible for the credential-store entry —
-    /// deleting the row first would orphan a secret nothing can name any more.
+    /// Removes the row, and with it (by cascade) that account's destinations,
+    /// attempts and metrics. The caller is responsible for the credential-store
+    /// entry.
+    ///
+    /// Every post that lost a destination is re-derived in the same
+    /// transaction: one left with none goes back to `draft`, one whose remaining
+    /// destinations have all settled takes the status they add up to, and one
+    /// still waiting on another destination keeps the status that already says
+    /// so — a future `scheduled` post must not turn into `publishing`.
+    ///
+    /// Refused while one of the account's destinations is mid-send: the cascade
+    /// would take the row the scheduler is about to settle, and with it the only
+    /// record of a send that may have landed.
     pub fn delete_account(&self, id: i64) -> Result<()> {
-        let changed = self
-            .lock()
-            .execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let sending = tx
+            .query_row(
+                "SELECT 1 FROM post_targets WHERE account_id = ?1 AND status = ?2 LIMIT 1",
+                params![id, TARGET_PUBLISHING],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if sending.is_some() {
+            return Err(AppError::Conflict(
+                "This account is sending a post right now. Wait for that to finish before \
+                 disconnecting it."
+                    .into(),
+            ));
+        }
+        let posts = {
+            let mut stmt =
+                tx.prepare("SELECT DISTINCT post_id FROM post_targets WHERE account_id = ?1")?;
+            stmt.query_map(params![id], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let changed = tx.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
         if changed == 0 {
             return Err(AppError::NotFound(format!("No account with id {id}.")));
         }
+        for post_id in posts {
+            let (remaining, waiting): (i64, i64) = tx.query_row(
+                "SELECT COUNT(*), COUNT(*) FILTER (WHERE status NOT IN (?2, ?3))
+                   FROM post_targets WHERE post_id = ?1",
+                params![post_id, TARGET_PUBLISHED, TARGET_FAILED],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if remaining == 0 {
+                set_status(&tx, post_id, POST_DRAFT)?;
+            } else if waiting == 0 {
+                reconcile(&tx, post_id)?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -450,17 +504,20 @@ impl Db {
     }
 
     pub fn set_post_status(&self, id: i64, status: &str) -> Result<()> {
-        self.lock().execute(
-            "UPDATE posts SET status = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, status, now_rfc3339()],
-        )?;
-        Ok(())
+        set_status(&self.lock(), id, status)
     }
 
     pub fn delete_post(&self, id: i64) -> Result<()> {
-        let changed = self
-            .lock()
-            .execute("DELETE FROM posts WHERE id = ?1", params![id])?;
+        let conn = self.lock();
+        // The cascade would take a row the scheduler is about to settle, and
+        // with it the only record of a send that may have landed.
+        if let Some(destination) = in_flight_destination(&conn, id)? {
+            return Err(AppError::Conflict(format!(
+                "This post is being sent to {destination} right now. Wait for that to finish \
+                 before deleting it."
+            )));
+        }
+        let changed = conn.execute("DELETE FROM posts WHERE id = ?1", params![id])?;
         if changed == 0 {
             return Err(AppError::NotFound(format!("No post with id {id}.")));
         }
@@ -531,6 +588,18 @@ impl Db {
         Ok(())
     }
 
+    /// The post a destination belongs to.
+    pub fn post_of_target(&self, target_id: i64) -> Result<i64> {
+        self.lock()
+            .query_row(
+                "SELECT post_id FROM post_targets WHERE id = ?1",
+                params![target_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound(format!("No destination with id {target_id}.")))
+    }
+
     pub fn list_targets(&self, post_id: i64) -> Result<Vec<PostTarget>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
@@ -573,16 +642,29 @@ impl Db {
         .map_err(Into::into)
     }
 
-    /// Scheduled posts whose time passed while the app was not running. The
-    /// scheduler decides what to do with them; this only finds them.
+    /// Posts whose time passed while the app was not running: a scheduled post
+    /// due before `before`, or a post in flight whose retry fell due before it
+    /// (decision H-2 — the missed policy covers retries too). A post with a
+    /// destination mid-send is never one of them, and neither is a retry
+    /// still waiting out its backoff or one re-queued by hand (no
+    /// `next_attempt_at`). The scheduler decides what to do with them; this
+    /// only finds them.
     pub fn overdue_posts(&self, before: DateTime<Utc>) -> Result<Vec<Post>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
-            "SELECT {POST_COLUMNS} FROM posts
-              WHERE status = '{POST_SCHEDULED}'
-                AND scheduled_at IS NOT NULL
-                AND scheduled_at < ?1
-              ORDER BY scheduled_at"
+            "SELECT {POST_COLUMNS} FROM posts p
+              WHERE (p.status = '{POST_SCHEDULED}'
+                     AND p.scheduled_at IS NOT NULL
+                     AND p.scheduled_at < ?1)
+                 OR (p.status = '{POST_PUBLISHING}'
+                     AND EXISTS (SELECT 1 FROM post_targets t
+                                  WHERE t.post_id = p.id
+                                    AND t.status = '{TARGET_PENDING}'
+                                    AND t.next_attempt_at < ?1)
+                     AND NOT EXISTS (SELECT 1 FROM post_targets t
+                                      WHERE t.post_id = p.id
+                                        AND t.status = '{TARGET_PUBLISHING}'))
+              ORDER BY p.scheduled_at"
         ))?;
         stmt.query_map(params![before.to_rfc3339()], map_post)?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -592,13 +674,27 @@ impl Db {
     /// Moves a target from `pending` to `publishing` and counts the attempt. The
     /// status guard is the whole point: it is atomic, so two passes racing over
     /// the same target cannot both win and post twice.
+    ///
+    /// The post moves to `publishing` with it, in the same transaction: every
+    /// guard in the renderer (edit, move, post now) keys on the POST's status,
+    /// and a post still reading `scheduled` mid-send invited all three.
     pub fn claim_target(&self, target_id: i64) -> Result<bool> {
-        let changed = self.lock().execute(
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
             "UPDATE post_targets
                 SET status = ?2, attempts = attempts + 1
               WHERE id = ?1 AND status = ?3",
             params![target_id, TARGET_PUBLISHING, TARGET_PENDING],
         )?;
+        if changed == 1 {
+            tx.execute(
+                "UPDATE posts SET status = ?2, updated_at = ?3
+                  WHERE id = (SELECT post_id FROM post_targets WHERE id = ?1)",
+                params![target_id, POST_PUBLISHING, now_rfc3339()],
+            )?;
+        }
+        tx.commit()?;
         Ok(changed == 1)
     }
 
@@ -608,7 +704,7 @@ impl Db {
         remote_id: &str,
         remote_url: Option<&str>,
     ) -> Result<()> {
-        self.lock().execute(
+        let changed = self.lock().execute(
             "UPDATE post_targets
                 SET status = ?2, remote_id = ?3, remote_url = ?4, error = NULL,
                     next_attempt_at = NULL, published_at = ?5
@@ -621,7 +717,7 @@ impl Db {
                 now_rfc3339()
             ],
         )?;
-        Ok(())
+        target_changed(changed, target_id)
     }
 
     /// `retry_at = None` means give up: the target goes to `failed` and the user
@@ -637,7 +733,7 @@ impl Db {
         } else {
             TARGET_FAILED
         };
-        self.lock().execute(
+        let changed = self.lock().execute(
             "UPDATE post_targets
                 SET status = ?2, error = ?3, next_attempt_at = ?4
               WHERE id = ?1",
@@ -648,7 +744,7 @@ impl Db {
                 retry_at.map(|at| at.to_rfc3339())
             ],
         )?;
-        Ok(())
+        target_changed(changed, target_id)
     }
 
     /// Fails every target still marked `publishing` — between scheduler passes
@@ -683,22 +779,30 @@ impl Db {
     }
 
     /// Clears the error and backoff so the scheduler picks the target up again.
+    /// A target mid-send is left alone: back in `pending` while the send is
+    /// still out, the next pass would claim it again and post a second copy.
     pub fn requeue_target(&self, target_id: i64) -> Result<()> {
         self.lock().execute(
             "UPDATE post_targets
                 SET status = ?2, error = NULL, next_attempt_at = NULL, attempts = 0
-              WHERE id = ?1 AND status != ?3",
-            params![target_id, TARGET_PENDING, TARGET_PUBLISHED],
+              WHERE id = ?1 AND status NOT IN (?3, ?4)",
+            params![
+                target_id,
+                TARGET_PENDING,
+                TARGET_PUBLISHED,
+                TARGET_PUBLISHING
+            ],
         )?;
         Ok(())
     }
 
     pub fn log_attempt(&self, target_id: i64, ok: bool, detail: Option<&str>) -> Result<()> {
-        self.lock().execute(
-            "INSERT INTO attempts (target_id, at, ok, detail) VALUES (?1, ?2, ?3, ?4)",
+        let changed = self.lock().execute(
+            "INSERT INTO attempts (target_id, at, ok, detail)
+             SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM post_targets WHERE id = ?1)",
             params![target_id, now_rfc3339(), ok, detail],
         )?;
-        Ok(())
+        target_changed(changed, target_id)
     }
 
     pub fn list_attempts(&self, post_id: i64) -> Result<Vec<Attempt>> {
@@ -724,33 +828,9 @@ impl Db {
         .map_err(Into::into)
     }
 
-    /// Recomputes a post's status from its targets, which is the only place that
-    /// status is decided: every target published is `published`, some published
-    /// and the rest failed is `partial`, all failed is `failed`, anything still
-    /// pending keeps the post in flight.
+    /// See [`reconcile`].
     pub fn reconcile_post_status(&self, post_id: i64) -> Result<String> {
-        let targets = self.list_targets(post_id)?;
-        if targets.is_empty() {
-            return Ok(self.get_post(post_id)?.status);
-        }
-        let published = targets
-            .iter()
-            .filter(|t| t.status == TARGET_PUBLISHED)
-            .count();
-        let failed = targets.iter().filter(|t| t.status == TARGET_FAILED).count();
-        let status = if published == targets.len() {
-            POST_PUBLISHED
-        } else if published + failed == targets.len() {
-            if published == 0 {
-                POST_FAILED
-            } else {
-                POST_PARTIAL
-            }
-        } else {
-            POST_PUBLISHING
-        };
-        self.set_post_status(post_id, status)?;
-        Ok(status.to_string())
+        reconcile(&self.lock(), post_id)
     }
 
     // ─── Media ──────────────────────────────────────────────────────────────
@@ -1015,8 +1095,58 @@ pub struct PostFields<'a> {
 
 // ─── Post writes ────────────────────────────────────────────────────────────
 //
-// Free functions over a connection so the single-write methods and
-// `Db::save_post`'s transaction run the same SQL.
+// Free functions over a connection so the single-write methods and the
+// transactions in `Db::save_post` and `Db::delete_account` run the same SQL.
+
+fn set_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE posts SET status = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, status, now_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// Recomputes a post's status from its targets, which is the only place that
+/// status is decided: every target published is `published`, some published
+/// and the rest failed is `partial`, all failed is `failed`, anything still
+/// pending keeps the post in flight — unless it has no time, because nothing
+/// sends a post without one, and `publishing` there would promise a send that
+/// never comes. Such a post is a draft.
+fn reconcile(conn: &Connection, post_id: i64) -> Result<String> {
+    let (current, scheduled_at): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, scheduled_at FROM posts WHERE id = ?1",
+            params![post_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::NotFound(format!("No post with id {post_id}.")))?;
+    let statuses = {
+        let mut stmt = conn.prepare("SELECT status FROM post_targets WHERE post_id = ?1")?;
+        stmt.query_map(params![post_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if statuses.is_empty() {
+        return Ok(current);
+    }
+    let published = statuses.iter().filter(|s| *s == TARGET_PUBLISHED).count();
+    let failed = statuses.iter().filter(|s| *s == TARGET_FAILED).count();
+    let status = if published == statuses.len() {
+        POST_PUBLISHED
+    } else if published + failed == statuses.len() {
+        if published == 0 {
+            POST_FAILED
+        } else {
+            POST_PARTIAL
+        }
+    } else if scheduled_at.is_none() {
+        POST_DRAFT
+    } else {
+        POST_PUBLISHING
+    };
+    set_status(conn, post_id, status)?;
+    Ok(status.to_string())
+}
 
 fn insert_post(conn: &Connection, fields: &PostFields<'_>) -> Result<i64> {
     let now = now_rfc3339();
@@ -1086,6 +1216,15 @@ fn write_targets(
     post_id: i64,
     targets: &[(i64, serde_json::Value)],
 ) -> Result<()> {
+    // Refused outright rather than skipping the row: deleting it mid-send
+    // loses the record of a post that may already be live, and editing the
+    // post around it describes something other than what is going out.
+    if let Some(destination) = in_flight_destination(conn, post_id)? {
+        return Err(AppError::Conflict(format!(
+            "This post is being sent to {destination} right now. Wait for that to finish \
+             before changing it."
+        )));
+    }
     // Account ids are i64 read back from this same store, never user text,
     // so interpolating them into the NOT IN list cannot carry SQL.
     let keep: Vec<String> = targets
@@ -1106,16 +1245,61 @@ fn write_targets(
         ),
         params![post_id],
     )?;
+    // A kept destination that has not published is put back in the queue, as
+    // `requeue_target` does: an edit is a new version of the post, and a failed
+    // row or a running backoff left from the old one would otherwise sit under
+    // a post the user just rescheduled — never sent, later reported missed.
     for (account_id, options) in targets {
         conn.execute(
             "INSERT INTO post_targets (post_id, account_id, options)
              VALUES (?1, ?2, ?3)
-             ON CONFLICT(post_id, account_id) DO UPDATE SET options = excluded.options
-             WHERE post_targets.status != ?4",
-            params![post_id, account_id, options.to_string(), TARGET_PUBLISHED],
+             ON CONFLICT(post_id, account_id) DO UPDATE SET
+               options = excluded.options, status = ?4, error = NULL,
+               next_attempt_at = NULL, attempts = 0
+             WHERE post_targets.status != ?5",
+            params![
+                post_id,
+                account_id,
+                options.to_string(),
+                TARGET_PENDING,
+                TARGET_PUBLISHED
+            ],
         )?;
     }
+    // Every destination left has already published — the user dropped the
+    // ones that failed. Nothing remains to send, so the post is published
+    // rather than `scheduled` with an empty queue behind it.
+    conn.execute(
+        "UPDATE posts SET status = ?2
+          WHERE id = ?1
+            AND EXISTS (SELECT 1 FROM post_targets WHERE post_id = ?1)
+            AND NOT EXISTS (SELECT 1 FROM post_targets WHERE post_id = ?1 AND status != ?3)",
+        params![post_id, POST_PUBLISHED, TARGET_PUBLISHED],
+    )?;
     Ok(())
+}
+
+/// The destination of `post_id` that is being sent right now, named for a
+/// message, if there is one. Such a row is settled within the scheduler pass
+/// that claimed it, so anything refused because of it can simply be retried.
+fn in_flight_destination(conn: &Connection, post_id: i64) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT a.handle, a.platform
+           FROM post_targets t
+           JOIN accounts a ON a.id = t.account_id
+          WHERE t.post_id = ?1 AND t.status = ?2
+          LIMIT 1",
+        params![post_id, TARGET_PUBLISHING],
+        |row| {
+            Ok(format!(
+                "{} ({})",
+                row.get::<_, String>(0)?,
+                row.get::<_, PlatformId>(1)?
+            ))
+        },
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// One attachment as the renderer hands it over: a path on disk the user picked,
@@ -1125,6 +1309,18 @@ pub struct MediaInput {
     pub mime: String,
     pub bytes: i64,
     pub alt_text: Option<String>,
+}
+
+/// A settle that matched no row is an error, never a quiet no-op: the send
+/// happened, and a result recorded nowhere is how a post ends up live on the
+/// platform while the queue has no trace of it.
+fn target_changed(changed: usize, target_id: i64) -> Result<()> {
+    if changed == 0 {
+        return Err(AppError::NotFound(format!(
+            "No destination with id {target_id}."
+        )));
+    }
+    Ok(())
 }
 
 // ─── Column lists and row mappers ───────────────────────────────────────────
@@ -1365,6 +1561,38 @@ mod tests {
     }
 
     #[test]
+    fn a_write_from_another_connection_moves_the_data_version() {
+        // The MCP server is a separate process with its own connection; this
+        // is how the app notices what it wrote.
+        let path = std::env::temp_dir().join(format!(
+            "windbag-data-version-{}-{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let app = Db::open_at(&path).expect("app");
+        let other = Db::open_at(&path).expect("other");
+
+        let before = app.data_version().expect("version");
+        app.save_note(None, "", "own write", false).expect("own");
+        assert_eq!(
+            app.data_version().expect("version"),
+            before,
+            "the app's own writes must not look like someone else's"
+        );
+        other.save_note(None, "", "from MCP", false).expect("other");
+        assert_ne!(app.data_version().expect("version"), before);
+
+        drop(app);
+        drop(other);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = path.clone().into_os_string();
+            file.push(suffix);
+            // Absent when SQLite already folded the WAL back in on close.
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
+    #[test]
     fn a_fresh_store_lands_on_the_current_schema_version() {
         let db = Db::open_in_memory().expect("store");
         assert_eq!(
@@ -1566,6 +1794,128 @@ mod tests {
     }
 
     #[test]
+    fn a_destination_names_its_post() {
+        let (db, _, post) = seeded();
+        let target = db.list_targets(post).expect("targets")[0].id;
+        assert_eq!(db.post_of_target(target).expect("post"), post);
+        assert!(matches!(
+            db.post_of_target(target + 1000),
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn claiming_a_target_moves_its_post_in_flight() {
+        // The renderer's edit/move guards key on the POST's status, so a claim
+        // that only touched the target left an in-flight post editable.
+        let (db, _, post) = seeded();
+        let target = db.list_targets(post).expect("targets")[0].id;
+        assert!(db.claim_target(target).expect("claim"));
+        assert_eq!(db.get_post(post).expect("post").status, POST_PUBLISHING);
+    }
+
+    fn draft_fields(body: &str) -> PostFields<'_> {
+        PostFields {
+            body,
+            title: None,
+            link: None,
+            scheduled_at: None,
+            status: POST_DRAFT,
+        }
+    }
+
+    #[test]
+    fn a_destination_mid_send_cannot_be_deselected_or_its_post_edited() {
+        let (db, account, post) = seeded();
+        let target = db.list_targets(post).expect("targets")[0].id;
+        assert!(db.claim_target(target).expect("claim"));
+
+        let deselect = db.save_post(Some(post), &draft_fields("hello"), &[], &[]);
+        let edit = db.save_post(
+            Some(post),
+            &draft_fields("rewritten"),
+            &[],
+            &[(account, serde_json::json!({}))],
+        );
+        for outcome in [deselect, edit] {
+            match outcome {
+                Err(AppError::Conflict(message)) => {
+                    assert!(message.contains("me.bsky.social"), "{message}");
+                }
+                other => panic!("expected a conflict, got {other:?}"),
+            }
+        }
+        let targets = db.list_targets(post).expect("targets");
+        assert_eq!(targets.len(), 1, "the in-flight row must survive");
+        assert_eq!(targets[0].status, TARGET_PUBLISHING);
+        assert_eq!(db.get_post(post).expect("post").body, "hello");
+    }
+
+    #[test]
+    fn a_post_mid_send_cannot_be_deleted() {
+        let (db, _, post) = seeded();
+        let target = db.list_targets(post).expect("targets")[0].id;
+        assert!(db.claim_target(target).expect("claim"));
+
+        match db.delete_post(post) {
+            Err(AppError::Conflict(message)) => {
+                assert!(message.contains("me.bsky.social"), "{message}");
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        assert!(db.get_post(post).is_ok());
+    }
+
+    #[test]
+    fn settling_a_destination_that_no_longer_exists_is_an_error() {
+        let (db, _, post) = seeded();
+        let target = db.list_targets(post).expect("targets")[0].id;
+        db.delete_post(post).expect("delete");
+
+        assert!(matches!(
+            db.finish_target_ok(target, "at://1", None),
+            Err(AppError::NotFound(_))
+        ));
+        assert!(matches!(
+            db.finish_target_err(target, "boom", None),
+            Err(AppError::NotFound(_))
+        ));
+        assert!(matches!(
+            db.log_attempt(target, true, None),
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn requeuing_never_resets_a_destination_mid_send() {
+        // Back to `pending` while the send is still out would let the next
+        // pass claim it again and post a second copy.
+        let (db, _, post) = seeded();
+        let target = db.list_targets(post).expect("targets")[0].id;
+        assert!(db.claim_target(target).expect("claim"));
+        db.requeue_target(target).expect("requeue");
+        assert_eq!(
+            db.list_targets(post).expect("targets")[0].status,
+            TARGET_PUBLISHING
+        );
+    }
+
+    #[test]
+    fn a_post_with_no_time_is_never_reconciled_into_flight() {
+        // `publishing` promises a send; without a time nothing is ever due.
+        let db = Db::open_in_memory().expect("store");
+        let account = db
+            .upsert_account(PlatformId::Bluesky, &connected("did:1", "me"))
+            .expect("account");
+        let post = db
+            .create_post("hi", None, None, None, POST_DRAFT)
+            .expect("post");
+        db.set_targets(post, &[(account, serde_json::json!({}))])
+            .expect("targets");
+        assert_eq!(db.reconcile_post_status(post).expect("status"), POST_DRAFT);
+    }
+
+    #[test]
     fn post_status_follows_its_targets() {
         let db = Db::open_in_memory().expect("store");
         let a = db
@@ -1622,6 +1972,75 @@ mod tests {
         let (db, account, post) = seeded();
         db.delete_account(account).expect("delete");
         assert!(db.list_targets(post).expect("targets").is_empty());
+    }
+
+    /// Two accounts and a future post aimed at both.
+    fn two_destinations() -> (Db, i64, i64, i64) {
+        let db = Db::open_in_memory().expect("store");
+        let a = db
+            .upsert_account(PlatformId::Bluesky, &connected("did:a", "a"))
+            .expect("a");
+        let b = db
+            .upsert_account(PlatformId::Mastodon, &connected("id:b", "b"))
+            .expect("b");
+        let later = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let post = db
+            .create_post("hi", None, None, Some(&later), POST_SCHEDULED)
+            .expect("post");
+        db.set_targets(
+            post,
+            &[(a, serde_json::json!({})), (b, serde_json::json!({}))],
+        )
+        .expect("targets");
+        (db, a, b, post)
+    }
+
+    #[test]
+    fn a_post_that_loses_its_only_destination_goes_back_to_draft() {
+        // Left `scheduled` with nowhere to go, it never sent and was later
+        // reported missed — or sat forever under the post-late policy.
+        let (db, account, post) = seeded();
+        db.delete_account(account).expect("delete");
+        assert_eq!(db.get_post(post).expect("post").status, POST_DRAFT);
+    }
+
+    #[test]
+    fn a_scheduled_post_that_loses_one_destination_stays_scheduled() {
+        let (db, a, _, post) = two_destinations();
+        db.delete_account(a).expect("delete");
+        assert_eq!(db.get_post(post).expect("post").status, POST_SCHEDULED);
+        assert_eq!(db.list_targets(post).expect("targets").len(), 1);
+    }
+
+    #[test]
+    fn a_partial_post_that_loses_its_failed_destination_is_published() {
+        let (db, _, b, post) = two_destinations();
+        let targets = db.list_targets(post).expect("targets");
+        db.finish_target_ok(targets[0].id, "1", None).expect("ok");
+        db.finish_target_err(targets[1].id, "nope", None)
+            .expect("fail");
+        assert_eq!(
+            db.reconcile_post_status(post).expect("status"),
+            POST_PARTIAL
+        );
+        assert_eq!(targets[1].account_id, b);
+
+        db.delete_account(b).expect("delete");
+        assert_eq!(db.get_post(post).expect("post").status, POST_PUBLISHED);
+    }
+
+    #[test]
+    fn an_account_cannot_be_disconnected_while_it_is_sending() {
+        let (db, account, post) = seeded();
+        let target = db.list_targets(post).expect("targets")[0].id;
+        assert!(db.claim_target(target).expect("claim"));
+
+        assert!(matches!(
+            db.delete_account(account),
+            Err(AppError::Conflict(_))
+        ));
+        assert!(db.get_account(account).is_ok());
+        assert_eq!(db.list_targets(post).expect("targets").len(), 1);
     }
 
     #[test]

@@ -44,9 +44,6 @@ export const IPC_COMMANDS = {
   saveWebHost: 'save_web_host',
   forgetWebHost: 'forget_web_host',
 
-  metaAdsTools: 'meta_ads_tools',
-  metaAdsCall: 'meta_ads_call',
-
   checkForUpdate: 'check_for_update',
   installUpdate: 'install_update',
   restartAndInstall: 'restart_and_install',
@@ -60,8 +57,6 @@ export const IPC_EVENTS = {
   /** A post or one of its destinations changed. Payload: the post id, or nothing. */
   queueChanged: 'windbag://queue-changed',
   accountsChanged: 'windbag://accounts-changed',
-  /** A destination is being sent right now. Payload: the target id. */
-  publishing: 'windbag://publishing',
   /** A connect flow finished, either way. Payload: `AuthOutcome`. */
   auth: 'windbag://auth',
   notesChanged: 'windbag://notes-changed',

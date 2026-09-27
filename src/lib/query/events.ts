@@ -26,10 +26,6 @@ export async function attachEventBridge(client: QueryClient): Promise<() => void
     subscribeEvent(IPC_EVENTS.accountsChanged, () => {
       void client.invalidateQueries({ queryKey: queryKeys.accounts.root })
     }),
-    // `publishing` fires per destination and carries no new data — the queue
-    // refresh that follows it does. Invalidating here too would mean two round
-    // trips per post for one visual change.
-    subscribeEvent(IPC_EVENTS.publishing, () => {}),
   ])
 
   return () => {

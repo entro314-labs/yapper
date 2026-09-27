@@ -17,6 +17,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tauri::{AppHandle, Emitter};
 
+use crate::commands::EVENT_NOTES_CHANGED;
 use crate::db::{self, Db, DueTarget, POST_MISSED, POST_SCHEDULED};
 use crate::error::{AppError, Result};
 use crate::media;
@@ -39,7 +40,6 @@ const BATCH: usize = 8;
 
 pub const EVENT_QUEUE_CHANGED: &str = "windbag://queue-changed";
 pub const EVENT_ACCOUNTS_CHANGED: &str = "windbag://accounts-changed";
-pub const EVENT_PUBLISHING: &str = "windbag://publishing";
 
 /// What to do with a post whose time passed while Windbag was not running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,7 +118,22 @@ impl Scheduler {
 }
 
 fn run(app: &AppHandle, database: &Arc<Db>, wakeups: &Receiver<()>) {
+    // The MCP server is a separate process writing to the same store, so a
+    // post or note an agent creates raises no event here, and the open UI
+    // never refetched it. `data_version` moves only on another connection's
+    // commit, so each tick can tell cheaply whether that happened.
+    let mut seen: Option<i64> = None;
     loop {
+        match database.data_version() {
+            Ok(version) => {
+                if seen.is_some_and(|last| last != version) {
+                    let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+                    let _ = app.emit(EVENT_NOTES_CHANGED, ());
+                }
+                seen = Some(version);
+            }
+            Err(err) => log::error!("reading the store's data version failed: {err}"),
+        }
         match pass(app, database) {
             Ok(0) => {}
             Ok(count) => log::info!("scheduler settled {count} destination(s)"),
@@ -149,8 +164,14 @@ fn pass(app: &AppHandle, database: &Arc<Db>) -> Result<usize> {
     // prevent — a policy that only holds at boot is not the policy Settings
     // describes. It is idempotent, costs one indexed query, and returns
     // immediately under `PostLate`.
-    if let Err(err) = catch_up(database) {
-        log::error!("catch-up inside the scheduler pass failed: {err}");
+    match catch_up(database) {
+        Ok(0) => {}
+        // Nothing else would tell the open UI: a post just marked missed kept
+        // showing as upcoming until something unrelated refetched the queue.
+        Ok(_) => {
+            let _ = app.emit(EVENT_QUEUE_CHANGED, ());
+        }
+        Err(err) => log::error!("catch-up inside the scheduler pass failed: {err}"),
     }
 
     let due = database.due_targets(Utc::now(), BATCH)?;
@@ -165,17 +186,31 @@ fn pass(app: &AppHandle, database: &Arc<Db>) -> Result<usize> {
         if !database.claim_target(item.target.id)? {
             continue;
         }
+        // The claim moved the post to `publishing`; telling the renderer now
+        // is what puts its guards (no edit, move or post now) up for the
+        // length of the send instead of only after it.
+        let _ = app.emit(EVENT_QUEUE_CHANGED, item.post.id);
         let target_id = item.target.id;
         let post_id = item.post.id;
         let attempts = item.target.attempts + 1;
 
-        let _ = app.emit(EVENT_PUBLISHING, target_id);
         let outcome = publish_one(database, &item);
         settle(database, target_id, post_id, attempts, outcome)?;
         settled += 1;
         let _ = app.emit(EVENT_QUEUE_CHANGED, post_id);
+        if newly_needs_reauth(database, &item.account)? {
+            let _ = app.emit(EVENT_ACCOUNTS_CHANGED, item.account.id);
+        }
     }
     Ok(settled)
+}
+
+/// Whether `before` — the account as it was read for this send — has been
+/// flagged `needs_reauth` since. Checked against the store rather than the
+/// outcome so it holds whatever [`settle`] decides counts as bad credentials.
+fn newly_needs_reauth(database: &Db, before: &db::Account) -> Result<bool> {
+    Ok(before.status != db::ACCOUNT_NEEDS_REAUTH
+        && database.get_account(before.id)?.status == db::ACCOUNT_NEEDS_REAUTH)
 }
 
 /// Everything between a claimed target and a result: fetch credentials, refresh
@@ -299,7 +334,10 @@ pub fn backoff(attempts: i64) -> chrono::Duration {
 /// Inside the grace window nothing happens and the normal pass picks them up.
 /// Past it, [`MissedPolicy`] decides: `PostLate` also leaves them for the normal
 /// pass, `Skip` marks them `missed` so they show up as something that did not go
-/// out rather than quietly arriving hours late.
+/// out rather than quietly arriving hours late. That includes a retry whose
+/// backoff ended while the app was closed (see [`Db::overdue_posts`]); its
+/// unpublished destinations are left for the user to re-time. Returns how many
+/// posts it marked.
 pub fn catch_up(database: &Arc<Db>) -> Result<usize> {
     let policy = MissedPolicy::parse(database.get_meta(META_MISSED_POLICY)?.as_deref());
     if policy == MissedPolicy::PostLate {
@@ -367,8 +405,16 @@ pub fn recover_interrupted(database: &Arc<Db>) -> Result<usize> {
 /// Puts a missed or failed post back in the queue at a new time. Targets that
 /// already published keep their permalink; everything else is cleared of its
 /// error and its backoff.
+///
+/// A published post is refused, as the save path refuses to edit one: with
+/// nothing left to send it would sit `scheduled` and later read as missed.
 pub fn requeue(database: &Arc<Db>, post_id: i64, scheduled_at: &str) -> Result<()> {
     let post = database.get_post(post_id)?;
+    if post.status == db::POST_PUBLISHED {
+        return Err(AppError::Conflict(
+            "This post has already gone out and cannot be rescheduled.".into(),
+        ));
+    }
     database.update_post(
         post_id,
         &post.body,
@@ -383,6 +429,27 @@ pub fn requeue(database: &Arc<Db>, post_id: i64, scheduled_at: &str) -> Result<(
         }
     }
     Ok(())
+}
+
+/// Clears one destination's error and backoff so the next pass tries it
+/// again. Returns its post.
+///
+/// Refused on a post with no time rather than giving it "now": a draft is
+/// explicitly something that does not go out yet, and a retry button that
+/// quietly publishes one is the surprising reading. "Post now" is one click
+/// away for the other intent.
+pub fn retry(database: &Db, target_id: i64) -> Result<i64> {
+    let post_id = database.post_of_target(target_id)?;
+    if database.get_post(post_id)?.scheduled_at.is_none() {
+        return Err(AppError::InvalidInput(
+            "This post has no time, so a retry would never send it. Give it a time, or use \
+             Post now."
+                .into(),
+        ));
+    }
+    database.requeue_target(target_id)?;
+    database.reconcile_post_status(post_id)?;
+    Ok(post_id)
 }
 
 #[cfg(test)]
@@ -539,6 +606,42 @@ mod tests {
     }
 
     #[test]
+    fn an_account_newly_flagged_for_reconnection_is_reported() {
+        // The pass emits accounts-changed on this, which is the only way the
+        // status bar learns an account needs reconnecting.
+        let (database, account, post, target) = store();
+        let before = database.get_account(account).expect("account");
+        settle(
+            &database,
+            target,
+            post,
+            1,
+            Err(AppError::Unauthorized("token revoked".into())),
+        )
+        .expect("settle");
+        assert!(newly_needs_reauth(&database, &before).expect("check"));
+
+        // Already flagged before this send: nothing new to report.
+        let flagged = database.get_account(account).expect("account");
+        assert!(!newly_needs_reauth(&database, &flagged).expect("check"));
+    }
+
+    #[test]
+    fn an_ordinary_failure_does_not_report_the_account() {
+        let (database, account, post, target) = store();
+        let before = database.get_account(account).expect("account");
+        settle(
+            &database,
+            target,
+            post,
+            1,
+            Err(AppError::Platform("503".into())),
+        )
+        .expect("settle");
+        assert!(!newly_needs_reauth(&database, &before).expect("check"));
+    }
+
+    #[test]
     fn the_attempt_log_keeps_the_failure_that_preceded_a_success() {
         let (database, _, post, target) = store();
         settle(
@@ -614,10 +717,99 @@ mod tests {
         // scheduler is mid-way through: only `scheduled` posts are candidates,
         // and a claimed one has moved to `publishing`.
         let (database, _, post, target) = store();
-        database
-            .set_post_status(post, POST_PUBLISHING)
-            .expect("in flight");
         assert!(database.claim_target(target).expect("claim"));
+
+        assert_eq!(catch_up(&database).expect("catch up"), 0);
+        assert_eq!(
+            database.get_post(post).expect("post").status,
+            POST_PUBLISHING
+        );
+    }
+
+    /// A post whose one destination is waiting out a backoff that ends at
+    /// `retry_at`.
+    fn backing_off(retry_at: chrono::DateTime<Utc>) -> (Arc<Db>, i64) {
+        let (database, _, post, target) = store();
+        database
+            .finish_target_err(target, "429", Some(retry_at))
+            .expect("park");
+        assert_eq!(
+            database.reconcile_post_status(post).expect("status"),
+            POST_PUBLISHING
+        );
+        (database, post)
+    }
+
+    #[test]
+    fn catch_up_marks_a_retry_the_app_was_not_running_for_missed() {
+        // Decision H-2: the policy covers a retry that fell due while Windbag
+        // was closed, not only a first send — otherwise a rate-limited post
+        // goes out hours late despite Skip.
+        let (database, post) = backing_off(Utc::now() - chrono::Duration::hours(2));
+
+        assert_eq!(catch_up(&database).expect("catch up"), 1);
+        assert_eq!(database.get_post(post).expect("post").status, POST_MISSED);
+        assert_eq!(
+            database.list_targets(post).expect("targets")[0].status,
+            TARGET_PENDING,
+            "left for the user to re-time"
+        );
+        assert!(
+            database
+                .due_targets(Utc::now(), 10)
+                .expect("due")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn catch_up_leaves_a_retry_still_waiting_its_backoff_alone() {
+        let (database, post) = backing_off(Utc::now() + chrono::Duration::minutes(5));
+        assert_eq!(catch_up(&database).expect("catch up"), 0);
+        assert_eq!(
+            database.get_post(post).expect("post").status,
+            POST_PUBLISHING
+        );
+    }
+
+    #[test]
+    fn catch_up_leaves_a_post_with_a_destination_mid_send_alone() {
+        let (database, first, post, parked) = store();
+        let second = database
+            .upsert_account(
+                PlatformId::Mastodon,
+                &Connected {
+                    remote_id: "id:2".into(),
+                    handle: "other".into(),
+                    display_name: None,
+                    avatar_url: None,
+                    instance: None,
+                    scopes: None,
+                    char_limit: None,
+                    secret: AccountSecret::default(),
+                },
+            )
+            .expect("account");
+        database
+            .set_targets(
+                post,
+                &[
+                    (first, serde_json::json!({})),
+                    (second, serde_json::json!({})),
+                ],
+            )
+            .expect("targets");
+        database
+            .finish_target_err(parked, "429", Some(Utc::now() - chrono::Duration::hours(2)))
+            .expect("park");
+        let sending = database
+            .list_targets(post)
+            .expect("targets")
+            .into_iter()
+            .find(|t| t.account_id == second)
+            .expect("second")
+            .id;
+        assert!(database.claim_target(sending).expect("claim"));
 
         assert_eq!(catch_up(&database).expect("catch up"), 0);
         assert_eq!(
@@ -792,6 +984,87 @@ mod tests {
         assert_eq!(
             database.get_post(post).expect("post").status,
             POST_SCHEDULED
+        );
+    }
+
+    #[test]
+    fn a_published_post_cannot_be_requeued() {
+        // Dragging a published post on the calendar used to set it back to
+        // `scheduled` with nothing left to send; it later showed as missed.
+        let (database, _, post, target) = store();
+        settle(
+            &database,
+            target,
+            post,
+            1,
+            Ok(Published {
+                remote_id: "at://1".into(),
+                remote_url: None,
+            }),
+        )
+        .expect("published");
+
+        let later = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        assert!(matches!(
+            requeue(&database, post, &later),
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            database.get_post(post).expect("post").status,
+            POST_PUBLISHED
+        );
+    }
+
+    #[test]
+    fn retrying_a_destination_of_a_post_with_no_time_is_refused() {
+        // Nothing sends a post without a time, so the retry used to leave it
+        // `publishing` with nothing ever due — only deleting it got out.
+        let (database, _, post, target) = store();
+        settle(
+            &database,
+            target,
+            post,
+            1,
+            Err(AppError::InvalidInput("too long".into())),
+        )
+        .expect("fail");
+        let current = database.get_post(post).expect("post");
+        database
+            .update_post(post, &current.body, None, None, None, db::POST_DRAFT)
+            .expect("unscheduled");
+
+        let err = retry(&database, target).unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
+        assert_eq!(
+            database.list_targets(post).expect("targets")[0].status,
+            TARGET_FAILED
+        );
+        assert_eq!(
+            database.get_post(post).expect("post").status,
+            db::POST_DRAFT
+        );
+    }
+
+    #[test]
+    fn retrying_a_failed_destination_puts_its_post_back_in_flight() {
+        let (database, _, post, target) = store();
+        settle(
+            &database,
+            target,
+            post,
+            1,
+            Err(AppError::InvalidInput("too long".into())),
+        )
+        .expect("fail");
+
+        assert_eq!(retry(&database, target).expect("retry"), post);
+        assert_eq!(
+            database.list_targets(post).expect("targets")[0].status,
+            TARGET_PENDING
+        );
+        assert_eq!(
+            database.get_post(post).expect("post").status,
+            POST_PUBLISHING
         );
     }
 
