@@ -22,10 +22,10 @@
 //! agent host shows each tool call to the person running it.
 
 use std::fmt::Write as _;
-use std::io::Write as _;
-use std::process::{Command, Stdio};
+use std::io::{Read, Write as _};
+use std::process::{Command, Output, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -400,9 +400,9 @@ fn run_apple(_app: &AppHandle, _prompt: &str) -> Result<String> {
 
 /// Runs one CLI with the prompt on stdin.
 ///
-/// `std::process::Command` has no timeout, so the wait happens on a watchdog
-/// thread and the child is killed when it runs over. Without that, a CLI waiting
-/// on an auth prompt it can never receive would hold the request forever.
+/// `std::process::Command` has no timeout, so [`run_with_timeout`] enforces
+/// one. Without it, a CLI waiting on an auth prompt it can never receive would
+/// hold the request forever.
 fn run_cli(cli: &Cli, prompt: &str, model: Option<&str>, effort: Option<&str>) -> Result<String> {
     let mut args: Vec<String> = cli.args.iter().map(|arg| (*arg).to_string()).collect();
     if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
@@ -436,36 +436,22 @@ fn run_cli(cli: &Cli, prompt: &str, model: Option<&str>, effort: Option<&str>) -
         None
     };
 
-    let mut child = Command::new(cli.command)
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut command = Command::new(cli.command);
+    command.args(&args);
+    let output = run_with_timeout(command, prompt.as_bytes(), TIMEOUT)
         .map_err(|err| {
             AppError::InvalidInput(format!(
                 "Could not run `{}` ({err}). Install it, or pick a different assistant \
                  in Settings.",
                 cli.command
             ))
-        })?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        // A broken pipe here means the child exited before reading the prompt;
-        // its own error message is the useful one, so this is not raised.
-        let _ = stdin.write_all(prompt.as_bytes());
-    }
-
-    let output = wait_with_timeout(child, TIMEOUT)
+        })?
         .ok_or_else(|| {
             AppError::Platform(format!(
                 "`{}` did not answer within {} seconds.",
                 cli.command,
                 TIMEOUT.as_secs()
             ))
-        })?
-        .map_err(|err| {
-            AppError::Internal(format!("Could not read `{}`'s answer: {err}", cli.command))
         })?;
 
     if !output.status.success() {
@@ -487,32 +473,99 @@ fn run_cli(cli: &Cli, prompt: &str, model: Option<&str>, effort: Option<&str>) -
     Ok(answer)
 }
 
-/// Waits for a child, killing it past the deadline. `None` means it was killed.
-fn wait_with_timeout(
-    child: std::process::Child,
-    timeout: Duration,
-) -> Option<std::io::Result<std::process::Output>> {
-    let (done, waited) = mpsc::channel();
-    let handle = std::thread::spawn(move || {
-        let result = child.wait_with_output();
-        // The receiver is gone once the deadline passed; the send failing is
-        // exactly that case and needs no handling.
-        let _ = done.send(result);
-    });
+/// How often [`run_with_timeout`] looks at the child. Short enough that a fast
+/// answer is not held back noticeably, long enough to cost nothing over 180 s.
+const POLL: Duration = Duration::from_millis(50);
 
-    match waited.recv_timeout(timeout) {
-        Ok(result) => {
-            let _ = handle.join();
-            Some(result)
+/// Runs `command` with `input` on stdin, killing it at the deadline.
+///
+/// `Ok(None)` means the deadline passed. The child is then killed and reaped
+/// here rather than orphaned — a CLI waiting on an auth prompt it can never
+/// receive would otherwise sit in the process table until logout.
+///
+/// Every blocking pipe operation runs on its own thread and is waited on only
+/// until the deadline. Writing the prompt blocks for good when a child never
+/// reads it and the prompt outgrows the pipe buffer; reading blocks until every
+/// holder of the write end is gone, and a process the CLI started can inherit
+/// stdout and outlive it. Neither may hold the request open. Only the direct
+/// child is killed: its descendants would need a process-group signal, which
+/// takes `unsafe` libc calls this crate does not make, so a descendant that
+/// keeps a pipe open leaves its reader thread parked until it exits.
+fn run_with_timeout(
+    mut command: Command,
+    input: &[u8],
+    timeout: Duration,
+) -> std::io::Result<Option<Output>> {
+    let deadline = Instant::now() + timeout;
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let input = input.to_vec();
+        // A broken pipe here means the child exited before reading the prompt;
+        // its own error message is the useful one, so this is not raised.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
+    let stdout = child
+        .stdout
+        .take()
+        .map(|pipe| in_background(move || read_all(pipe)));
+    let stderr = child
+        .stderr
+        .take()
+        .map(|pipe| in_background(move || read_all(pipe)));
+
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
         }
-        Err(_) => {
-            // `wait_with_output` consumed the child, so it cannot be killed by
-            // handle here — the process is orphaned and will exit on its own
-            // when its pipes close. Both CLIs are short-lived and read stdin to
-            // EOF, so this is a bounded leak rather than an unbounded one.
-            None
+        let now = Instant::now();
+        if now >= deadline {
+            child.kill()?;
+            child.wait()?;
+            return Ok(None);
+        }
+        std::thread::sleep(POLL.min(deadline - now));
+    };
+
+    let mut captured = [Vec::new(), Vec::new()];
+    for (slot, pipe) in captured.iter_mut().zip([stdout, stderr]) {
+        let Some(pipe) = pipe else { continue };
+        match pipe.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(bytes) => *slot = bytes?,
+            Err(_) => return Ok(None),
         }
     }
+    let [stdout, stderr] = captured;
+    Ok(Some(Output {
+        status,
+        stdout,
+        stderr,
+    }))
+}
+
+/// Runs `work` on its own thread; the receiver gets its result.
+fn in_background<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> mpsc::Receiver<T> {
+    let (done, result) = mpsc::channel();
+    std::thread::spawn(move || {
+        // The receiver is gone once the deadline passed; the send failing is
+        // exactly that case and needs no handling.
+        let _ = done.send(work());
+    });
+    result
+}
+
+fn read_all(mut pipe: impl Read) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// The last line of stderr that says something. CLIs print banners, session ids
@@ -704,6 +757,63 @@ mod tests {
     #[test]
     fn an_empty_stderr_still_says_something() {
         assert_eq!(last_meaningful_line("\n  \n"), "no output");
+    }
+
+    /// A scratch path unique to one test, so parallel tests never share files.
+    #[cfg(unix)]
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("windbag-ai-test-{}-{name}", std::process::id()))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_past_the_deadline_is_killed_not_orphaned() {
+        let marker = scratch("killed-marker");
+        let _ = std::fs::remove_file(&marker);
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!("sleep 1; touch '{}'", marker.display()));
+
+        let started = std::time::Instant::now();
+        let finished = run_with_timeout(command, b"", Duration::from_millis(100)).expect("spawns");
+        assert!(
+            finished.is_none(),
+            "a run past its deadline reports a timeout"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        // Had the shell survived the deadline, it would write the marker here.
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(!marker.exists(), "the timed-out child kept running");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_grandchild_holding_the_pipes_does_not_outlive_the_deadline() {
+        // The shell exits at once, but the backgrounded sleep inherits stdout and
+        // keeps it open for 30 s — a reader waiting for EOF would wait that long.
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 30 & echo started");
+
+        let started = std::time::Instant::now();
+        let finished = run_with_timeout(command, b"", Duration::from_millis(300)).expect("spawns");
+        assert!(finished.is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_finishes_in_time_hands_back_its_output() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("cat; echo oops >&2");
+
+        let finished = run_with_timeout(command, b"the prompt", Duration::from_secs(10))
+            .expect("spawns")
+            .expect("finishes in time");
+        assert!(finished.status.success());
+        assert_eq!(finished.stdout, b"the prompt");
+        assert_eq!(finished.stderr, b"oops\n");
     }
 
     #[test]
