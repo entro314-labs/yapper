@@ -383,8 +383,29 @@ function ComposeScreen() {
     return account ? platformById.get(account.platform)?.limits.requiresTitle : false
   })
 
+  // A partly sent post is editable, but what already went out cannot be taken
+  // back or changed — saving re-queues only the destinations that did not
+  // publish, so the user has to know the edit will not reach the others.
+  const alreadySent =
+    id !== undefined && source?.status === 'partial'
+      ? source.targets.flatMap((target) => {
+          const handle =
+            target.status === 'published'
+              ? accounts.data?.find((account) => account.id === target.accountId)?.handle
+              : undefined
+          return handle ? [handle] : []
+        })
+      : []
+
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4">
+      {alreadySent.length > 0 ? (
+        <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs leading-relaxed">
+          Already published to {alreadySent.join(', ')}. Those copies stay as they are: your edits
+          and the new time apply only to the destinations that did not go out.
+        </p>
+      ) : null}
+
       {needsTitle ? (
         <Input
           value={title}

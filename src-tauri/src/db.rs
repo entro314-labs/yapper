@@ -1106,15 +1106,39 @@ fn write_targets(
         ),
         params![post_id],
     )?;
+    // A kept destination that has not published is put back in the queue, as
+    // `requeue_target` does: an edit is a new version of the post, and a failed
+    // row or a running backoff left from the old one would otherwise sit under
+    // a post the user just rescheduled — never sent, later reported missed.
+    // A row mid-send is left alone; the send is still deciding its fate.
     for (account_id, options) in targets {
         conn.execute(
             "INSERT INTO post_targets (post_id, account_id, options)
              VALUES (?1, ?2, ?3)
-             ON CONFLICT(post_id, account_id) DO UPDATE SET options = excluded.options
-             WHERE post_targets.status != ?4",
-            params![post_id, account_id, options.to_string(), TARGET_PUBLISHED],
+             ON CONFLICT(post_id, account_id) DO UPDATE SET
+               options = excluded.options, status = ?4, error = NULL,
+               next_attempt_at = NULL, attempts = 0
+             WHERE post_targets.status NOT IN (?5, ?6)",
+            params![
+                post_id,
+                account_id,
+                options.to_string(),
+                TARGET_PENDING,
+                TARGET_PUBLISHED,
+                TARGET_PUBLISHING
+            ],
         )?;
     }
+    // Every destination left has already published — the user dropped the
+    // ones that failed. Nothing remains to send, so the post is published
+    // rather than `scheduled` with an empty queue behind it.
+    conn.execute(
+        "UPDATE posts SET status = ?2
+          WHERE id = ?1
+            AND EXISTS (SELECT 1 FROM post_targets WHERE post_id = ?1)
+            AND NOT EXISTS (SELECT 1 FROM post_targets WHERE post_id = ?1 AND status != ?3)",
+        params![post_id, POST_PUBLISHED, TARGET_PUBLISHED],
+    )?;
     Ok(())
 }
 

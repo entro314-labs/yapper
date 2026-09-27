@@ -1079,4 +1079,90 @@ mod tests {
         ));
         assert_eq!(database.get_post(id).expect("post").body, "sent");
     }
+
+    /// A post that went to its first destination and failed on its second —
+    /// the case an edit has to put back in the queue.
+    fn partial_post(database: &Db, first: i64) -> (i64, i64, i64) {
+        let second = database
+            .upsert_account(
+                PlatformId::Mastodon,
+                &Connected {
+                    remote_id: "id:2".into(),
+                    handle: "me@example.social".into(),
+                    display_name: None,
+                    avatar_url: None,
+                    instance: None,
+                    scopes: None,
+                    char_limit: None,
+                    secret: AccountSecret::default(),
+                },
+            )
+            .expect("second account");
+        let id = store_post(
+            database,
+            &input(Some("2099-01-01T09:00:00Z"), &[first, second]),
+        )
+        .expect("scheduled");
+        let targets = database.list_targets(id).expect("targets");
+        database
+            .finish_target_ok(targets[0].id, "at://1", Some("https://example.test/1"))
+            .expect("published");
+        assert!(database.claim_target(targets[1].id).expect("claim"));
+        database
+            .finish_target_err(targets[1].id, "boom", None)
+            .expect("failed");
+        assert_eq!(
+            database.reconcile_post_status(id).expect("status"),
+            db::POST_PARTIAL
+        );
+        (id, second, targets[1].id)
+    }
+
+    #[test]
+    fn editing_a_partial_post_requeues_what_did_not_go_out() {
+        let (database, first) = store();
+        let (id, second, failed) = partial_post(&database, first);
+
+        let mut edit = input(Some("2099-02-01T09:00:00Z"), &[first, second]);
+        edit.id = Some(id);
+        edit.body = "hello again".into();
+        store_post(&database, &edit).expect("edit");
+
+        let targets = database.list_targets(id).expect("targets");
+        let published = targets.iter().find(|t| t.account_id == first).expect("a");
+        let retried = targets.iter().find(|t| t.id == failed).expect("b");
+        assert_eq!(published.status, db::TARGET_PUBLISHED);
+        assert_eq!(
+            published.remote_url.as_deref(),
+            Some("https://example.test/1"),
+            "a destination that published is never touched"
+        );
+        assert_eq!(retried.status, db::TARGET_PENDING);
+        assert!(retried.error.is_none());
+        assert!(retried.next_attempt_at.is_none());
+        assert_eq!(retried.attempts, 0);
+        assert_eq!(
+            database.get_post(id).expect("post").status,
+            db::POST_SCHEDULED
+        );
+    }
+
+    #[test]
+    fn dropping_the_failed_destination_of_a_partial_post_leaves_it_published() {
+        // Without this the post is `scheduled` with nothing left to send, and
+        // the missed-post pass later reports it as something that did not go
+        // out.
+        let (database, first) = store();
+        let (id, _, _) = partial_post(&database, first);
+
+        let mut edit = input(Some("2099-02-01T09:00:00Z"), &[first]);
+        edit.id = Some(id);
+        store_post(&database, &edit).expect("edit");
+
+        assert_eq!(database.list_targets(id).expect("targets").len(), 1);
+        assert_eq!(
+            database.get_post(id).expect("post").status,
+            db::POST_PUBLISHED
+        );
+    }
 }
