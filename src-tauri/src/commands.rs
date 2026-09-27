@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::ai::{self, Availability, Backend, DraftRequest, Suggestion};
-use crate::db::{self, Account, Attempt, Db, MediaInput, Note, PostDetail};
+use crate::db::{self, Account, Attempt, Db, MediaInput, Note, PostDetail, PostFields};
 use crate::error::{AppError, Result};
 use crate::platforms::{self, AppCredentials, ConnectInput, MediaSpec, PlatformId, PlatformInfo};
 use crate::scheduler::{
@@ -297,8 +297,13 @@ pub fn list_attempts(state: State<'_, AppState>, post_id: i64) -> Result<Vec<Att
     state.db.list_attempts(post_id)
 }
 
-#[tauri::command]
-pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInput) -> Result<i64> {
+/// The one save path behind the composer's `save_post` and MCP's
+/// `create_post`: the time normalized and checked, the status derived, the
+/// attachments resolved, every destination validated — all before anything is
+/// written — then the post, its media and its targets in one transaction.
+/// Two copies of this drifted before (only one refused a post with no
+/// destinations), which is why there is one.
+pub fn store_post(database: &Db, input: &SavePostInput) -> Result<i64> {
     // Parsed rather than trusted, and stored as canonical UTC: a value the store
     // cannot read back would make the post invisible to the due query, and one
     // kept with its offset would be compared as a string and fire at the wrong
@@ -310,7 +315,7 @@ pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInpu
         .filter(|value| !value.is_empty())
         .map(|value| -> Result<String> {
             let parsed = db::parse_rfc3339(value)?;
-            scheduler::refuse_past(&state.db, parsed)?;
+            scheduler::refuse_past(database, parsed)?;
             Ok(parsed.to_rfc3339())
         })
         .transpose()?;
@@ -323,6 +328,13 @@ pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInpu
             "A scheduled post needs at least one destination. Pick an account, or save it \
              as a draft without a time."
                 .into(),
+        ));
+    }
+    if let Some(id) = input.id
+        && database.get_post(id)?.status == db::POST_PUBLISHED
+    {
+        return Err(AppError::Conflict(
+            "This post has already gone out and cannot be edited.".into(),
         ));
     }
 
@@ -344,9 +356,7 @@ pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInpu
 
     // Everything a destination will be judged on is known before anything is
     // written, so refuse here rather than at 09:00 tomorrow when nobody is
-    // watching — and refuse without leaving a half-saved post behind (a stored
-    // invalid post would fail at its time; an orphaned new one would be
-    // duplicated by the next save, since the composer never learned its id).
+    // watching.
     let media = input
         .media
         .iter()
@@ -371,7 +381,7 @@ pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInpu
         })
         .collect();
     for target in &input.targets {
-        let account = state.db.get_account(target.account_id)?;
+        let account = database.get_account(target.account_id)?;
         let adapter = platforms::adapter(account.platform);
         platforms::validate(
             account.platform,
@@ -384,32 +394,28 @@ pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInpu
         )?;
     }
 
-    let post_id = match input.id {
-        Some(id) => {
-            let existing = state.db.get_post(id)?;
-            if existing.status == db::POST_PUBLISHED {
-                return Err(AppError::Conflict(
-                    "This post has already gone out and cannot be edited.".into(),
-                ));
-            }
-            state
-                .db
-                .update_post(id, &input.body, title, link, scheduled_at, status)?;
-            id
-        }
-        None => state
-            .db
-            .create_post(&input.body, title, link, scheduled_at, status)?,
-    };
-    state.db.set_media(post_id, &media)?;
-
     let targets: Vec<(i64, serde_json::Value)> = input
         .targets
         .iter()
         .map(|target| (target.account_id, target.options.clone()))
         .collect();
-    state.db.set_targets(post_id, &targets)?;
+    database.save_post(
+        input.id,
+        &PostFields {
+            body: &input.body,
+            title,
+            link,
+            scheduled_at,
+            status,
+        },
+        &media,
+        &targets,
+    )
+}
 
+#[tauri::command]
+pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInput) -> Result<i64> {
+    let post_id = store_post(&state.db, &input)?;
     let _ = app.emit(EVENT_QUEUE_CHANGED, post_id);
     state.scheduler.nudge();
     Ok(post_id)
@@ -953,4 +959,104 @@ pub fn meta_ads_call(
 ) -> Result<serde_json::Value> {
     let arguments = arguments.unwrap_or_else(|| serde_json::json!({}));
     crate::metaads::AdsClient::from_store(&state.db)?.call_tool(&name, &arguments)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platforms::{AccountSecret, Connected};
+
+    fn store() -> (Db, i64) {
+        let database = Db::open_in_memory().expect("store");
+        let account = database
+            .upsert_account(
+                PlatformId::Bluesky,
+                &Connected {
+                    remote_id: "did:1".into(),
+                    handle: "me.bsky.social".into(),
+                    display_name: None,
+                    avatar_url: None,
+                    instance: None,
+                    scopes: None,
+                    char_limit: None,
+                    secret: AccountSecret::default(),
+                },
+            )
+            .expect("account");
+        (database, account)
+    }
+
+    fn input(scheduled_at: Option<&str>, accounts: &[i64]) -> SavePostInput {
+        SavePostInput {
+            id: None,
+            body: "hello".into(),
+            title: None,
+            link: None,
+            scheduled_at: scheduled_at.map(str::to_owned),
+            targets: accounts
+                .iter()
+                .map(|account_id| TargetInput {
+                    account_id: *account_id,
+                    options: serde_json::json!({}),
+                })
+                .collect(),
+            media: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_scheduled_post_with_no_destinations_is_refused() {
+        let (database, _) = store();
+        let err = store_post(&database, &input(Some("2099-01-01T09:00:00Z"), &[])).unwrap_err();
+        assert!(err.to_string().contains("destination"), "{err}");
+        assert!(database.list_posts().expect("posts").is_empty());
+    }
+
+    #[test]
+    fn a_draft_may_have_no_destinations_yet() {
+        let (database, _) = store();
+        let id = store_post(&database, &input(None, &[])).expect("draft");
+        assert_eq!(database.get_post(id).expect("post").status, db::POST_DRAFT);
+    }
+
+    #[test]
+    fn a_past_time_is_refused_before_anything_is_written() {
+        let (database, account) = store();
+        let err =
+            store_post(&database, &input(Some("2020-01-01T09:00:00Z"), &[account])).unwrap_err();
+        assert!(err.to_string().contains("already passed"), "{err}");
+        assert!(database.list_posts().expect("posts").is_empty());
+    }
+
+    #[test]
+    fn a_scheduled_post_is_stored_in_utc_with_its_destinations() {
+        let (database, account) = store();
+        let id = store_post(
+            &database,
+            &input(Some("2099-01-01T09:00:00+02:00"), &[account]),
+        )
+        .expect("scheduled");
+        let post = database.get_post(id).expect("post");
+        assert_eq!(post.status, db::POST_SCHEDULED);
+        assert_eq!(
+            post.scheduled_at.as_deref(),
+            Some("2099-01-01T07:00:00+00:00")
+        );
+        assert_eq!(database.list_targets(id).expect("targets").len(), 1);
+    }
+
+    #[test]
+    fn a_published_post_cannot_be_edited() {
+        let (database, account) = store();
+        let id = database
+            .create_post("sent", None, None, None, db::POST_PUBLISHED)
+            .expect("post");
+        let mut edit = input(None, &[account]);
+        edit.id = Some(id);
+        assert!(matches!(
+            store_post(&database, &edit),
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(database.get_post(id).expect("post").body, "sent");
+    }
 }
