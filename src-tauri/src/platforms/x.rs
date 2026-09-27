@@ -18,17 +18,19 @@
 //! credit" from "bad credentials": the first is not something reconnecting fixes,
 //! and not something retrying fixes either.
 //!
-//! The 280-character default is the standard one. Premium accounts get far more,
-//! which is what the per-account `char_limit` override is for.
+//! The 280-character default is the standard one. Premium accounts get far more;
+//! X does not report the tier at connect, so the per-account limit is whatever
+//! is stored in the account's `char_limit`, and 280 when nothing is.
 
 use serde::Deserialize;
 use serde_json::json;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, MediaItem,
     Platform, PlatformId, PlatformInfo, PublishRequest, Published,
 };
-use crate::error::{AppError, Result, from_status};
+use crate::error::{AppError, Result, after_send, from_status, unreadable_after_send};
 use crate::http;
 use crate::oauth::{self, OAuthConfig, REDIRECT_URI};
 use crate::platforms::{MB, MediaRule};
@@ -100,6 +102,27 @@ impl Platform for X {
         }
     }
 
+    /// X's weighted length (twitter-text v3): every URL is 23 whatever its
+    /// length, an emoji sequence is 2 however many scalars build it, and every
+    /// other character is 1 inside X's light ranges (Latin through Hangul Jamo,
+    /// and a few spaces and dashes) and 2 outside them — so CJK halves the
+    /// limit. Counted with `chars()`, a URL-heavy or Japanese post passed here
+    /// and was refused at publish.
+    ///
+    /// `twitter-text` has no maintained Rust port (the crate last shipped in
+    /// 2020), so the rules are implemented here; see [`url_spans`] for where
+    /// URL detection approximates X's. Text is not NFC-normalised first, which
+    /// can only count a decomposed accent high, never low.
+    fn count_body(&self, body: &str) -> usize {
+        let mut total = 0;
+        let mut plain_from = 0;
+        for (start, end) in url_spans(body) {
+            total += weigh(&body[plain_from..start]) + URL_WEIGHT;
+            plain_from = end;
+        }
+        total + weigh(&body[plain_from..])
+    }
+
     fn connect(&self, input: &ConnectInput) -> Result<Connected> {
         let app = input.app()?;
         let (secret, granted_scopes) = oauth::authorize(&config_for(app))?;
@@ -154,7 +177,7 @@ impl Platform for X {
             .map(|item| upload_media(token, item))
             .collect::<Result<Vec<_>>>()?;
 
-        let mut payload = json!({ "text": request.body });
+        let mut payload = json!({ "text": request.text() });
         if !media_ids.is_empty() {
             payload["media"] = json!({ "media_ids": media_ids });
         }
@@ -164,28 +187,122 @@ impl Platform for X {
             payload["reply_settings"] = json!(reply_settings);
         }
 
-        let (status, body) = http::read_body(
+        let body = read(
             http::client()
                 .post(format!("{API_BASE}/tweets"))
                 .bearer_auth(token)
                 .json(&payload)
-                .send()?,
-        );
-        if !(200..300).contains(&status) {
-            return Err(map_error(status, &body));
-        }
+                .send()
+                .map_err(after_send)?,
+        )?;
 
-        let created: Created = serde_json::from_str(&body).map_err(|e| {
-            AppError::Platform(format!(
-                "X accepted the post but the reply was unreadable: {e}"
-            ))
-        })?;
+        let created: Created =
+            serde_json::from_str(&body).map_err(|e| unreadable_after_send("X", e))?;
 
         let handle = request.account.handle.trim_start_matches('@');
         Ok(Published {
             remote_url: Some(format!("https://x.com/{handle}/status/{}", created.data.id)),
             remote_id: created.data.id,
         })
+    }
+}
+
+// ─── Weighted length ────────────────────────────────────────────────────────
+
+/// What X charges for any URL: the length of its `t.co` wrapper.
+const URL_WEIGHT: usize = 23;
+
+/// The generic top-level domains X links without a scheme. Country codes are
+/// handled by shape instead (see [`is_bare_url`]); a TLD missing here only
+/// under-counts a scheme-less link on an unusual domain.
+const GENERIC_TLDS: &[&str] = &[
+    "com", "net", "org", "edu", "gov", "mil", "int", "info", "biz", "name", "pro", "mobi", "app",
+    "dev", "page", "blog", "shop", "store", "online", "site", "tech", "xyz", "club", "live",
+    "news", "media", "art", "design", "cloud", "top", "wiki", "link", "email", "social", "space",
+    "world", "today", "network", "group",
+];
+
+/// Byte spans of the URLs X would shorten: anything starting `http://` or
+/// `https://`, and scheme-less domains X links, minus the sentence's trailing
+/// punctuation.
+fn url_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    for token in text.split(char::is_whitespace) {
+        let token_start = cursor;
+        cursor += token.len()
+            + text[cursor + token.len()..]
+                .chars()
+                .next()
+                .map_or(0, char::len_utf8);
+        let trimmed_start = token.trim_start_matches(['(', '"', '\'']);
+        let candidate =
+            trimmed_start.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'']);
+        if candidate.is_empty() {
+            continue;
+        }
+        let start = token_start + (token.len() - trimmed_start.len());
+        let lowered = candidate.to_ascii_lowercase();
+        let schemed = ["https://", "http://"].iter().any(|scheme| {
+            lowered
+                .strip_prefix(scheme)
+                .is_some_and(|rest| !rest.is_empty())
+        });
+        if schemed || is_bare_url(&lowered) {
+            spans.push((start, start + candidate.len()));
+        }
+    }
+    spans
+}
+
+/// Whether a scheme-less token is a link to X: a dotted host of letters,
+/// digits and hyphens ending in a generic TLD, or in a two-letter country code
+/// when there is a path or more than one label before it — `README.md` is a
+/// file name, `www.example.io` and `example.io/x` are links. An `@` makes it an
+/// address, not a link.
+fn is_bare_url(token: &str) -> bool {
+    if token.contains('@') {
+        return false;
+    }
+    let host_end = token.find(['/', '?', '#', ':']).unwrap_or(token.len());
+    let (host, rest) = token.split_at(host_end);
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2
+        || labels.iter().any(|label| {
+            label.is_empty()
+                || !label
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        })
+    {
+        return false;
+    }
+    let tld = labels[labels.len() - 1];
+    if !tld.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return false;
+    }
+    GENERIC_TLDS.contains(&tld) || (tld.len() == 2 && (rest.starts_with('/') || labels.len() > 2))
+}
+
+/// The weight of text with the URLs taken out: 2 per emoji sequence, else 1 or
+/// 2 per character by X's ranges.
+fn weigh(text: &str) -> usize {
+    text.graphemes(true)
+        .map(|grapheme| {
+            if grapheme.chars().any(super::is_pictographic) {
+                2
+            } else {
+                grapheme.chars().map(char_weight).sum()
+            }
+        })
+        .sum()
+}
+
+/// twitter-text v3's ranges: weight 1 inside them, 2 everywhere else.
+fn char_weight(ch: char) -> usize {
+    match ch as u32 {
+        0..=4351 | 8192..=8205 | 8208..=8223 | 8242..=8247 => 1,
+        _ => 2,
     }
 }
 
@@ -228,16 +345,13 @@ struct MeData {
 }
 
 fn fetch_me(token: &str) -> Result<MeData> {
-    let (status, body) = http::read_body(
+    let body = read(
         http::client()
             .get(format!("{API_BASE}/users/me"))
             .query(&[("user.fields", "profile_image_url")])
             .bearer_auth(token)
             .send()?,
-    );
-    if !(200..300).contains(&status) {
-        return Err(map_error(status, &body));
-    }
+    )?;
 
     let envelope: Envelope = serde_json::from_str(&body)
         .map_err(|e| AppError::Platform(format!("X returned an unreadable profile: {e}")))?;
@@ -267,7 +381,7 @@ fn upload_media(token: &str, item: &MediaItem) -> Result<String> {
 }
 
 fn initialize_upload(token: &str, item: &MediaItem) -> Result<String> {
-    let (status, body) = http::read_body(
+    let body = read(
         http::client()
             .post(format!("{API_BASE}/media/upload/initialize"))
             .bearer_auth(token)
@@ -277,10 +391,7 @@ fn initialize_upload(token: &str, item: &MediaItem) -> Result<String> {
                 "media_category": media_category(&item.mime),
             }))
             .send()?,
-    );
-    if !(200..300).contains(&status) {
-        return Err(map_error(status, &body));
-    }
+    )?;
     let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
         AppError::Platform(format!("X returned an unreadable upload response: {e}"))
     })?;
@@ -306,35 +417,80 @@ fn append_segment(
         .text("segment_index", index.to_string())
         .part("media", part);
 
-    let (status, body) = http::read_body(
+    // APPEND answers 204 with no body when it works.
+    read(
         http::client()
             .post(format!("{API_BASE}/media/upload/{media_id}/append"))
             .bearer_auth(token)
+            .timeout(http::upload_timeout(chunk.len()))
             .multipart(form)
             .send()?,
-    );
-    // APPEND answers 204 with no body when it works.
-    if !(200..300).contains(&status) {
-        return Err(map_error(status, &body));
-    }
+    )?;
     Ok(())
 }
 
+/// FINALIZE, then — for video and GIF, which X transcodes off the request path —
+/// STATUS until the media is usable. A post naming it earlier is refused.
 fn finalize_upload(token: &str, media_id: &str) -> Result<()> {
-    let (status, body) = http::read_body(
+    let mut body = read(
         http::client()
             .post(format!("{API_BASE}/media/upload/{media_id}/finalize"))
             .bearer_auth(token)
             .send()?,
-    );
-    if !(200..300).contains(&status) {
-        return Err(map_error(status, &body));
+    )?;
+    let deadline = std::time::Instant::now() + PROCESSING_BUDGET;
+    while let Some(seconds) = processing_wait(&body)? {
+        let wait = std::time::Duration::from_secs(seconds);
+        if std::time::Instant::now() + wait > deadline {
+            return Err(AppError::Platform(format!(
+                "X is still processing the attachment after {}s.",
+                PROCESSING_BUDGET.as_secs()
+            )));
+        }
+        std::thread::sleep(wait);
+        body = read(
+            http::client()
+                .get(format!("{API_BASE}/media/upload"))
+                .query(&[("command", "STATUS"), ("media_id", media_id)])
+                .bearer_auth(token)
+                .send()?,
+        )?;
     }
     Ok(())
 }
 
+/// How long one attempt waits for X to process a video. Longer fails
+/// retryably; the next attempt uploads again.
+const PROCESSING_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Reads `processing_info` out of a FINALIZE or STATUS answer: `None` when the
+/// media is ready (no `processing_info` at all means it never needed any),
+/// otherwise the seconds X asked us to wait before looking again.
+fn processing_wait(body: &str) -> Result<Option<u64>> {
+    let parsed: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| AppError::Platform(format!("X returned an unreadable media status: {e}")))?;
+    let Some(info) = parsed.pointer("/data/processing_info") else {
+        return Ok(None);
+    };
+    match info.get("state").and_then(serde_json::Value::as_str) {
+        Some("succeeded") => Ok(None),
+        Some("failed") => Err(AppError::InvalidInput(format!(
+            "X could not process the attachment: {}",
+            info.pointer("/error/message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("no reason given")
+        ))),
+        _ => Ok(Some(
+            info.get("check_after_secs")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1)
+                .max(1),
+        )),
+    }
+}
+
 fn set_alt_text(token: &str, media_id: &str, alt: &str) -> Result<()> {
-    let (status, body) = http::read_body(
+    read(
         http::client()
             .post(format!("{API_BASE}/media/metadata"))
             .bearer_auth(token)
@@ -345,11 +501,46 @@ fn set_alt_text(token: &str, media_id: &str, alt: &str) -> Result<()> {
                 "metadata": { "alt_text": { "text": truncate(alt, 1000) } },
             }))
             .send()?,
-    );
-    if !(200..300).contains(&status) {
-        return Err(map_error(status, &body));
-    }
+    )?;
     Ok(())
+}
+
+/// Every X response goes through here: the body on a 2xx, otherwise the
+/// mapped error — carrying, for a rate limit, the wait X's headers named.
+fn read(response: reqwest::blocking::Response) -> Result<String> {
+    let reset = reset_delay(response.headers(), chrono::Utc::now().timestamp());
+    let (status, body) = http::read_body(response);
+    if (200..300).contains(&status) {
+        Ok(body)
+    } else {
+        Err(map_error(status, &body).with_retry_after(reset))
+    }
+}
+
+/// How long a rate-limited response asked us to wait: `Retry-After` when it is
+/// sent, otherwise the reset of whichever window is spent — the 15-minute one
+/// (`x-rate-limit-*`) or the 24-hour user and app caps on posting
+/// (`x-user-limit-24hour-*`, `x-app-limit-24hour-*`). Resets are epoch
+/// seconds; the latest spent one wins, because every spent window refuses.
+fn reset_delay(headers: &reqwest::header::HeaderMap, now: i64) -> Option<std::time::Duration> {
+    let number = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<i64>().ok())
+    };
+    if let Some(seconds) = number("retry-after") {
+        return u64::try_from(seconds)
+            .ok()
+            .map(std::time::Duration::from_secs);
+    }
+    ["x-rate-limit", "x-user-limit-24hour", "x-app-limit-24hour"]
+        .iter()
+        .filter(|window| number(&format!("{window}-remaining")) == Some(0))
+        .filter_map(|window| number(&format!("{window}-reset")))
+        .max()
+        .and_then(|reset| u64::try_from(reset - now).ok())
+        .map(std::time::Duration::from_secs)
 }
 
 fn media_category(mime: &str) -> &'static str {
@@ -377,11 +568,17 @@ fn map_error(status: u16, body: &str) -> AppError {
     // Out of credit is neither a credential problem nor something a retry fixes:
     // it clears when the app's owner buys more. Terminal, with the fix named,
     // beats five silent retries into a dead end.
-    if (status == 403 || status == 402)
+    //
+    // The spend cap also arrives as a 429 — the rate limit's status — told
+    // apart only by its problem type, `.../problems/usage-capped` (seen in
+    // developer-community reports from mid-2026; X's docs do not list it).
+    let usage_capped = lowered.contains("usage-capped") || lowered.contains("usagecapexceeded");
+    if ((status == 403 || status == 402)
         && (lowered.contains("usage")
             || lowered.contains("cap")
             || lowered.contains("credit")
-            || lowered.contains("payment"))
+            || lowered.contains("payment")))
+        || (status == 429 && usage_capped)
     {
         return AppError::InvalidInput(
             "X refused this because the developer app is out of API credit. Posting is \
@@ -427,10 +624,167 @@ mod tests {
         }
     }
 
+    fn headers(pairs: &[(&'static str, &str)]) -> reqwest::header::HeaderMap {
+        let mut map = reqwest::header::HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, value.parse().expect("header value"));
+        }
+        map
+    }
+
     #[test]
-    fn a_plain_403_still_flags_the_account() {
+    fn latin_text_weighs_one_per_character() {
+        assert_eq!(X.count_body("hello"), 5);
+        assert_eq!(X.count_body(&"a".repeat(280)), 280);
+        assert_eq!(X.count_body("café — ok"), 9, "é and the em dash weigh 1");
+    }
+
+    #[test]
+    fn cjk_and_characters_outside_the_light_ranges_weigh_two() {
+        assert_eq!(X.count_body("日本語"), 6);
+        assert_eq!(
+            X.count_body("…"),
+            2,
+            "U+2026 is outside X's weight-1 ranges"
+        );
+    }
+
+    #[test]
+    fn an_emoji_sequence_weighs_two_however_many_scalars_it_has() {
+        assert_eq!(X.count_body("\u{1F600}"), 2);
+        assert_eq!(
+            X.count_body("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+            2,
+            "family"
+        );
+        assert_eq!(X.count_body("1\u{FE0F}\u{20E3}"), 2, "keycap");
+        assert_eq!(X.count_body("\u{1F1EC}\u{1F1F7}"), 2, "flag");
+        assert_eq!(X.count_body("\u{1F44D}\u{1F3FD}"), 2, "skin tone");
+    }
+
+    #[test]
+    fn every_url_weighs_twenty_three() {
+        assert_eq!(
+            X.count_body("https://example.com/a/very/long/path/that/goes/on"),
+            23
+        );
+        assert_eq!(X.count_body("http://x.co"), 23, "short ones too");
+        assert_eq!(
+            X.count_body("see https://example.com."),
+            4 + 23 + 1,
+            "the full stop is the sentence's"
+        );
+        assert_eq!(X.count_body("see example.com now"), 4 + 23 + 4);
+        assert_eq!(X.count_body("www.example.io"), 23);
+        assert_eq!(X.count_body("example.io/path"), 23);
+    }
+
+    #[test]
+    fn a_file_name_is_not_a_url() {
+        // One label and a country-code ending, with no path: X does not link
+        // it, so neither may the counter.
+        assert_eq!(X.count_body("README.md"), 9);
+        assert_eq!(X.count_body("me@example.com"), 14);
+    }
+
+    #[test]
+    fn media_without_processing_info_is_ready_at_once() {
+        let body = r#"{"data":{"id":"1","media_key":"3_1","size":10}}"#;
+        assert_eq!(processing_wait(body).expect("ready"), None);
+    }
+
+    #[test]
+    fn pending_media_waits_as_long_as_x_asks() {
+        let body =
+            r#"{"data":{"id":"1","processing_info":{"state":"pending","check_after_secs":5}}}"#;
+        assert_eq!(processing_wait(body).expect("pending"), Some(5));
+        let body = r#"{"data":{"id":"1","processing_info":{"state":"in_progress","progress_percent":40}}}"#;
+        assert_eq!(processing_wait(body).expect("in progress"), Some(1));
+        let body =
+            r#"{"data":{"id":"1","processing_info":{"state":"succeeded","progress_percent":100}}}"#;
+        assert_eq!(processing_wait(body).expect("done"), None);
+    }
+
+    #[test]
+    fn media_that_failed_processing_is_terminal_with_xs_reason() {
+        let body = r#"{"data":{"id":"1","processing_info":{"state":"failed","error":{"code":1,"name":"InvalidMedia","message":"Unsupported video codec"}}}}"#;
+        let err = processing_wait(body).expect_err("failed");
+        assert!(!err.is_retryable(), "{err}");
+        assert!(err.to_string().contains("Unsupported video codec"), "{err}");
+    }
+
+    #[test]
+    fn a_spent_daily_cap_waits_for_its_reset_not_the_window() {
+        // The 15-minute window still has room; the 24-hour posting cap does
+        // not, and it is the one that decides when a retry can work.
+        let now = 1_000_000;
+        let delay = reset_delay(
+            &headers(&[
+                ("x-rate-limit-remaining", "40"),
+                ("x-rate-limit-reset", "1000900"),
+                ("x-user-limit-24hour-remaining", "0"),
+                ("x-user-limit-24hour-reset", "1036000"),
+            ]),
+            now,
+        );
+        assert_eq!(delay, Some(std::time::Duration::from_secs(36_000)));
+    }
+
+    #[test]
+    fn retry_after_wins_and_no_spent_window_means_no_named_wait() {
+        assert_eq!(
+            reset_delay(&headers(&[("retry-after", "30")]), 0),
+            Some(std::time::Duration::from_secs(30))
+        );
+        assert_eq!(
+            reset_delay(
+                &headers(&[
+                    ("x-rate-limit-remaining", "3"),
+                    ("x-rate-limit-reset", "99")
+                ]),
+                0
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_usage_cap_is_terminal_even_though_it_arrives_as_a_429() {
+        // Pay-per-use: the spend cap comes back as 429, the same status as a
+        // rate limit, and only the problem type tells them apart. Five retries
+        // into a spent balance fix nothing.
+        for body in [
+            r#"{"title":"Too Many Requests","detail":"Too Many Requests","type":"https://api.x.com/2/problems/usage-capped"}"#,
+            r#"{"title":"UsageCapExceeded","detail":"Usage cap exceeded: Monthly product cap","type":"https://api.x.com/2/problems/usage-capped"}"#,
+        ] {
+            let err = map_error(429, body);
+            assert!(!err.is_retryable(), "{err}");
+            assert!(err.to_string().contains("credit"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_plain_rate_limit_stays_retryable() {
+        let err = map_error(
+            429,
+            r#"{"title":"Too Many Requests","detail":"Too Many Requests","type":"about:blank","status":429}"#,
+        );
+        assert!(err.is_retryable(), "{err}");
+    }
+
+    #[test]
+    fn a_403_that_blames_the_authentication_flags_the_account() {
         let err = map_error(403, r#"{"detail":"Unsupported Authentication"}"#);
         assert!(matches!(err, AppError::Unauthorized(_)), "{err}");
+    }
+
+    #[test]
+    fn a_403_for_a_forbidden_action_leaves_the_account_alone() {
+        let err = map_error(
+            403,
+            r#"{"detail":"You are not permitted to perform this action.","status":403}"#,
+        );
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
     }
 
     #[test]

@@ -212,8 +212,9 @@ impl FieldSpec {
 #[expect(clippy::struct_excessive_bools)]
 pub struct Limits {
     /// Body length the platform accepts. Counted in Unicode scalar values, which
-    /// is what most of them actually measure; Bluesky counts graphemes and
-    /// Threads bills emoji by UTF-8 byte, so both override `count_body`.
+    /// is what most of them actually measure; Bluesky counts graphemes, X
+    /// weighs URLs and wide characters, and Threads bills emoji by UTF-8 byte,
+    /// so those three override `count_body`.
     pub max_chars: usize,
     pub max_media: usize,
     /// Every attachment type the ADAPTER can actually post, with the size the
@@ -229,8 +230,9 @@ pub struct Limits {
     /// at compose time rather than at 3am.
     pub requires_media: bool,
     /// Reddit and Facebook: a URL with no text is a whole post — a link
-    /// submission, a link share. Everywhere else the link rides along with the
-    /// text (or is ignored), so it cannot stand in for an empty body.
+    /// submission, a link share. Everywhere else the link is a card beside the
+    /// text or is appended to it (see [`outgoing_text`]); where it is only a
+    /// card it cannot stand in for an empty body.
     pub link_is_content: bool,
 }
 
@@ -419,6 +421,15 @@ pub struct PublishRequest<'a> {
     pub media: &'a [MediaItem],
     /// Per-target options, keyed by the platform's own `target_fields`.
     pub options: &'a serde_json::Value,
+    /// What an earlier attempt at this target left behind to resume from —
+    /// Meta's media container, Bluesky's record key — or `None` when there is
+    /// nothing to pick up. Resuming is what lets a retry after a lost answer
+    /// find the post it already made instead of making a second one.
+    pub resume_key: Option<&'a str>,
+    /// Stores (or with `None`, forgets) the resume key for the next attempt.
+    /// Called BEFORE the request it guards, so a crash in between still leaves
+    /// it behind.
+    pub keep_resume_key: &'a dyn Fn(Option<&str>) -> Result<()>,
 }
 
 impl PublishRequest<'_> {
@@ -428,6 +439,17 @@ impl PublishRequest<'_> {
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
+    }
+
+    /// The text to send — the body with the link appended where the platform
+    /// would otherwise drop it. See [`outgoing_text`].
+    pub fn text(&self) -> std::borrow::Cow<'_, str> {
+        outgoing_text(
+            self.account.platform,
+            self.body,
+            self.link,
+            self.media.len(),
+        )
     }
 }
 
@@ -455,11 +477,71 @@ pub trait Platform: Send + Sync {
 
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published>;
 
-    /// How this platform counts a body against its own limit. Four of the five
-    /// count Unicode scalar values; Bluesky counts graphemes.
+    /// How this platform counts a body against its own limit. Most count
+    /// Unicode scalar values; Bluesky, X and Threads override it.
     fn count_body(&self, body: &str) -> usize {
         body.chars().count()
     }
+
+    /// Whether this adapter posts the post's link as a link of its own — a
+    /// link submission, an article card, a link share — for this body and this
+    /// many attachments. Where it does not, [`outgoing_text`] puts the link in
+    /// the text so it is never silently dropped.
+    fn posts_link_natively(&self, _body: &str, _media_count: usize) -> bool {
+        false
+    }
+}
+
+/// The text an adapter actually sends: the body, plus the post's link on a
+/// line of its own wherever the platform has no native place for it in the
+/// shape being posted (see [`Platform::posts_link_natively`]). A link the body
+/// already carries is not repeated.
+///
+/// Both the adapters and [`counted_length`] go through here, so the appended
+/// link is counted against the limit exactly as it will be sent.
+pub fn outgoing_text<'a>(
+    id: PlatformId,
+    body: &'a str,
+    link: Option<&str>,
+    media_count: usize,
+) -> std::borrow::Cow<'a, str> {
+    let Some(link) = link.map(str::trim).filter(|value| !value.is_empty()) else {
+        return std::borrow::Cow::Borrowed(body);
+    };
+    if body.contains(link) || adapter(id).posts_link_natively(body, media_count) {
+        return std::borrow::Cow::Borrowed(body);
+    }
+    let body = body.trim_end();
+    std::borrow::Cow::Owned(if body.is_empty() {
+        link.to_string()
+    } else {
+        format!("{body}\n{link}")
+    })
+}
+
+/// Codepoints that make whatever grapheme holds them an emoji, for the two
+/// platforms that price emoji differently from text (X by sequence, Threads by
+/// byte). A range test rather than Unicode's `Extended_Pictographic` table,
+/// which would be a dependency for two counters. It errs wide: a stray arrow or
+/// `©` counted as emoji makes the counter refuse a post the platform would
+/// take, which is visible and fixable; the opposite fails a scheduled post.
+pub(crate) fn is_pictographic(ch: char) -> bool {
+    matches!(ch as u32,
+        // The emoji planes, regional indicators and skin tones included.
+        0x1F000..=0x1FAFF
+        | 0x2600..=0x27BF // misc symbols and dingbats
+        | 0x2B00..=0x2BFF // arrows and misc symbols (⬛ ⭐)
+        | 0x2300..=0x23FF // misc technical (⌚ ⏰ ⏩)
+        | 0x2190..=0x21FF // arrows (↔ ↩)
+        | 0x25A0..=0x25FF // geometric shapes (▶ ◻)
+        | 0x2934 | 0x2935 // ⤴ ⤵
+        | 0x00A9 | 0x00AE // © ®
+        | 0x203C | 0x2049 // ‼ ⁉
+        | 0x2122 | 0x2139 // ™ ℹ
+        | 0x24C2 // Ⓜ
+        | 0x3030 | 0x303D | 0x3297 | 0x3299 // 〰 〽 ㊗ ㊙
+        | 0x20E3 // the keycap that makes `1` into 1️⃣
+    )
 }
 
 pub fn adapter(id: PlatformId) -> &'static dyn Platform {
@@ -481,10 +563,22 @@ pub fn adapter(id: PlatformId) -> &'static dyn Platform {
 /// Both callers need exactly this: the scheduler before it publishes, and
 /// [`crate::stats`] before it reads engagement. X's access tokens live two
 /// hours, so a reporting read on a day-old token fails without it.
+///
+/// The load → refresh → store runs under a per-account lock, and the secret is
+/// read only once the lock is held. The scheduler and a stats refresh can both
+/// arrive here for the same account; X and AT Protocol rotate refresh tokens,
+/// so without the lock both would present the same one and the second refresh
+/// would be refused — flagging a working account for reconnection. With it, the
+/// second caller reads the first one's fresh token and has nothing to refresh.
+/// (The MCP binary is a separate process and never refreshes.)
 pub fn live_secret(
     database: &crate::db::Db,
     account: &crate::db::Account,
 ) -> Result<AccountSecret> {
+    let lock = account_lock(account.id);
+    let _held = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let adapter = adapter(account.platform);
     let app_credentials =
         crate::secrets::load_app_credentials(account.platform, account.instance.as_deref())?;
@@ -498,6 +592,17 @@ pub fn live_secret(
         }
         None => Ok(secret),
     }
+}
+
+/// The lock [`live_secret`] holds for one account, created on first use.
+fn account_lock(account_id: i64) -> std::sync::Arc<std::sync::Mutex<()>> {
+    type Locks = std::sync::Mutex<HashMap<i64, std::sync::Arc<std::sync::Mutex<()>>>>;
+    static LOCKS: std::sync::OnceLock<Locks> = std::sync::OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Locks::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::sync::Arc::clone(locks.entry(account_id).or_default())
 }
 
 pub fn all_info() -> Vec<PlatformInfo> {
@@ -522,11 +627,15 @@ pub fn validate(
 ) -> Result<()> {
     let platform = adapter(id);
     let info = platform.info();
-    let length = counted_length(id, body, options);
+    let length = counted_length(id, body, link, media.len(), options);
 
     let stands_on_link =
         info.limits.link_is_content && link.is_some_and(|url| !url.trim().is_empty());
-    if body.trim().is_empty() && media.is_empty() && !stands_on_link {
+    // Judged on what will be sent: where the link is appended it is text.
+    if outgoing_text(id, body, link, media.len()).trim().is_empty()
+        && media.is_empty()
+        && !stands_on_link
+    {
         // Only what this platform can actually carry is offered as the fix.
         let mut options = vec!["text"];
         if info.limits.max_media > 0 {
@@ -632,17 +741,25 @@ fn check_media(info: &PlatformInfo, media: &[MediaSpec]) -> Result<()> {
     Ok(())
 }
 
-/// The length a platform holds against its limit: the body, plus any
-/// per-destination option it bills to the same budget (Mastodon's content
+/// The length a platform holds against its limit: the text as it will be sent
+/// (the body, with the link appended where [`outgoing_text`] appends it), plus
+/// any per-destination option it bills to the same budget (Mastodon's content
 /// warning). Shared with the composer's counter so the two cannot disagree.
-pub fn counted_length(id: PlatformId, body: &str, options: &serde_json::Value) -> usize {
+pub fn counted_length(
+    id: PlatformId,
+    body: &str,
+    link: Option<&str>,
+    media_count: usize,
+    options: &serde_json::Value,
+) -> usize {
     let platform = adapter(id);
+    let text = outgoing_text(id, body, link, media_count);
     platform
         .info()
         .target_fields
         .iter()
         .filter(|field| field.counted)
-        .fold(platform.count_body(body), |total, field| {
+        .fold(platform.count_body(&text), |total, field| {
             total + option_value(options, field.key).map_or(0, |value| platform.count_body(value))
         })
 }
@@ -730,7 +847,10 @@ mod tests {
         let short = serde_json::json!({ "spoiler_text": "y".repeat(10) });
         assert!(validate(PlatformId::Mastodon, &body, None, None, &[], &long, 500).is_err());
         assert!(validate(PlatformId::Mastodon, &body, None, None, &[], &short, 500).is_ok());
-        assert_eq!(counted_length(PlatformId::Mastodon, &body, &long), 510);
+        assert_eq!(
+            counted_length(PlatformId::Mastodon, &body, None, 0, &long),
+            510
+        );
     }
 
     fn spec(mime: &str, bytes: u64) -> MediaSpec {
@@ -1047,7 +1167,8 @@ mod tests {
             )
             .is_ok()
         );
-        // Bluesky ignores the link field, so a link alone would post nothing.
+        // Bluesky has no link field, so the link is sent as the text — and a
+        // link alone is therefore a post there too.
         assert!(
             validate(
                 PlatformId::Bluesky,
@@ -1058,7 +1179,7 @@ mod tests {
                 &serde_json::json!({}),
                 300
             )
-            .is_err()
+            .is_ok()
         );
         assert!(
             validate(
@@ -1080,6 +1201,111 @@ mod tests {
         let flag = "\u{1F1EC}\u{1F1E7}";
         assert_eq!(bluesky::Bluesky.count_body(flag), 1);
         assert_eq!(flag.chars().count(), 2);
+    }
+
+    const LINK: Option<&str> = Some("https://example.com/post");
+
+    #[test]
+    fn a_link_with_nowhere_native_to_go_is_appended_on_its_own_line() {
+        for id in [PlatformId::Bluesky, PlatformId::X, PlatformId::Mastodon] {
+            assert_eq!(
+                outgoing_text(id, "hello", LINK, 0),
+                "hello\nhttps://example.com/post",
+                "{id}"
+            );
+        }
+        assert_eq!(
+            outgoing_text(PlatformId::Bluesky, "", LINK, 0),
+            "https://example.com/post"
+        );
+    }
+
+    #[test]
+    fn a_link_the_platform_posts_itself_is_not_repeated_in_the_text() {
+        // Link share, article card, link attachment, link submission.
+        for id in [
+            PlatformId::Facebook,
+            PlatformId::Linkedin,
+            PlatformId::Threads,
+        ] {
+            assert_eq!(outgoing_text(id, "hello", LINK, 0), "hello", "{id}");
+        }
+        assert_eq!(outgoing_text(PlatformId::Reddit, "", LINK, 0), "");
+    }
+
+    #[test]
+    fn a_link_those_platforms_cannot_attach_beside_media_goes_in_the_text() {
+        for id in [
+            PlatformId::Facebook,
+            PlatformId::Linkedin,
+            PlatformId::Threads,
+            PlatformId::Instagram,
+        ] {
+            assert!(
+                outgoing_text(id, "hello", LINK, 1).ends_with("\nhttps://example.com/post"),
+                "{id}"
+            );
+        }
+        // A Reddit self post has no link field either.
+        assert!(outgoing_text(PlatformId::Reddit, "body", LINK, 0).ends_with("/post"));
+    }
+
+    #[test]
+    fn a_link_already_in_the_body_is_not_added_twice() {
+        let body = "read https://example.com/post today";
+        assert_eq!(outgoing_text(PlatformId::X, body, LINK, 0), body);
+    }
+
+    #[test]
+    fn the_appended_link_counts_against_the_limit() {
+        let body = "x".repeat(290);
+        assert_eq!(
+            counted_length(PlatformId::Bluesky, &body, LINK, 0, &serde_json::json!({})),
+            290 + 1 + LINK.map_or(0, str::len)
+        );
+        let err = validate(
+            PlatformId::Bluesky,
+            &body,
+            None,
+            LINK,
+            &[],
+            &serde_json::json!({}),
+            300,
+        )
+        .expect_err("over once the link is in");
+        assert!(err.to_string().contains("300"), "{err}");
+    }
+
+    #[test]
+    fn one_account_is_refreshed_by_one_caller_at_a_time() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        // Two callers on the same account must not overlap inside the lock —
+        // that overlap is two refreshes presenting one rotating token.
+        let inside = std::sync::Arc::new(AtomicBool::new(false));
+        let overlaps = std::sync::Arc::new(AtomicUsize::new(0));
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let inside = std::sync::Arc::clone(&inside);
+                let overlaps = std::sync::Arc::clone(&overlaps);
+                std::thread::spawn(move || {
+                    let lock = account_lock(-7);
+                    let _held = lock.lock().expect("lock");
+                    if inside.swap(true, Ordering::SeqCst) {
+                        overlaps.fetch_add(1, Ordering::SeqCst);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    inside.store(false, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+        assert_eq!(overlaps.load(Ordering::SeqCst), 0);
+        assert!(
+            !std::sync::Arc::ptr_eq(&account_lock(-7), &account_lock(-8)),
+            "different accounts never wait on each other"
+        );
     }
 
     #[test]

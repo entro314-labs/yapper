@@ -178,6 +178,10 @@ impl Platform for Bluesky {
             || normalize_pds(request.account.instance.as_deref()),
             str::to_string,
         );
+        if let Some(done) = already_created(request, &pds)? {
+            return Ok(done);
+        }
+        let rkey = record_key(request)?;
         let app_password = request.secret.extra_str("app_password").ok_or_else(|| {
             AppError::Unauthorized(
                 "The stored Bluesky app password is missing. Reconnect the account.".into(),
@@ -186,7 +190,7 @@ impl Platform for Bluesky {
 
         let session = create_session(&pds, &request.account.remote_id, app_password)?;
 
-        let mut record = post_record(request.body);
+        let mut record = post_record(&request.text());
 
         if !request.media.is_empty() {
             let images = request
@@ -210,6 +214,7 @@ impl Platform for Bluesky {
                 .json(&json!({
                     "repo": session.did,
                     "collection": COLLECTION,
+                    "rkey": rkey,
                     "record": record,
                 }))
                 .send()?,
@@ -251,7 +256,8 @@ fn post_record(body: &str) -> serde_json::Value {
         // moment the post actually goes out rather than when it was composed.
         "createdAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     });
-    let facets = link_facets(body);
+    let mut facets = link_facets(body);
+    facets.extend(tag_facets(body));
     if !facets.is_empty() {
         record["facets"] = json!(facets);
     }
@@ -366,8 +372,12 @@ fn refresh_oauth(did: &str, secret: &AccountSecret) -> Result<AccountSecret> {
 
 fn publish_oauth(request: &PublishRequest<'_>) -> Result<Published> {
     let context = oauth_context(request.secret)?;
+    if let Some(done) = already_created(request, &context.pds)? {
+        return Ok(done);
+    }
+    let rkey = record_key(request)?;
 
-    let mut record = post_record(request.body);
+    let mut record = post_record(&request.text());
     if !request.media.is_empty() {
         let images = request
             .media
@@ -387,6 +397,7 @@ fn publish_oauth(request: &PublishRequest<'_>) -> Result<Published> {
     let payload = json!({
         "repo": request.account.remote_id,
         "collection": COLLECTION,
+        "rkey": rkey,
         "record": record,
     });
     let (status, body) = dpop::send(&context.key, "POST", &url, Some(&context.token), || {
@@ -417,6 +428,7 @@ fn oauth_upload_blob(
         http::client()
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, mime)
+            .timeout(http::upload_timeout(bytes.len()))
             .body(bytes.to_vec())
     })?;
     if !(200..300).contains(&status) {
@@ -510,6 +522,7 @@ fn upload_blob(pds: &str, access_jwt: &str, bytes: &[u8], mime: &str) -> Result<
             .post(format!("{pds}/xrpc/com.atproto.repo.uploadBlob"))
             .bearer_auth(access_jwt)
             .header(reqwest::header::CONTENT_TYPE, mime)
+            .timeout(http::upload_timeout(bytes.len()))
             .body(bytes.to_vec())
             .send()?,
     );
@@ -525,6 +538,85 @@ fn upload_blob(pds: &str, access_jwt: &str, bytes: &[u8], mime: &str) -> Result<
         .get("blob")
         .cloned()
         .ok_or_else(|| AppError::Platform("Bluesky's upload response carried no blob.".into()))
+}
+
+// ─── Record keys ────────────────────────────────────────────────────────────
+//
+// Every post is created under a record key chosen HERE and stored on the target
+// before `createRecord` goes out. A retry therefore asks the PDS whether that
+// key already holds a record — the earlier attempt landed and only its answer
+// was lost — and if so reports that post instead of creating a second one.
+// Asking first matters: the reference PDS answers a create on a taken key with
+// a bare 500, which would read as an outage and be retried for ever.
+//
+// Minted fresh rather than derived from the target id: target ids restart at 1
+// in a new or reset store, and the same key in the same repo would make an old
+// post read as this one.
+
+const TID_ALPHABET: &str = "234567abcdefghijklmnopqrstuvwxyz";
+
+/// A TID, the key type `app.bsky.feed.post` declares: the top bit 0, 53 bits of
+/// microseconds since the epoch, 10 bits of clock id, written as 13
+/// base32-sortable characters.
+fn tid(micros: u64, clock: u16) -> String {
+    let value = ((micros & ((1 << 53) - 1)) << 10) | u64::from(clock & 0x3FF);
+    let alphabet = TID_ALPHABET.as_bytes();
+    (0..13u32)
+        .rev()
+        .map(|digit| {
+            let index = usize::try_from((value >> (digit * 5)) & 31).unwrap_or_default();
+            char::from(alphabet[index])
+        })
+        .collect()
+}
+
+/// The post an earlier attempt already created under this target's key, if
+/// there is one.
+fn already_created(request: &PublishRequest<'_>, pds: &str) -> Result<Option<Published>> {
+    let Some(rkey) = request.resume_key else {
+        return Ok(None);
+    };
+    // `getRecord` is public on every PDS, so neither auth path needs a token.
+    let (status, body) = http::read_body(
+        http::client()
+            .get(format!("{pds}/xrpc/com.atproto.repo.getRecord"))
+            .query(&[
+                ("repo", request.account.remote_id.as_str()),
+                ("collection", COLLECTION),
+                ("rkey", rkey),
+            ])
+            .send()?,
+    );
+    Ok(found_record(status, &body)?.map(|uri| Published {
+        remote_url: Some(permalink(&request.account.handle, &uri)),
+        remote_id: uri,
+    }))
+}
+
+/// A `getRecord` answer: the record's URI, `None` for a key nothing holds.
+fn found_record(status: u16, body: &str) -> Result<Option<String>> {
+    if (200..300).contains(&status) {
+        let record: CreateRecord = serde_json::from_str(body).map_err(|e| {
+            AppError::Platform(format!("Bluesky returned an unreadable record: {e}"))
+        })?;
+        return Ok(Some(record.uri));
+    }
+    if status == 400 && body.contains("RecordNotFound") {
+        return Ok(None);
+    }
+    Err(from_status(status, body, "Bluesky"))
+}
+
+/// The key this attempt creates the post under: the stored one on a retry, a
+/// fresh TID — stored before it is used — otherwise.
+fn record_key(request: &PublishRequest<'_>) -> Result<String> {
+    if let Some(rkey) = request.resume_key {
+        return Ok(rkey.to_string());
+    }
+    let micros = u64::try_from(chrono::Utc::now().timestamp_micros()).unwrap_or_default();
+    let rkey = tid(micros, rand::random::<u16>());
+    (request.keep_resume_key)(Some(&rkey))?;
+    Ok(rkey)
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -603,6 +695,74 @@ fn is_url_terminator(byte: u8) -> bool {
     byte.is_ascii_whitespace() || byte == b'<' || byte == b'>' || byte == b'"'
 }
 
+/// Hashtags, found by the rules Bluesky's own client uses (`TAG_REGEX` and
+/// `detectFacets` in `@atproto/api`), so a tag Windbag posts is the tag
+/// bsky.app would have made of the same text. Like a link, a `#word` with no
+/// facet is plain text: not clickable, not searchable as a tag.
+///
+/// A tag starts with `#` or `＃` at the start of the text or after whitespace
+/// — which is also what keeps a URL's `#fragment` out — and runs to the next
+/// whitespace or invisible separator. It must hold at least one character that
+/// is neither a digit nor punctuation (`#1` is not a tag, `#1st` is), loses its
+/// trailing punctuation, and is dropped past 64 graphemes. The facet spans the
+/// `#` and the tag; the tag value is stored without it.
+fn tag_facets(text: &str) -> Vec<serde_json::Value> {
+    // Zero-width and soft separators the reference regex also stops at.
+    const INVISIBLE: [char; 7] = [
+        '\u{00AD}', '\u{2060}', '\u{200A}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{20E2}',
+    ];
+    let ends_tag = |ch: char| ch.is_whitespace() || INVISIBLE.contains(&ch);
+
+    let mut facets = Vec::new();
+    let mut previous: Option<char> = None;
+    for (start, hash) in text.char_indices() {
+        let after_space = previous.is_none_or(char::is_whitespace);
+        previous = Some(hash);
+        if !(after_space && (hash == '#' || hash == '＃')) {
+            continue;
+        }
+        let rest = &text[start + hash.len_utf8()..];
+        let run = &rest[..rest.find(ends_tag).unwrap_or(rest.len())];
+        // `#️⃣` is the keycap emoji, not a tag.
+        if run.starts_with('\u{FE0F}')
+            || !run
+                .chars()
+                .any(|ch| !ch.is_ascii_digit() && !is_punctuation(ch))
+        {
+            continue;
+        }
+        let tag = run.trim_end_matches(is_punctuation);
+        if tag.is_empty() || tag.graphemes(true).count() > 64 {
+            continue;
+        }
+        let end = start + hash.len_utf8() + tag.len();
+        facets.push(json!({
+            "index": { "byteStart": start, "byteEnd": end },
+            "features": [{ "$type": "app.bsky.richtext.facet#tag", "tag": tag }],
+        }));
+    }
+    facets
+}
+
+/// Unicode's punctuation category (`\p{P}`) for the scripts a post is likely to
+/// use: ASCII, Latin-1, General Punctuation, CJK and fullwidth forms. Not the
+/// symbols — `$`, `+`, `<`, `=`, `>`, `^`, `` ` ``, `|`, `~` are not
+/// punctuation to Unicode, and the reference client keeps them in a tag.
+fn is_punctuation(ch: char) -> bool {
+    matches!(ch,
+        '!' | '"' | '#' | '%' | '&' | '\'' | '(' | ')' | '*' | ',' | '-' | '.' | '/'
+        | ':' | ';' | '?' | '@' | '[' | '\\' | ']' | '_' | '{' | '}'
+        | '\u{A1}' | '\u{A7}' | '\u{AB}' | '\u{B6}' | '\u{B7}' | '\u{BB}' | '\u{BF}'
+        | '\u{2010}'..='\u{2027}' | '\u{2030}'..='\u{2043}' | '\u{2045}'..='\u{2051}'
+        | '\u{2053}'..='\u{205E}'
+        | '\u{3001}'..='\u{3003}' | '\u{3008}'..='\u{3011}' | '\u{3014}'..='\u{301F}'
+        | '\u{3030}' | '\u{303D}' | '\u{30FB}'
+        | '\u{FF01}'..='\u{FF03}' | '\u{FF05}'..='\u{FF0A}' | '\u{FF0C}'..='\u{FF0F}'
+        | '\u{FF1A}' | '\u{FF1B}' | '\u{FF1F}' | '\u{FF20}' | '\u{FF3B}'..='\u{FF3D}'
+        | '\u{FF3F}' | '\u{FF5B}' | '\u{FF5D}' | '\u{FF5F}'..='\u{FF65}'
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,6 +798,117 @@ mod tests {
             ),
             "https://bsky.app/profile/me.bsky.social/post/3kabc"
         );
+    }
+
+    #[test]
+    fn a_record_key_is_a_valid_tid() {
+        // The atproto TID spec: 13 base32-sortable characters, the first one
+        // limited because the top bit is always 0.
+        for (micros, clock) in [(0, 0), (1_790_000_000_000_000, 1023), ((1 << 53) - 1, 7)] {
+            let key = tid(micros, clock);
+            assert_eq!(key.len(), 13, "{key}");
+            assert!("234567abcdefghij".contains(&key[..1]), "{key}");
+            assert!(key.chars().all(|ch| TID_ALPHABET.contains(ch)), "{key}");
+        }
+        assert_eq!(tid(0, 0), "2222222222222");
+    }
+
+    #[test]
+    fn later_record_keys_sort_after_earlier_ones() {
+        assert!(tid(1_790_000_000_000_001, 0) > tid(1_790_000_000_000_000, 1023));
+    }
+
+    #[test]
+    fn a_missing_record_is_not_an_error_and_a_found_one_yields_its_uri() {
+        assert_eq!(
+            found_record(
+                400,
+                r#"{"error":"RecordNotFound","message":"Could not locate record"}"#
+            )
+            .expect("not found"),
+            None
+        );
+        assert_eq!(
+            found_record(
+                200,
+                r#"{"uri":"at://did:plc:a/app.bsky.feed.post/3k","cid":"b","value":{}}"#
+            )
+            .expect("found"),
+            Some("at://did:plc:a/app.bsky.feed.post/3k".to_string())
+        );
+        assert!(
+            found_record(503, "down")
+                .expect_err("outage")
+                .is_retryable()
+        );
+    }
+
+    /// The tags `tag_facets` found, with the text each facet spans.
+    fn tags(text: &str) -> Vec<(String, String)> {
+        tag_facets(text)
+            .iter()
+            .map(|facet| {
+                let (start, end) = span(facet);
+                (
+                    facet["features"][0]["tag"]
+                        .as_str()
+                        .expect("tag")
+                        .to_string(),
+                    text[start..end].to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_hashtag_gets_a_tag_facet_over_its_byte_range() {
+        assert_eq!(
+            tags("shipping #rust today"),
+            vec![("rust".into(), "#rust".into())]
+        );
+    }
+
+    #[test]
+    fn trailing_punctuation_is_not_part_of_the_tag() {
+        assert_eq!(
+            tags("so good #rust!"),
+            vec![("rust".into(), "#rust".into())]
+        );
+        assert_eq!(tags("(#rust)."), vec![], "a tag must follow a space");
+    }
+
+    #[test]
+    fn digits_alone_are_not_a_tag_but_digits_with_letters_are() {
+        assert!(tags("we are #1").is_empty());
+        assert_eq!(tags("#1st"), vec![("1st".into(), "#1st".into())]);
+    }
+
+    #[test]
+    fn a_fragment_inside_a_url_is_not_a_tag() {
+        assert!(tags("see https://example.com/#section").is_empty());
+        assert!(tags("a#b").is_empty());
+    }
+
+    #[test]
+    fn tag_ranges_are_utf8_bytes_and_non_latin_tags_count() {
+        assert_eq!(
+            tags("καλημέρα #ελλάδα"),
+            vec![("ελλάδα".into(), "#ελλάδα".into())]
+        );
+        assert_eq!(tags("＃日本"), vec![("日本".into(), "＃日本".into())]);
+    }
+
+    #[test]
+    fn a_keycap_and_an_overlong_tag_are_skipped() {
+        assert!(tags("press #\u{FE0F}\u{20E3}").is_empty());
+        assert!(tags(&format!("#{}", "a".repeat(65))).is_empty());
+        assert_eq!(tags(&format!("#{}", "a".repeat(64))).len(), 1);
+    }
+
+    #[test]
+    fn a_record_carries_link_and_tag_facets_together() {
+        let record = post_record("read https://example.com #rust");
+        assert_eq!(record["facets"].as_array().expect("facets").len(), 2);
     }
 
     #[test]

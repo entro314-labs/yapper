@@ -11,15 +11,15 @@
 //!
 //! Anything with video in it is processed ASYNCHRONOUSLY. The container comes
 //! back immediately and is not publishable until its `status` reaches `FINISHED`,
-//! so [`await_container`] polls before publishing rather than letting the publish
-//! fail with an error about a container that was merely not ready yet.
+//! so [`super::Containers`] polls before publishing — and keeps the container on
+//! the target so a retry resumes it rather than building another.
 //!
 //! Media is FETCHED BY META from a public URL — there is no byte upload — so an
 //! attachment is parked through [`crate::webhost`] first.
 
 use serde_json::json;
 
-use super::{Grant, get_json, id_of, post_form, token_get};
+use super::{ContainerBuild, Containers, Grant, get_json, id_of, post_form, token_get};
 use crate::error::{AppError, Result};
 use crate::platforms::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, MediaItem,
@@ -37,13 +37,6 @@ const REFRESH_URL: &str = "https://graph.threads.net/refresh_access_token";
 pub(crate) const API_BASE: &str = "https://graph.threads.net/v1.0";
 const SCOPES: &str = "threads_basic,threads_content_publish";
 const LABEL: &str = "Threads";
-
-/// Threads processes video containers off the request path. Twelve tries two
-/// seconds apart is a bit over 20 seconds — comfortably enough for an image or a
-/// short clip, and short enough that a stuck container fails the target and gets
-/// retried by the scheduler rather than pinning a worker thread.
-const POLL_TRIES: usize = 12;
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// JPEG and PNG up to 8 MB, MP4 up to 1 GB, mixed freely in a carousel:
 /// <https://developers.facebook.com/docs/threads/overview>
@@ -235,29 +228,53 @@ impl Platform for Threads {
         }))
     }
 
+    /// `link_attachment` exists only on a text-only container; with media the
+    /// link goes in the text.
+    fn posts_link_natively(&self, _body: &str, media_count: usize) -> bool {
+        media_count == 0
+    }
+
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published> {
         let token = &request.secret.access_token;
-        let user = &request.account.remote_id;
-        let containers = format!("{API_BASE}/{user}/threads");
+        let containers = format!("{API_BASE}/{}/threads", request.account.remote_id);
 
         // Attachments are parked publicly first — Meta fetches them itself, and
-        // only ever over HTTPS.
-        let hosted = if request.media.is_empty() {
-            Vec::new()
-        } else {
+        // only ever over HTTPS. Inside the builders, so a resumed container
+        // does not upload them again.
+        let host_all = || -> Result<Vec<(&MediaItem, String)>> {
             let host = webhost::require()?;
             request
                 .media
                 .iter()
                 .map(|item| Ok((item, webhost::upload(&host, item)?.url)))
-                .collect::<Result<Vec<_>>>()?
+                .collect()
         };
-
-        let creation_id = match hosted.len() {
-            0 => {
+        let children = || -> Result<Vec<String>> {
+            host_all()?
+                .iter()
+                .map(|(item, url)| {
+                    let mut form = single_media_form(item, url, token);
+                    form.push(("is_carousel_item".into(), "true".into()));
+                    create_container(&containers, &form)
+                })
+                .collect()
+        };
+        let container = |children: &[String]| -> Result<String> {
+            let mut form = if !children.is_empty() {
+                vec![
+                    ("media_type".to_string(), "CAROUSEL".to_string()),
+                    ("children".to_string(), children.join(",")),
+                    ("access_token".to_string(), token.clone()),
+                ]
+            } else if !request.media.is_empty() {
+                // Only a post with media needs the web deployment at all.
+                let (item, url) = host_all()?.pop().ok_or_else(|| {
+                    AppError::Internal("The hosted attachment went missing.".into())
+                })?;
+                single_media_form(item, &url, token)
+            } else {
                 let mut form = vec![
                     ("media_type".to_string(), "TEXT".to_string()),
-                    ("text".to_string(), request.body.to_string()),
                     ("access_token".to_string(), token.clone()),
                 ];
                 // A link on a text-only post becomes a real preview card;
@@ -265,49 +282,21 @@ impl Platform for Threads {
                 if let Some(link) = request.link {
                     form.push(("link_attachment".into(), link.to_string()));
                 }
-                push_options(&mut form, request);
-                create_container(&containers, &form)?
-            }
-            1 => {
-                let (item, url) = &hosted[0];
-                let mut form = single_media_form(item, url, token);
-                form.push(("text".into(), request.body.to_string()));
-                push_options(&mut form, request);
-                let id = create_container(&containers, &form)?;
-                await_container(&id, token)?;
-                id
-            }
-            _ => {
-                let mut children = Vec::with_capacity(hosted.len());
-                for (item, url) in &hosted {
-                    let mut form = single_media_form(item, url, token);
-                    form.push(("is_carousel_item".into(), "true".into()));
-                    let id = create_container(&containers, &form)?;
-                    await_container(&id, token)?;
-                    children.push(id);
-                }
-                let mut form = vec![
-                    ("media_type".to_string(), "CAROUSEL".to_string()),
-                    ("children".to_string(), children.join(",")),
-                    ("text".to_string(), request.body.to_string()),
-                    ("access_token".to_string(), token.clone()),
-                ];
-                push_options(&mut form, request);
-                let id = create_container(&containers, &form)?;
-                await_container(&id, token)?;
-                id
-            }
+                form
+            };
+            form.push(("text".into(), request.text().into_owned()));
+            push_options(&mut form, request);
+            create_container(&containers, &form)
         };
 
-        let published = post_form(
-            &format!("{API_BASE}/{user}/threads_publish"),
-            &[
-                ("creation_id", creation_id.as_str()),
-                ("access_token", token.as_str()),
-            ],
-            LABEL,
+        let media_id = containers_api().publish(
+            request,
+            &ContainerBuild {
+                children: (request.media.len() > 1)
+                    .then_some(&children as &dyn Fn() -> Result<Vec<String>>),
+                container: &container,
+            },
         )?;
-        let media_id = id_of(&published, LABEL, "published post")?;
 
         Ok(Published {
             remote_url: permalink(&media_id, token),
@@ -364,51 +353,22 @@ fn create_container(url: &str, form: &[(String, String)]) -> Result<String> {
     id_of(&post_form(url, &pairs, LABEL)?, LABEL, "media container")
 }
 
-/// Blocks until a container is publishable, or explains why it never will be.
+/// Where Threads keeps containers and how long one attempt waits on them.
 ///
-/// An image container is usually `FINISHED` on the first look; a video one is
-/// not. Publishing an `IN_PROGRESS` container fails with an error about the
-/// container rather than about the wait, which is why this exists.
-fn await_container(container_id: &str, token: &str) -> Result<()> {
-    for attempt in 0..POLL_TRIES {
-        let status = get_json(
-            &format!("{API_BASE}/{container_id}"),
-            &[("fields", "status,error_message"), ("access_token", token)],
-            LABEL,
-        )?;
-        let state = status
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("IN_PROGRESS");
-        let message = status
-            .get("error_message")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("no reason given");
-
-        match state {
-            // PUBLISHED can happen on a retry of a target whose publish call
-            // succeeded before the result was recorded.
-            "FINISHED" | "PUBLISHED" => return Ok(()),
-            "ERROR" => {
-                return Err(AppError::InvalidInput(format!(
-                    "{LABEL} could not process the attachment: {message}"
-                )));
-            }
-            "EXPIRED" => {
-                return Err(AppError::InvalidInput(format!(
-                    "The {LABEL} media container expired before it was published: {message}"
-                )));
-            }
-            _ if attempt + 1 < POLL_TRIES => std::thread::sleep(POLL_INTERVAL),
-            _ => {}
-        }
+/// Meta recommends waiting about 30 seconds before publishing, so one attempt
+/// looks every 3 s for 30 s. An image is usually `FINISHED` on the first look;
+/// a video still processing after that is picked up again, container and all,
+/// on the next attempt.
+fn containers_api() -> Containers {
+    Containers {
+        label: LABEL,
+        api_base: API_BASE.to_string(),
+        state_field: "status",
+        detail_field: "error_message",
+        publish_edge: "threads_publish",
+        tries: 10,
+        interval: std::time::Duration::from_secs(3),
     }
-    // Retryable on purpose: the container is still being processed, and the same
-    // post may well go out on the scheduler's next pass.
-    Err(AppError::Platform(format!(
-        "{LABEL} is still processing the attachment after {}s.",
-        POLL_TRIES as u64 * POLL_INTERVAL.as_secs()
-    )))
 }
 
 /// Best effort: the post is already live, so failing to read its permalink must
@@ -468,15 +428,20 @@ fn client_secret(app: &AppCredentials) -> Result<&str> {
 /// The emoji planes plus the older symbol blocks that Threads also bills by
 /// byte. Deliberately a range test rather than a Unicode property lookup: see
 /// [`Threads::count_body`] for why erring high is the right direction.
+///
+/// Besides the pictographs themselves, the invisible parts of a sequence are
+/// billed too: the zero-width joiner that glues a family together, the
+/// variation selectors that turn `❤` into ❤️, and the tag characters of the
+/// subdivision flags. Counting those as one each is what made the old test
+/// undercount. A joiner inside Indic text is counted high as a result, which
+/// is the harmless direction.
 fn is_emoji(ch: char) -> bool {
-    matches!(ch as u32,
-        // The emoji planes, which already contain the regional indicators that
-        // make up flag sequences.
-        0x1F000..=0x1FAFF
-        | 0x2600..=0x27BF // misc symbols and dingbats
-        | 0x2B00..=0x2BFF // arrows and misc symbols
-        | 0xFE00..=0xFE0F // variation selectors
-    )
+    crate::platforms::is_pictographic(ch)
+        || matches!(ch as u32,
+            0x200D // zero-width joiner
+            | 0xFE00..=0xFE0F // variation selectors
+            | 0xE0020..=0xE007F // tag characters (🏴󠁧󠁢󠁳󠁣󠁴󠁿)
+        )
 }
 
 #[cfg(test)]
@@ -493,6 +458,23 @@ mod tests {
         // Threads bills emoji by byte, so one grinning face is four of the 500.
         assert_eq!(Threads.count_body("\u{1F600}"), 4);
         assert_eq!(Threads.count_body("hi \u{1F600}"), 7);
+    }
+
+    #[test]
+    fn every_byte_of_an_emoji_sequence_is_billed() {
+        // The joiners, selectors and keycaps inside a sequence are bytes too;
+        // counting them as one character each undercounted every family,
+        // keycap and flag-with-selector, which is the direction that fails a
+        // scheduled post.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        assert_eq!(Threads.count_body(family), family.len());
+        let keycap = "1\u{FE0F}\u{20E3}";
+        assert_eq!(Threads.count_body(keycap), keycap.len());
+        let heart = "\u{2764}\u{FE0F}";
+        assert_eq!(Threads.count_body(heart), heart.len());
+        for symbol in ["\u{231A}", "\u{00A9}", "\u{00AE}", "\u{2194}", "\u{25B6}"] {
+            assert_eq!(Threads.count_body(symbol), symbol.len(), "{symbol}");
+        }
     }
 
     #[test]
@@ -528,6 +510,8 @@ mod tests {
             link: None,
             media: &[],
             options: &options,
+            resume_key: None,
+            keep_resume_key: &|_| Ok(()),
         };
         let mut form = Vec::new();
         push_options(&mut form, &request);

@@ -575,7 +575,9 @@ fn failure_label(code: &str) -> &str {
         "UNAUTHORIZED" => "Credentials",
         "INVALID_INPUT" => "Rejected by the platform",
         "PLATFORM" => "Rate limit or outage",
+        "RATE_LIMITED" => "Rate limit",
         "NETWORK" => "Network",
+        "UNCONFIRMED" => "Sent, answer lost",
         "CONFLICT" => "Duplicate or conflict",
         "NOT_FOUND" => "Not found",
         "INTERNAL" => "Windbag",
@@ -957,7 +959,7 @@ fn refresh_instagram(
             continue;
         };
         let reply = meta::get_json(
-            &format!("{}/{id}/insights", instagram::API_BASE),
+            &format!("{}/{id}/insights", instagram::api_base()),
             &[
                 ("metric", "likes,comments,saved,shares,views,reach"),
                 ("access_token", &secret.access_token),
@@ -1291,6 +1293,14 @@ mod tests {
         assert_eq!(stats.failures.len(), 1);
         assert_eq!(stats.failures[0].key, "PLATFORM");
         assert_eq!(stats.failures[0].label, "Rate limit or outage");
+    }
+
+    #[test]
+    fn every_publishing_error_code_has_a_readable_label() {
+        // A code without a label shows up raw on the stats screen.
+        for code in ["RATE_LIMITED", "UNCONFIRMED"] {
+            assert_ne!(failure_label(code), code, "{code}");
+        }
     }
 
     #[test]

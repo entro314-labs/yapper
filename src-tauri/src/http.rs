@@ -37,10 +37,36 @@ pub fn client() -> &'static reqwest::blocking::Client {
     })
 }
 
+/// The timeout for a request whose body is `bytes` of media. The shared
+/// client's 60 s covers the whole exchange, which a 40 MB video on an ordinary
+/// uplink cannot finish inside — it failed as a timeout on every try. This
+/// keeps the 60 s for the round trip and adds the time to push the body at
+/// 128 KB/s (about 1 Mbit/s).
+pub fn upload_timeout(bytes: usize) -> Duration {
+    const BYTES_PER_SECOND: u64 = 128 * 1024;
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    Duration::from_secs(60 + bytes / BYTES_PER_SECOND)
+}
+
 /// Reads a response body once, whatever the status, so an error path can quote
 /// what the remote actually said. Bodies here are small JSON documents.
 pub fn read_body(response: reqwest::blocking::Response) -> (u16, String) {
     let status = response.status().as_u16();
     let body = response.text().unwrap_or_default();
     (status, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_upload_timeout_grows_with_the_body() {
+        assert_eq!(upload_timeout(0), Duration::from_secs(60));
+        let video = upload_timeout(40 * 1024 * 1024);
+        assert!(
+            video >= Duration::from_mins(5),
+            "40 MB must get minutes, not the shared 60 s: {video:?}"
+        );
+    }
 }

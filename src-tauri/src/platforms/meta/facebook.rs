@@ -19,7 +19,7 @@
 use serde_json::json;
 
 use super::{GRAPH_VERSION, get_json, id_of, map_error, token_get};
-use crate::error::{AppError, Result};
+use crate::error::{AppError, Result, after_send, unreadable_after_send};
 use crate::http;
 use crate::media;
 use crate::platforms::{
@@ -173,54 +173,55 @@ impl Platform for Facebook {
                 access_token: page.access_token,
                 refresh_token: None,
                 expires_at: None,
-                // Kept so a revoked Page token can be re-derived without a full
-                // reconnect, and so the connection can be audited.
+                // Kept for Meta's ads tools (`crate::metaads`), which need the
+                // USER token: ad accounts refuse a Page token. Nothing re-derives
+                // a Page token from it — a revoked one means reconnecting.
                 extra: json!({ "user_token": long_user.access_token }),
             },
         })
+    }
+
+    /// A `/feed` post takes the link as a real link share; a photo or a video
+    /// has no such field, so there the link goes in the text.
+    fn posts_link_natively(&self, _body: &str, media_count: usize) -> bool {
+        media_count == 0
     }
 
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published> {
         let token = &request.secret.access_token;
         let page = &request.account.remote_id;
         let base = api_base();
+        let text = request.text();
 
-        let images: Vec<&MediaItem> = request
+        // A video is its own endpoint and cannot share a post with photos;
+        // `validate` admits one only on its own (see `MEDIA`), so a post here
+        // is either that video or nothing but photos.
+        if let Some(item) = request
             .media
             .iter()
-            .filter(|item| !item.mime.starts_with("video/"))
-            .collect();
-        let video = request
-            .media
-            .iter()
-            .find(|item| item.mime.starts_with("video/"));
-
-        // A video is its own endpoint and cannot share a post with photos, so it
-        // wins outright rather than being silently dropped from a /feed post.
-        if let Some(item) = video {
+            .find(|item| item.mime.starts_with("video/"))
+        {
             let response = upload_bytes(
                 &format!("{base}/{page}/videos"),
                 item,
-                &[
-                    ("description", request.body),
-                    ("access_token", token.as_str()),
-                ],
+                &[("description", &text), ("access_token", token.as_str())],
+                true,
             )?;
-            let id = id_of(&response, LABEL, "video")?;
+            let id = published_id(&response, "id")?;
             return Ok(Published {
                 remote_url: Some(format!("https://www.facebook.com/{id}")),
                 remote_id: id,
             });
         }
 
-        match images.len() {
+        match request.media.len() {
             0 => {
-                let mut form = vec![("message", request.body), ("access_token", token.as_str())];
+                let mut form = vec![("message", &*text), ("access_token", token.as_str())];
                 if let Some(link) = request.link {
                     form.push(("link", link));
                 }
-                let response = post_form_at(&format!("{base}/{page}/feed"), &form)?;
-                let id = id_of(&response, LABEL, "post")?;
+                let response = publish_form(&format!("{base}/{page}/feed"), &form)?;
+                let id = published_id(&response, "id")?;
                 Ok(Published {
                     remote_url: Some(format!("https://www.facebook.com/{id}")),
                     remote_id: id,
@@ -228,14 +229,14 @@ impl Platform for Facebook {
             }
             1 => {
                 let response =
-                    upload_photo(&base, page, token, images[0], Some(request.body), true)?;
+                    upload_photo(&base, page, token, &request.media[0], Some(&text), true)?;
                 // A published photo answers with both its own id and the id of
                 // the post wrapping it; the post is what a permalink addresses.
                 let id = response
                     .get("post_id")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned)
-                    .map_or_else(|| id_of(&response, LABEL, "photo"), Ok)?;
+                    .map_or_else(|| published_id(&response, "id"), Ok)?;
                 Ok(Published {
                     remote_url: Some(format!("https://www.facebook.com/{id}")),
                     remote_id: id,
@@ -244,13 +245,13 @@ impl Platform for Facebook {
             _ => {
                 // Unpublished first, then one /feed post referencing them all —
                 // otherwise each photo becomes a separate post on the Page.
-                let mut attached = Vec::with_capacity(images.len());
-                for item in &images {
+                let mut attached = Vec::with_capacity(request.media.len());
+                for item in request.media {
                     let response = upload_photo(&base, page, token, item, None, false)?;
                     attached.push(id_of(&response, LABEL, "photo")?);
                 }
                 let mut form: Vec<(String, String)> = vec![
-                    ("message".to_string(), request.body.to_string()),
+                    ("message".to_string(), text.to_string()),
                     ("access_token".to_string(), token.clone()),
                 ];
                 for (index, media_fbid) in attached.iter().enumerate() {
@@ -263,8 +264,8 @@ impl Platform for Facebook {
                     .iter()
                     .map(|(key, value)| (key.as_str(), value.as_str()))
                     .collect();
-                let response = post_form_at(&format!("{base}/{page}/feed"), &pairs)?;
-                let id = id_of(&response, LABEL, "post")?;
+                let response = publish_form(&format!("{base}/{page}/feed"), &pairs)?;
+                let id = published_id(&response, "id")?;
                 Ok(Published {
                     remote_url: Some(format!("https://www.facebook.com/{id}")),
                     remote_id: id,
@@ -382,8 +383,8 @@ fn upload_photo(
     caption: Option<&str>,
     published: bool,
 ) -> Result<serde_json::Value> {
-    let published = if published { "true" } else { "false" };
-    let mut fields: Vec<(&str, &str)> = vec![("published", published), ("access_token", token)];
+    let flag = if published { "true" } else { "false" };
+    let mut fields: Vec<(&str, &str)> = vec![("published", flag), ("access_token", token)];
     if let Some(caption) = caption {
         fields.push(("caption", caption));
     }
@@ -395,12 +396,22 @@ fn upload_photo(
     if let Some(alt) = alt {
         fields.push(("alt_text_custom", alt));
     }
-    upload_bytes(&format!("{base}/{page}/photos"), item, &fields)
+    upload_bytes(&format!("{base}/{page}/photos"), item, &fields, published)
 }
 
 /// A multipart POST carrying the file as `source` — the byte path no other Meta
 /// surface offers.
-fn upload_bytes(url: &str, item: &MediaItem, fields: &[(&str, &str)]) -> Result<serde_json::Value> {
+///
+/// `publishes` marks the upload that puts the post on the Page (a video, or a
+/// lone published photo): a lost answer to it is [`after_send`]'s to classify,
+/// because a retry would post it again. An unpublished photo is just an
+/// upload and retries like one.
+fn upload_bytes(
+    url: &str,
+    item: &MediaItem,
+    fields: &[(&str, &str)],
+    publishes: bool,
+) -> Result<serde_json::Value> {
     let part = reqwest::blocking::multipart::Part::bytes(item.bytes.clone())
         .file_name("upload")
         .mime_str(&item.mime)
@@ -412,16 +423,52 @@ fn upload_bytes(url: &str, item: &MediaItem, fields: &[(&str, &str)]) -> Result<
         form = form.text((*key).to_string(), (*value).to_string());
     }
 
-    let (status, body) = http::read_body(http::client().post(url).multipart(form).send()?);
+    let request = http::client()
+        .post(url)
+        .timeout(http::upload_timeout(item.bytes.len()))
+        .multipart(form);
+    let response = if publishes {
+        request.send().map_err(after_send)?
+    } else {
+        request.send()?
+    };
+    let (status, body) = http::read_body(response);
     if !(200..300).contains(&status) {
         return Err(map_error(status, &body, LABEL));
     }
-    serde_json::from_str(&body)
-        .map_err(|e| AppError::Platform(format!("{LABEL} returned an unreadable response: {e}")))
+    serde_json::from_str(&body).map_err(|e| {
+        if publishes {
+            unreadable_after_send(LABEL, e)
+        } else {
+            AppError::Platform(format!("{LABEL} returned an unreadable response: {e}"))
+        }
+    })
 }
 
-fn post_form_at(url: &str, form: &[(&str, &str)]) -> Result<serde_json::Value> {
-    super::post_form(url, form, LABEL)
+/// The `/feed` POST that puts a post on the Page. Sent once — see
+/// [`after_send`].
+fn publish_form(url: &str, form: &[(&str, &str)]) -> Result<serde_json::Value> {
+    let (status, body) = http::read_body(
+        http::client()
+            .post(url)
+            .form(form)
+            .send()
+            .map_err(after_send)?,
+    );
+    if !(200..300).contains(&status) {
+        return Err(map_error(status, &body, LABEL));
+    }
+    serde_json::from_str(&body).map_err(|e| unreadable_after_send(LABEL, e))
+}
+
+/// The id of what a publishing call created. Missing, the post is probably
+/// live anyway, so this is [`unreadable_after_send`] rather than a retry.
+fn published_id(response: &serde_json::Value, key: &str) -> Result<String> {
+    response
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| unreadable_after_send(LABEL, format!("it carried no `{key}`")))
 }
 
 /// The consent screen this connection asks for. Ads permissions are opt-in, so

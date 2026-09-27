@@ -17,7 +17,9 @@
 
 use serde_json::json;
 
-use super::{Grant, get_json, id_of, post_form, token_get};
+use super::{
+    ContainerBuild, Containers, GRAPH_VERSION, Grant, get_json, id_of, post_form, token_get,
+};
 use crate::error::{AppError, Result};
 use crate::platforms::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, MediaItem,
@@ -32,15 +34,13 @@ const AUTHORIZE_URL: &str = "https://www.instagram.com/oauth/authorize";
 const TOKEN_URL: &str = "https://api.instagram.com/oauth/access_token";
 const EXCHANGE_URL: &str = "https://graph.instagram.com/access_token";
 const REFRESH_URL: &str = "https://graph.instagram.com/refresh_access_token";
-pub(crate) const API_BASE: &str = "https://graph.instagram.com/v23.0";
+/// On the same [`GRAPH_VERSION`] as every other Meta call, so the bump stays one
+/// edit and Instagram cannot quietly sit on a version nearer its sunset.
+pub(crate) fn api_base() -> String {
+    format!("https://graph.instagram.com/{GRAPH_VERSION}")
+}
 const SCOPES: &str = "instagram_business_basic,instagram_business_content_publish";
 const LABEL: &str = "Instagram";
-
-/// Instagram transcodes video off the request path and is slower at it than
-/// Threads. Twenty tries three seconds apart is a minute, after which the target
-/// fails retryably and the scheduler comes back to it.
-const POLL_TRIES: usize = 20;
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Feed images are JPEG only, up to 8 MB; a video (posted as a reel) up to
 /// 300 MB. Carousels mix the two:
@@ -141,7 +141,7 @@ impl Platform for Instagram {
         )?;
 
         let me = get_json(
-            &format!("{API_BASE}/me"),
+            &format!("{}/me", api_base()),
             &[
                 ("fields", "user_id,username,name,profile_picture_url"),
                 ("access_token", &long.access_token),
@@ -221,8 +221,7 @@ impl Platform for Instagram {
 
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published> {
         let token = &request.secret.access_token;
-        let user = &request.account.remote_id;
-        let containers = format!("{API_BASE}/{user}/media");
+        let containers = format!("{}/{}/media", api_base(), request.account.remote_id);
 
         // `platforms::validate` has already refused an empty one, but this is the
         // call that would otherwise build a meaningless container.
@@ -232,49 +231,49 @@ impl Platform for Instagram {
             ));
         }
 
-        let host = webhost::require()?;
-        let hosted = request
-            .media
-            .iter()
-            .map(|item| Ok((item, webhost::upload(&host, item)?.url)))
-            .collect::<Result<Vec<_>>>()?;
-
-        let creation_id = if hosted.len() == 1 {
-            let (item, url) = &hosted[0];
-            let mut form = single_media_form(item, url, token);
-            form.push(("caption".into(), request.body.to_string()));
-            let id = create_container(&containers, &form)?;
-            await_container(&id, token)?;
-            id
-        } else {
-            let mut children = Vec::with_capacity(hosted.len());
-            for (item, url) in &hosted {
-                let mut form = single_media_form(item, url, token);
-                form.push(("is_carousel_item".into(), "true".into()));
-                let id = create_container(&containers, &form)?;
-                await_container(&id, token)?;
-                children.push(id);
-            }
-            let form = vec![
-                ("media_type".to_string(), "CAROUSEL".to_string()),
-                ("children".to_string(), children.join(",")),
-                ("caption".to_string(), request.body.to_string()),
-                ("access_token".to_string(), token.clone()),
-            ];
-            let id = create_container(&containers, &form)?;
-            await_container(&id, token)?;
-            id
+        // Parked publicly inside the builders, so a resumed container does not
+        // upload its media again.
+        let host_all = || -> Result<Vec<(&MediaItem, String)>> {
+            let host = webhost::require()?;
+            request
+                .media
+                .iter()
+                .map(|item| Ok((item, webhost::upload(&host, item)?.url)))
+                .collect()
+        };
+        let children = || -> Result<Vec<String>> {
+            host_all()?
+                .iter()
+                .map(|(item, url)| {
+                    create_container(&containers, &single_media_form(item, url, token, true))
+                })
+                .collect()
+        };
+        let container = |children: &[String]| -> Result<String> {
+            let mut form = if children.is_empty() {
+                let (item, url) = host_all()?.pop().ok_or_else(|| {
+                    AppError::Internal("An Instagram post reached publishing with no media.".into())
+                })?;
+                single_media_form(item, &url, token, false)
+            } else {
+                vec![
+                    ("media_type".to_string(), "CAROUSEL".to_string()),
+                    ("children".to_string(), children.join(",")),
+                    ("access_token".to_string(), token.clone()),
+                ]
+            };
+            form.push(("caption".into(), request.text().into_owned()));
+            create_container(&containers, &form)
         };
 
-        let published = post_form(
-            &format!("{API_BASE}/{user}/media_publish"),
-            &[
-                ("creation_id", creation_id.as_str()),
-                ("access_token", token.as_str()),
-            ],
-            LABEL,
+        let media_id = containers_api().publish(
+            request,
+            &ContainerBuild {
+                children: (request.media.len() > 1)
+                    .then_some(&children as &dyn Fn() -> Result<Vec<String>>),
+                container: &container,
+            },
         )?;
-        let media_id = id_of(&published, LABEL, "published post")?;
 
         Ok(Published {
             remote_url: permalink(&media_id, token),
@@ -283,16 +282,26 @@ impl Platform for Instagram {
     }
 }
 
-/// A video item is posted as a REEL — since 2024 that is what a feed video IS on
-/// Instagram, and `media_type=VIDEO` is the deprecated spelling of it.
-fn single_media_form(item: &MediaItem, url: &str, token: &str) -> Vec<(String, String)> {
+/// A video on its own is posted as a REEL — since 2024 that is what a feed video
+/// IS on Instagram. Inside a carousel it cannot be: a carousel item takes
+/// `media_type=VIDEO`, and a REELS item is rejected.
+fn single_media_form(
+    item: &MediaItem,
+    url: &str,
+    token: &str,
+    in_carousel: bool,
+) -> Vec<(String, String)> {
     let is_video = item.mime.starts_with("video/");
     let mut form = vec![("access_token".to_string(), token.to_string())];
     if is_video {
-        form.push(("media_type".into(), "REELS".into()));
+        let kind = if in_carousel { "VIDEO" } else { "REELS" };
+        form.push(("media_type".into(), kind.into()));
         form.push(("video_url".into(), url.to_string()));
     } else {
         form.push(("image_url".into(), url.to_string()));
+    }
+    if in_carousel {
+        form.push(("is_carousel_item".into(), "true".into()));
     }
     form
 }
@@ -305,48 +314,28 @@ fn create_container(url: &str, form: &[(String, String)]) -> Result<String> {
     id_of(&post_form(url, &pairs, LABEL)?, LABEL, "media container")
 }
 
-/// Instagram reports container readiness as `status_code`, not `status`.
-fn await_container(container_id: &str, token: &str) -> Result<()> {
-    for attempt in 0..POLL_TRIES {
-        let status = get_json(
-            &format!("{API_BASE}/{container_id}"),
-            &[("fields", "status_code,status"), ("access_token", token)],
-            LABEL,
-        )?;
-        let state = status
-            .get("status_code")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("IN_PROGRESS");
-        let detail = status
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("no reason given");
-
-        match state {
-            "FINISHED" | "PUBLISHED" => return Ok(()),
-            "ERROR" => {
-                return Err(AppError::InvalidInput(format!(
-                    "{LABEL} could not process the attachment: {detail}"
-                )));
-            }
-            "EXPIRED" => {
-                return Err(AppError::InvalidInput(format!(
-                    "The {LABEL} media container expired before it was published: {detail}"
-                )));
-            }
-            _ if attempt + 1 < POLL_TRIES => std::thread::sleep(POLL_INTERVAL),
-            _ => {}
-        }
+/// Where Instagram keeps containers and how long one attempt waits on them.
+/// Readiness is `status_code`, not `status`.
+///
+/// Meta's guidance is to check a container once a minute for up to five
+/// minutes. One attempt looks every 5 s for 30 s; a video still transcoding
+/// after that fails the attempt retryably, and the scheduler's next attempt — a
+/// minute later at the soonest — checks the same container again.
+fn containers_api() -> Containers {
+    Containers {
+        label: LABEL,
+        api_base: api_base(),
+        state_field: "status_code",
+        detail_field: "status",
+        publish_edge: "media_publish",
+        tries: 6,
+        interval: std::time::Duration::from_secs(5),
     }
-    Err(AppError::Platform(format!(
-        "{LABEL} is still processing the attachment after {}s.",
-        POLL_TRIES as u64 * POLL_INTERVAL.as_secs()
-    )))
 }
 
 fn permalink(media_id: &str, token: &str) -> Option<String> {
     get_json(
-        &format!("{API_BASE}/{media_id}"),
+        &format!("{}/{media_id}", api_base()),
         &[("fields", "permalink"), ("access_token", token)],
         LABEL,
     )
@@ -408,9 +397,25 @@ mod tests {
             mime: "video/mp4".into(),
             alt_text: None,
         };
-        let form = single_media_form(&item, "https://x/y.mp4", "tok");
+        let form = single_media_form(&item, "https://x/y.mp4", "tok", false);
         assert!(form.iter().any(|(k, v)| k == "media_type" && v == "REELS"));
         assert!(form.iter().any(|(k, _)| k == "video_url"));
+    }
+
+    #[test]
+    fn a_video_inside_a_carousel_is_a_video_not_a_reel() {
+        // A carousel item cannot be a reel; Meta rejects the container.
+        let item = MediaItem {
+            bytes: Vec::new(),
+            mime: "video/mp4".into(),
+            alt_text: None,
+        };
+        let form = single_media_form(&item, "https://x/y.mp4", "tok", true);
+        assert!(form.iter().any(|(k, v)| k == "media_type" && v == "VIDEO"));
+        assert!(
+            form.iter()
+                .any(|(k, v)| k == "is_carousel_item" && v == "true")
+        );
     }
 
     #[test]
@@ -421,7 +426,7 @@ mod tests {
             mime: "image/jpeg".into(),
             alt_text: None,
         };
-        let form = single_media_form(&item, "https://x/y.jpg", "tok");
+        let form = single_media_form(&item, "https://x/y.jpg", "tok", false);
         assert!(!form.iter().any(|(k, _)| k == "media_type"));
         assert!(form.iter().any(|(k, _)| k == "image_url"));
     }

@@ -16,7 +16,7 @@ use super::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, Platform,
     PlatformId, PlatformInfo, PublishRequest, Published,
 };
-use crate::error::{AppError, Result, from_status};
+use crate::error::{AppError, Result, after_send, from_status, unreadable_after_send};
 use crate::oauth::{self, OAuthConfig, REDIRECT_URI};
 use crate::platforms::{MB, MediaRule};
 use crate::{http, secrets};
@@ -137,7 +137,7 @@ impl Platform for Mastodon {
             .map(|item| upload_media(instance, &request.secret.access_token, item))
             .collect::<Result<Vec<_>>>()?;
 
-        let mut payload = json!({ "status": request.body });
+        let mut payload = json!({ "status": request.text() });
         if let Some(visibility) = request.option("visibility") {
             payload["visibility"] = json!(visibility);
         }
@@ -153,7 +153,7 @@ impl Platform for Mastodon {
                 .post(format!("{instance}/api/v1/statuses"))
                 .bearer_auth(&request.secret.access_token)
                 // A retry after a timeout must not produce a second post. Mastodon
-                // honours this header for ~6 hours and answers a REUSED key with
+                // honours this header for up to an hour and answers a REUSED key with
                 // the original status — so it has to name this destination and no
                 // other. Keyed on the account, two different posts to the same
                 // account inside that window would collapse into one, and the
@@ -163,17 +163,17 @@ impl Platform for Mastodon {
                     format!("windbag-target-{}", request.target_id),
                 )
                 .json(&payload)
-                .send()?,
+                .send()
+                // The key only holds for about an hour, less than the retry
+                // ladder spans, so a lost answer is still the user's to check.
+                .map_err(after_send)?,
         );
         if !(200..300).contains(&status) {
             return Err(from_status(status, &body, "Mastodon"));
         }
 
-        let created: Status = serde_json::from_str(&body).map_err(|e| {
-            AppError::Platform(format!(
-                "Mastodon accepted the post but the reply was unreadable: {e}"
-            ))
-        })?;
+        let created: Status =
+            serde_json::from_str(&body).map_err(|e| unreadable_after_send("Mastodon", e))?;
         Ok(Published {
             remote_id: created.id,
             remote_url: created.url,
@@ -190,6 +190,8 @@ struct Registered {
 #[derive(Debug, Deserialize)]
 struct Attachment {
     id: String,
+    /// `null` until the server has finished processing the file.
+    url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -302,11 +304,10 @@ fn upload_media(instance: &str, token: &str, item: &super::MediaItem) -> Result<
         http::client()
             .post(format!("{instance}/api/v2/media"))
             .bearer_auth(token)
+            .timeout(http::upload_timeout(item.bytes.len()))
             .multipart(form)
             .send()?,
     );
-    // 202 means the server took the file and is still processing it. The id is
-    // already usable in a status, so this is a success, not a wait.
     if !(200..300).contains(&status) {
         return Err(from_status(status, &body, "Mastodon"));
     }
@@ -316,7 +317,58 @@ fn upload_media(instance: &str, token: &str, item: &super::MediaItem) -> Result<
             "Mastodon returned an unreadable upload response: {e}"
         ))
     })?;
+    // 202 means the server took the file and is still processing it — video
+    // and GIF always are. A status naming it before it is done is refused with
+    // a 422, so the wait happens here.
+    if status == 202 || attachment.url.is_none() {
+        await_processing(instance, token, &attachment.id)?;
+    }
     Ok(attachment.id)
+}
+
+/// Mastodon transcodes off the request path. Every 2 s for a minute covers a
+/// short clip; longer fails retryably, and the next attempt uploads again.
+const PROCESSING_TRIES: usize = 30;
+const PROCESSING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn await_processing(instance: &str, token: &str, media_id: &str) -> Result<()> {
+    for attempt in 0..PROCESSING_TRIES {
+        let (status, body) = http::read_body(
+            http::client()
+                .get(format!("{instance}/api/v1/media/{media_id}"))
+                .bearer_auth(token)
+                .send()?,
+        );
+        if media_ready(status, &body)? {
+            return Ok(());
+        }
+        if attempt + 1 < PROCESSING_TRIES {
+            std::thread::sleep(PROCESSING_INTERVAL);
+        }
+    }
+    Err(AppError::Platform(format!(
+        "Mastodon is still processing the attachment after {}s.",
+        PROCESSING_TRIES as u64 * PROCESSING_INTERVAL.as_secs()
+    )))
+}
+
+/// One `GET /api/v1/media/:id` answer: 206 while processing, 200 with a `url`
+/// when done, 422 when the file could not be processed at all.
+fn media_ready(status: u16, body: &str) -> Result<bool> {
+    match status {
+        206 => Ok(false),
+        422 => Err(AppError::InvalidInput(format!(
+            "Mastodon could not process the attachment: {}",
+            body.chars().take(400).collect::<String>()
+        ))),
+        200..=299 => {
+            let attachment: Attachment = serde_json::from_str(body).map_err(|e| {
+                AppError::Platform(format!("Mastodon returned an unreadable attachment: {e}"))
+            })?;
+            Ok(attachment.url.is_some())
+        }
+        _ => Err(from_status(status, body, "Mastodon")),
+    }
 }
 
 /// `mastodon.social`, `https://mastodon.social/` and `HTTPS://Mastodon.Social`
@@ -351,6 +403,24 @@ mod tests {
         ] {
             assert_eq!(normalize_instance(input), "https://mastodon.social");
         }
+    }
+
+    #[test]
+    fn media_is_ready_only_once_it_has_a_url() {
+        assert!(!media_ready(206, r#"{"id":"1","url":null}"#).expect("processing"));
+        assert!(!media_ready(200, r#"{"id":"1","url":null}"#).expect("no url yet"));
+        assert!(media_ready(200, r#"{"id":"1","url":"https://x/1.mp4"}"#).expect("ready"));
+    }
+
+    #[test]
+    fn media_that_failed_processing_is_terminal() {
+        let err = media_ready(
+            422,
+            r#"{"error":"Validation failed: File could not be processed"}"#,
+        )
+        .expect_err("failed");
+        assert!(!err.is_retryable(), "{err}");
+        assert!(err.to_string().contains("could not be processed"), "{err}");
     }
 
     #[test]

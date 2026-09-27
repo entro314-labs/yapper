@@ -21,7 +21,7 @@ use super::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, MediaItem,
     Platform, PlatformId, PlatformInfo, PublishRequest, Published,
 };
-use crate::error::{AppError, Result, from_status};
+use crate::error::{AppError, Result, after_send, from_status, unreadable_after_send};
 use crate::http;
 use crate::media;
 use crate::oauth::{self, OAuthConfig, REDIRECT_URI};
@@ -158,6 +158,12 @@ impl Platform for Linkedin {
         Ok(Some(refreshed))
     }
 
+    /// With no image the link becomes an article card; beside an image there
+    /// is no field for it, so it goes in the commentary.
+    fn posts_link_natively(&self, _body: &str, media_count: usize) -> bool {
+        media_count == 0
+    }
+
     fn publish(&self, request: &PublishRequest<'_>) -> Result<Published> {
         let token = &request.secret.access_token;
         let version = request
@@ -169,7 +175,7 @@ impl Platform for Linkedin {
 
         let mut payload = json!({
             "author": author,
-            "commentary": escape_commentary(request.body),
+            "commentary": escape_commentary(&request.text()),
             "visibility": request.option("visibility").unwrap_or("PUBLIC"),
             "distribution": {
                 "feedDistribution": "MAIN_FEED",
@@ -206,7 +212,8 @@ impl Platform for Linkedin {
             .header("X-Restli-Protocol-Version", "2.0.0")
             .header("LinkedIn-Version", &version)
             .json(&payload)
-            .send()?;
+            .send()
+            .map_err(after_send)?;
 
         // The id arrives in a header and the 201 body is empty, so the header is
         // read BEFORE the body is consumed.
@@ -220,9 +227,8 @@ impl Platform for Linkedin {
         if !(200..300).contains(&status) {
             return Err(map_error(status, &body, &version));
         }
-        let urn = post_urn.ok_or_else(|| {
-            AppError::Platform("LinkedIn accepted the post but returned no id header.".into())
-        })?;
+        let urn =
+            post_urn.ok_or_else(|| unreadable_after_send("LinkedIn", "no x-restli-id header"))?;
 
         Ok(Published {
             remote_url: Some(format!("https://www.linkedin.com/feed/update/{urn}/")),
@@ -313,6 +319,7 @@ fn upload_image(token: &str, version: &str, owner: &str, item: &MediaItem) -> Re
             .put(upload_url)
             .bearer_auth(token)
             .header(reqwest::header::CONTENT_TYPE, &item.mime)
+            .timeout(http::upload_timeout(item.bytes.len()))
             .body(item.bytes.clone())
             .send()?,
     );
