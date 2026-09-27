@@ -13,11 +13,13 @@
    Radius is moderate (0.625rem) — softer than a terminal, sharper than a
    consumer social app, because the thing on screen is a queue of work.
 
-   The accent is deliberately at hue ~205: the app talks to five platforms
-   that each own a brand colour (Bluesky blue, Reddit orange, LinkedIn navy,
-   Mastodon purple, X black), and those appear as per-platform dots in the
-   queue. A cyan carrier sits clear of all five while staying legible on the
-   dark surfaces the app is designed for.
+   The accent is deliberately at hue ~205: the app talks to eight platforms
+   that each own a brand colour (Bluesky and Facebook blue, Reddit orange,
+   LinkedIn navy, Mastodon purple, Instagram magenta, X and Threads black), and
+   those appear as per-platform marks in the queue. A cyan carrier sits clear
+   of them while staying legible on the dark surfaces the app is designed for;
+   Facebook's blue is the nearest, which is one reason a platform is never
+   identified by its tone alone — it always carries its mark.
    ─────────────────────────────────────────────────────────────────── */
 
 @theme inline {

@@ -260,7 +260,7 @@ src/                    React 19 + TanStack Router + Tailwind 4
   components/shell/     sidebar, pane titlebar, status bar
   lib/tauri/            the IPC contract: command registry, client, types
   lib/query/            TanStack Query keys, hooks, and the Rust event bridge
-  routes/               queue, compose, calendar, accounts, settings
+  routes/               queue, compose, calendar, notes, stats, accounts, settings
 src-tauri/src/
   db.rs                 SQLite + the schema ladder: accounts, posts, targets,
                         media, attempts, notes, metrics

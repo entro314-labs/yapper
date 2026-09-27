@@ -2,7 +2,7 @@
   "name": "windbag",
   "private": true,
   "version": "0.2.0",
-  "description": "A fast, keyboard-first desktop composer and scheduler for social platforms with an open API — Bluesky, Mastodon, Reddit, X and LinkedIn.",
+  "description": "A keyboard-first desktop composer and scheduler for the social platforms with an open posting API — Bluesky, Mastodon, Reddit, X, LinkedIn, Threads, Instagram and Facebook Pages.",
   "type": "module",
   "license": "MIT",
   "author": "entro314-labs",
