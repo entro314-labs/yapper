@@ -125,7 +125,7 @@ function SettingsScreen() {
         >
           <Input
             type="number"
-            min={0}
+            min={1}
             max={720}
             value={current.graceMinutes}
             onChange={(event) => {

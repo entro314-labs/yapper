@@ -713,8 +713,10 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
         grace_minutes: state
             .db
             .get_meta(META_GRACE_MINUTES)?
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(defaults.grace_minutes),
+            .and_then(|value| value.parse::<i64>().ok())
+            .map_or(defaults.grace_minutes, |value| {
+                value.max(scheduler::MIN_GRACE_MINUTES)
+            }),
         launch_at_login: state
             .db
             .get_meta("launch_at_login")?
@@ -753,7 +755,10 @@ pub fn update_settings(
     )?;
     state.db.set_meta(
         META_GRACE_MINUTES,
-        &settings.grace_minutes.max(0).to_string(),
+        &settings
+            .grace_minutes
+            .max(scheduler::MIN_GRACE_MINUTES)
+            .to_string(),
     )?;
     state
         .db

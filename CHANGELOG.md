@@ -156,6 +156,10 @@ All notable changes to Windbag are documented here. The format follows
   span 80px from the window edge, and at 56px the green one straddled the seam
   between the rail and the content pane. In fullscreen, where the OS hides them,
   the wordmark stops reserving the gap.
+- **A zero grace window no longer marks every post missed.** The missed-post
+  check runs before each publishing pass, so with the window at 0 a post was
+  marked missed in the pass that should have sent it — "Post now" included. The
+  window now has a one-minute floor, in Settings and in the scheduler.
 
 ### Activation
 

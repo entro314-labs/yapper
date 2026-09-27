@@ -74,6 +74,12 @@ pub const META_GRACE_MINUTES: &str = "grace_minutes";
 /// A post is only "missed" once it is this far past due. Inside the window it
 /// simply goes out — closing the laptop for ten minutes should not cost a post.
 const DEFAULT_GRACE_MINUTES: i64 = 15;
+/// The smallest window the policy honours. [`catch_up`] runs before the due
+/// query in every pass, so a zero window would mark a post missed in the very
+/// pass meant to publish it — "Post now" included, since it sets the post to
+/// the current instant. One minute is the UI's scheduling granularity and three
+/// ticks of the worker.
+pub const MIN_GRACE_MINUTES: i64 = 1;
 
 /// Handle the rest of the app uses to nudge the worker. Dropping it stops the
 /// thread at its next tick.
@@ -283,7 +289,8 @@ pub fn catch_up(database: &Arc<Db>) -> Result<usize> {
         .get_meta(META_GRACE_MINUTES)?
         .and_then(|value| value.parse::<i64>().ok())
         .filter(|value| *value >= 0)
-        .unwrap_or(DEFAULT_GRACE_MINUTES);
+        .unwrap_or(DEFAULT_GRACE_MINUTES)
+        .max(MIN_GRACE_MINUTES);
 
     let cutoff = Utc::now() - chrono::Duration::minutes(grace);
     let overdue = database.overdue_posts(cutoff)?;
@@ -556,6 +563,25 @@ mod tests {
             database.get_post(post).expect("post").status,
             POST_SCHEDULED,
             "closing the laptop for three minutes must not cost a post"
+        );
+    }
+
+    #[test]
+    fn a_zero_grace_window_does_not_mark_a_post_that_just_came_due_missed() {
+        // catch_up runs BEFORE the due query in every pass, so a zero window
+        // would mark a post missed in the same pass that should publish it —
+        // including one "Post now" just set to the current instant.
+        let database = Arc::new(Db::open_in_memory().expect("store"));
+        database.set_meta(META_GRACE_MINUTES, "0").expect("grace");
+        let just_due = (Utc::now() - chrono::Duration::seconds(5)).to_rfc3339();
+        let post = database
+            .create_post("now", None, None, Some(&just_due), POST_SCHEDULED)
+            .expect("post");
+
+        assert_eq!(catch_up(&database).expect("catch up"), 0);
+        assert_eq!(
+            database.get_post(post).expect("post").status,
+            POST_SCHEDULED
         );
     }
 
