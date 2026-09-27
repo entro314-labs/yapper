@@ -36,13 +36,14 @@ export const Route = createFileRoute('/compose')({
   component: ComposeScreen,
   validateSearch: (
     search: Record<string, unknown>,
-  ): { id?: number; noteId?: number; suggest?: boolean } => {
+  ): { id?: number; from?: number; noteId?: number; suggest?: boolean } => {
     const positive = (value: unknown) => {
       const parsed = Number(value)
       return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
     }
     return {
       ...(positive(search.id) === undefined ? {} : { id: positive(search.id) }),
+      ...(positive(search.from) === undefined ? {} : { from: positive(search.from) }),
       ...(positive(search.noteId) === undefined ? {} : { noteId: positive(search.noteId) }),
       ...(search.suggest ? { suggest: true } : {}),
     }
@@ -57,7 +58,7 @@ interface Attachment {
 }
 
 function ComposeScreen() {
-  const { id, noteId, suggest: openSuggest } = Route.useSearch()
+  const { id, from, noteId, suggest: openSuggest } = Route.useSearch()
   const navigate = useNavigate()
   const accounts = useAccounts()
   const platforms = usePlatforms()
@@ -70,9 +71,13 @@ function ComposeScreen() {
   const [assistantRef, assistantHover] = useAnimatedIcon()
   const [sendRef, sendHover] = useAnimatedIcon()
 
-  const editing = React.useMemo(
-    () => (id ? posts.data?.find((post) => post.id === id) : undefined),
-    [id, posts.data],
+  // `from` opens a COPY: the source seeds the form, but the post stays
+  // unsaved until the user saves it as a new one — nothing ever writes back
+  // to the original, which is what makes this safe for a published post.
+  const sourceId = id ?? from
+  const source = React.useMemo(
+    () => (sourceId ? posts.data?.find((post) => post.id === sourceId) : undefined),
+    [sourceId, posts.data],
   )
 
   const [body, setBody] = React.useState('')
@@ -86,42 +91,46 @@ function ComposeScreen() {
   const [suggesting, setSuggesting] = React.useState(Boolean(openSuggest))
   const [seededNote, setSeededNote] = React.useState<number | null>(null)
 
-  // Loads an existing post exactly once per id. A plain effect on `editing`
+  // Loads an existing post exactly once per id. A plain effect on `source`
   // would re-seed the form every time the queue refetched and throw away
   // whatever was being typed.
   React.useEffect(() => {
-    if (!editing || loadedId === editing.id) return
-    setBody(editing.body)
-    setTitle(editing.title ?? '')
-    setLink(editing.link ?? '')
-    setWhen(editing.scheduledAt ? toLocalInputValue(new Date(editing.scheduledAt)) : '')
-    setSelected(editing.targets.map((target) => target.accountId))
+    if (!source || loadedId === source.id) return
+    setBody(source.body)
+    setTitle(source.title ?? '')
+    setLink(source.link ?? '')
+    // A copy starts as a draft: the original's time is the original's, and on
+    // a published post it is already in the past.
+    setWhen(
+      id !== undefined && source.scheduledAt ? toLocalInputValue(new Date(source.scheduledAt)) : '',
+    )
+    setSelected(source.targets.map((target) => target.accountId))
     setOptions(
-      Object.fromEntries(editing.targets.map((target) => [target.accountId, target.options ?? {}])),
+      Object.fromEntries(source.targets.map((target) => [target.accountId, target.options ?? {}])),
     )
     setMedia(
-      editing.media.map((item) => ({
+      source.media.map((item) => ({
         path: item.path,
         altText: item.altText ?? '',
         mime: item.mime,
         bytes: item.bytes,
       })),
     )
-    setLoadedId(editing.id)
-  }, [editing, loadedId])
+    setLoadedId(source.id)
+  }, [source, loadedId, id])
 
   // Arriving from a note: seed the body once, so "Turn into a post" does not
   // mean retyping. Only when composing something NEW — an existing post's own
   // text must never be replaced by a note's.
   React.useEffect(() => {
-    if (id !== undefined || noteId === undefined || seededNote === noteId) return
+    if (sourceId !== undefined || noteId === undefined || seededNote === noteId) return
     const note = notes.data?.find((candidate) => candidate.id === noteId)
     if (!note) return
     setSeededNote(noteId)
     if (openSuggest) return
     setTitle((current) => current || note.title)
     setBody((current) => current || note.body)
-  }, [id, noteId, seededNote, notes.data, openSuggest])
+  }, [sourceId, noteId, seededNote, notes.data, openSuggest])
 
   const checks = useCheckPost(body, title || null, media.length, selected)
   const platformById = React.useMemo(
@@ -217,18 +226,23 @@ function ComposeScreen() {
   const reads = [
     accounts,
     platforms,
-    ...(id === undefined ? [] : [posts]),
+    ...(sourceId === undefined ? [] : [posts]),
     ...(noteId === undefined ? [] : [notes]),
   ]
   if (reads.some((query) => query.isError)) {
     return (
-      <QueryErrorState what={id === undefined ? 'the composer' : 'this post'} queries={reads} />
+      <QueryErrorState
+        what={
+          id !== undefined ? 'this post' : from !== undefined ? 'the post to copy' : 'the composer'
+        }
+        queries={reads}
+      />
     )
   }
 
   // An edit opened before the queue arrives would otherwise show an empty
   // form, indistinguishable from the post having no text.
-  if (id !== undefined && !editing) {
+  if (sourceId !== undefined && !source) {
     return posts.isLoading ? (
       <div className="mx-auto flex max-w-3xl flex-col gap-4 p-4">
         <Skeleton className="h-52 w-full rounded-lg" />
@@ -238,7 +252,7 @@ function ComposeScreen() {
       <EmptyState
         icon={IconFileOff}
         title="This post no longer exists"
-        description="It was deleted from the queue, so there is nothing here to edit."
+        description={`It was deleted from the queue, so there is nothing here to ${id === undefined ? 'copy' : 'edit'}.`}
         action={<Button render={<Link to="/" />}>Back to the queue</Button>}
       />
     )

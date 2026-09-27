@@ -2,6 +2,7 @@ import {
   IconAlertTriangle,
   IconCalendarClock,
   IconChevronDown,
+  IconCopy,
   IconExternalLink,
   IconPencil,
   IconRefresh,
@@ -81,6 +82,19 @@ export function PostCard({ post, accounts }: { post: PostDetail; accounts: Map<n
               render={<Link to="/compose" search={{ id: post.id }} />}
             >
               <IconPencil />
+            </Button>
+          ) : null}
+          {/* A published post cannot be edited, but it can be the start of the
+              next one: a copy opens as a new draft and the original is never
+              touched. */}
+          {post.status === 'published' ? (
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label="Duplicate as a new draft"
+              render={<Link to="/compose" search={{ from: post.id }} />}
+            >
+              <IconCopy />
             </Button>
           ) : null}
           {editable && post.targets.length > 0 ? (
