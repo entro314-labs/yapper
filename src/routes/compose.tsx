@@ -583,7 +583,10 @@ function Destinations({
               key={account.id}
               type="button"
               aria-pressed={on}
-              disabled={stale}
+              // A stale account cannot be ADDED, but one already picked (an
+              // older post, a copy) must stay removable, or the post is stuck
+              // aimed at a destination that cannot take it.
+              disabled={stale && !on}
               title={stale ? 'This account needs reconnecting before it can post' : undefined}
               onClick={() => {
                 onToggle(account.id)
@@ -593,7 +596,8 @@ function Destinations({
                 on
                   ? 'border-primary/50 bg-primary/10 text-foreground'
                   : 'border-border/60 text-muted-foreground hover:border-border hover:text-foreground',
-                stale && 'cursor-not-allowed opacity-50',
+                stale && !on && 'cursor-not-allowed opacity-50',
+                stale && on && 'border-destructive/50',
               )}
             >
               <Icon className="size-3.5" style={{ color: brand.tone }} />
