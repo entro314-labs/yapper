@@ -19,7 +19,7 @@
 use serde_json::json;
 
 use super::{GRAPH_VERSION, get_json, id_of, map_error, token_get};
-use crate::error::{AppError, Result};
+use crate::error::{AppError, Result, after_send, unreadable_after_send};
 use crate::http;
 use crate::platforms::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, MediaItem,
@@ -189,8 +189,9 @@ impl Platform for Facebook {
                     ("description", request.body),
                     ("access_token", token.as_str()),
                 ],
+                true,
             )?;
-            let id = id_of(&response, LABEL, "video")?;
+            let id = published_id(&response, "id")?;
             return Ok(Published {
                 remote_url: Some(format!("https://www.facebook.com/{id}")),
                 remote_id: id,
@@ -203,8 +204,8 @@ impl Platform for Facebook {
                 if let Some(link) = request.link {
                     form.push(("link", link));
                 }
-                let response = post_form_at(&format!("{base}/{page}/feed"), &form)?;
-                let id = id_of(&response, LABEL, "post")?;
+                let response = publish_form(&format!("{base}/{page}/feed"), &form)?;
+                let id = published_id(&response, "id")?;
                 Ok(Published {
                     remote_url: Some(format!("https://www.facebook.com/{id}")),
                     remote_id: id,
@@ -219,7 +220,7 @@ impl Platform for Facebook {
                     .get("post_id")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned)
-                    .map_or_else(|| id_of(&response, LABEL, "photo"), Ok)?;
+                    .map_or_else(|| published_id(&response, "id"), Ok)?;
                 Ok(Published {
                     remote_url: Some(format!("https://www.facebook.com/{id}")),
                     remote_id: id,
@@ -247,8 +248,8 @@ impl Platform for Facebook {
                     .iter()
                     .map(|(key, value)| (key.as_str(), value.as_str()))
                     .collect();
-                let response = post_form_at(&format!("{base}/{page}/feed"), &pairs)?;
-                let id = id_of(&response, LABEL, "post")?;
+                let response = publish_form(&format!("{base}/{page}/feed"), &pairs)?;
+                let id = published_id(&response, "id")?;
                 Ok(Published {
                     remote_url: Some(format!("https://www.facebook.com/{id}")),
                     remote_id: id,
@@ -366,8 +367,8 @@ fn upload_photo(
     caption: Option<&str>,
     published: bool,
 ) -> Result<serde_json::Value> {
-    let published = if published { "true" } else { "false" };
-    let mut fields: Vec<(&str, &str)> = vec![("published", published), ("access_token", token)];
+    let flag = if published { "true" } else { "false" };
+    let mut fields: Vec<(&str, &str)> = vec![("published", flag), ("access_token", token)];
     if let Some(caption) = caption {
         fields.push(("caption", caption));
     }
@@ -379,12 +380,22 @@ fn upload_photo(
     if let Some(alt) = alt {
         fields.push(("alt_text_custom", alt));
     }
-    upload_bytes(&format!("{base}/{page}/photos"), item, &fields)
+    upload_bytes(&format!("{base}/{page}/photos"), item, &fields, published)
 }
 
 /// A multipart POST carrying the file as `source` — the byte path no other Meta
 /// surface offers.
-fn upload_bytes(url: &str, item: &MediaItem, fields: &[(&str, &str)]) -> Result<serde_json::Value> {
+///
+/// `publishes` marks the upload that puts the post on the Page (a video, or a
+/// lone published photo): a lost answer to it is [`after_send`]'s to classify,
+/// because a retry would post it again. An unpublished photo is just an
+/// upload and retries like one.
+fn upload_bytes(
+    url: &str,
+    item: &MediaItem,
+    fields: &[(&str, &str)],
+    publishes: bool,
+) -> Result<serde_json::Value> {
     let part = reqwest::blocking::multipart::Part::bytes(item.bytes.clone())
         .file_name("upload")
         .mime_str(&item.mime)
@@ -396,16 +407,49 @@ fn upload_bytes(url: &str, item: &MediaItem, fields: &[(&str, &str)]) -> Result<
         form = form.text((*key).to_string(), (*value).to_string());
     }
 
-    let (status, body) = http::read_body(http::client().post(url).multipart(form).send()?);
+    let request = http::client().post(url).multipart(form);
+    let response = if publishes {
+        request.send().map_err(after_send)?
+    } else {
+        request.send()?
+    };
+    let (status, body) = http::read_body(response);
     if !(200..300).contains(&status) {
         return Err(map_error(status, &body, LABEL));
     }
-    serde_json::from_str(&body)
-        .map_err(|e| AppError::Platform(format!("{LABEL} returned an unreadable response: {e}")))
+    serde_json::from_str(&body).map_err(|e| {
+        if publishes {
+            unreadable_after_send(LABEL, e)
+        } else {
+            AppError::Platform(format!("{LABEL} returned an unreadable response: {e}"))
+        }
+    })
 }
 
-fn post_form_at(url: &str, form: &[(&str, &str)]) -> Result<serde_json::Value> {
-    super::post_form(url, form, LABEL)
+/// The `/feed` POST that puts a post on the Page. Sent once — see
+/// [`after_send`].
+fn publish_form(url: &str, form: &[(&str, &str)]) -> Result<serde_json::Value> {
+    let (status, body) = http::read_body(
+        http::client()
+            .post(url)
+            .form(form)
+            .send()
+            .map_err(after_send)?,
+    );
+    if !(200..300).contains(&status) {
+        return Err(map_error(status, &body, LABEL));
+    }
+    serde_json::from_str(&body).map_err(|e| unreadable_after_send(LABEL, e))
+}
+
+/// The id of what a publishing call created. Missing, the post is probably
+/// live anyway, so this is [`unreadable_after_send`] rather than a retry.
+fn published_id(response: &serde_json::Value, key: &str) -> Result<String> {
+    response
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| unreadable_after_send(LABEL, format!("it carried no `{key}`")))
 }
 
 /// The consent screen this connection asks for. Ads permissions are opt-in, so

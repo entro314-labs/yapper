@@ -28,7 +28,7 @@ use super::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, MediaItem,
     Platform, PlatformId, PlatformInfo, PublishRequest, Published,
 };
-use crate::error::{AppError, Result, from_status};
+use crate::error::{AppError, Result, after_send, from_status, unreadable_after_send};
 use crate::http;
 use crate::oauth::{self, OAuthConfig, REDIRECT_URI};
 
@@ -154,17 +154,15 @@ impl Platform for X {
                 .post(format!("{API_BASE}/tweets"))
                 .bearer_auth(token)
                 .json(&payload)
-                .send()?,
+                .send()
+                .map_err(after_send)?,
         );
         if !(200..300).contains(&status) {
             return Err(map_error(status, &body));
         }
 
-        let created: Created = serde_json::from_str(&body).map_err(|e| {
-            AppError::Platform(format!(
-                "X accepted the post but the reply was unreadable: {e}"
-            ))
-        })?;
+        let created: Created =
+            serde_json::from_str(&body).map_err(|e| unreadable_after_send("X", e))?;
 
         let handle = request.account.handle.trim_start_matches('@');
         Ok(Published {

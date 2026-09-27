@@ -5,7 +5,7 @@
 //! `INVALID_INPUT`, `UNAUTHORIZED` and `CONFLICT` because none of them fix
 //! themselves, and `UNAUTHORIZED` is what flips an account into the
 //! "reconnect" state in the UI. Adding a variant means deciding which of those
-//! two behaviours it wants.
+//! two behaviours it wants. `UNCONFIRMED` is on the no-retry list too.
 
 use std::fmt;
 
@@ -33,6 +33,12 @@ pub enum AppError {
     /// Ours: a broken store, an unreachable keychain, a bug.
     #[error("[INTERNAL] {0}")]
     Internal(String),
+    /// The request that makes a post public was sent and its answer was lost —
+    /// a timeout after connecting, a dropped connection, a success reply with
+    /// no readable id. The post may be live. Terminal: only the user can check,
+    /// and an automatic retry is how one post becomes two.
+    #[error("[UNCONFIRMED] {0}")]
+    Unconfirmed(String),
 }
 
 impl AppError {
@@ -78,6 +84,33 @@ impl From<reqwest::Error> for AppError {
             Self::Platform(strip_url(&err))
         }
     }
+}
+
+/// Classifies a failed send of the request that makes a post public.
+///
+/// Only a failure to CONNECT (or to build the request at all) proves nothing
+/// reached the remote, so only that stays a retryable [`AppError::Network`].
+/// Anything after the connection opened — a timeout waiting for the answer, a
+/// reset mid-response — may have come after the platform created the post.
+pub fn after_send(err: reqwest::Error) -> AppError {
+    if err.is_connect() || err.is_builder() {
+        return AppError::from(err);
+    }
+    AppError::Unconfirmed(format!(
+        "The connection failed after the post was sent ({}), so it may have gone out. \
+         Check whether it did before retrying.",
+        strip_url(&err)
+    ))
+}
+
+/// A 2xx to the publishing request whose body did not say what was created.
+/// The platform accepted it, so the post is probably live — see
+/// [`AppError::Unconfirmed`] for why that is terminal.
+pub fn unreadable_after_send(platform: &str, cause: impl fmt::Display) -> AppError {
+    AppError::Unconfirmed(format!(
+        "{platform} accepted the post but its reply could not be read ({cause}), so it has \
+         probably gone out. Check whether it did before retrying."
+    ))
 }
 
 /// reqwest's Display embeds the full request URL, which for a token exchange can
@@ -160,6 +193,58 @@ pub fn internal(context: &str, cause: impl fmt::Display) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quick_client() -> reqwest::blocking::Client {
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_millis(300))
+            .build()
+            .expect("client")
+    }
+
+    #[test]
+    fn a_refused_connection_never_reached_the_platform_and_stays_retryable() {
+        // Bind then drop: the port is closed, so the connect itself fails.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr")
+            .port();
+        let err = quick_client()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .expect_err("nothing listens there");
+        let err = after_send(err);
+        assert!(err.is_retryable(), "{err}");
+    }
+
+    #[test]
+    fn a_timeout_after_connecting_may_have_posted_and_is_terminal() {
+        // The server accepts the connection and never answers — exactly what a
+        // platform that created the post and then stalled looks like.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let holder = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            drop(stream);
+        });
+        let err = quick_client()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body("post")
+            .send()
+            .expect_err("no answer comes");
+        let err = after_send(err);
+        assert!(matches!(err, AppError::Unconfirmed(_)), "{err}");
+        assert!(!err.is_retryable());
+        assert!(err.to_string().contains("before retrying"), "{err}");
+        holder.join().expect("holder");
+    }
+
+    #[test]
+    fn an_unreadable_success_is_terminal() {
+        let err = unreadable_after_send("Reddit", "EOF");
+        assert!(!err.is_retryable(), "{err}");
+    }
 
     #[test]
     fn a_401_is_a_credential_problem() {

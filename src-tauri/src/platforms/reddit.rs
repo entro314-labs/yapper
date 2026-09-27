@@ -15,7 +15,7 @@ use super::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, Platform,
     PlatformId, PlatformInfo, PublishRequest, Published,
 };
-use crate::error::{AppError, Result, from_status};
+use crate::error::{AppError, Result, after_send, from_status, unreadable_after_send};
 use crate::http;
 use crate::oauth::{self, OAuthConfig, REDIRECT_URI};
 
@@ -140,7 +140,8 @@ impl Platform for Reddit {
                 .post(format!("{API_BASE}/api/submit"))
                 .bearer_auth(&request.secret.access_token)
                 .form(&form)
-                .send()?,
+                .send()
+                .map_err(after_send)?,
         );
         if !(200..300).contains(&status) {
             return Err(from_status(status, &body, "Reddit"));
@@ -188,8 +189,8 @@ fn fetch_me(token: &str) -> Result<Me> {
 /// `/api/submit` returns 200 whether it worked or not. The truth is in
 /// `json.errors`, an array of `[CODE, human message, field]` triples.
 fn parse_submit(body: &str) -> Result<Published> {
-    let parsed: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| AppError::Platform(format!("Reddit returned an unreadable response: {e}")))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| unreadable_after_send("Reddit", e))?;
 
     if let Some(errors) = parsed
         .pointer("/json/errors")
@@ -230,9 +231,7 @@ fn parse_submit(body: &str) -> Result<Published> {
         .and_then(|value| value.get("name").or_else(|| value.get("id")))
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| {
-            AppError::Platform("Reddit accepted the post but named no submission.".into())
-        })?;
+        .ok_or_else(|| unreadable_after_send("Reddit", "it named no submission"))?;
     Ok(Published {
         remote_id: id,
         remote_url: url,
@@ -275,6 +274,9 @@ mod tests {
 
     #[test]
     fn a_response_with_neither_errors_nor_data_is_not_treated_as_success() {
-        assert!(parse_submit(r#"{"json":{"errors":[]}}"#).is_err());
+        // Nor as something to retry: Reddit said 200 with no complaint, so the
+        // submission probably exists and a second send would duplicate it.
+        let err = parse_submit(r#"{"json":{"errors":[]}}"#).expect_err("no id");
+        assert!(matches!(err, AppError::Unconfirmed(_)), "{err}");
     }
 }

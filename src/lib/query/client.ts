@@ -14,14 +14,16 @@ export const queryClient = new QueryClient({
       gcTime: 5 * 60_000,
       retry: (failureCount, error) => {
         // These are the codes nothing fixes by trying again: a missing row, a
-        // rejected input, dead credentials, a contradicted state. Retrying them
-        // only delays the message the user needs to read.
+        // rejected input, dead credentials, a contradicted state, a send whose
+        // answer was lost (retrying that one risks a second post). Retrying
+        // them only delays the message the user needs to read.
         const code = errorCode(error)
         if (
           code === 'NOT_FOUND' ||
           code === 'INVALID_INPUT' ||
           code === 'UNAUTHORIZED' ||
-          code === 'CONFLICT'
+          code === 'CONFLICT' ||
+          code === 'UNCONFIRMED'
         ) {
           return false
         }

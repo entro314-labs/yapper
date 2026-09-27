@@ -16,7 +16,7 @@ use super::{
     AccountSecret, AppCredentials, AuthKind, ConnectInput, Connected, FieldSpec, Limits, Platform,
     PlatformId, PlatformInfo, PublishRequest, Published,
 };
-use crate::error::{AppError, Result, from_status};
+use crate::error::{AppError, Result, after_send, from_status, unreadable_after_send};
 use crate::oauth::{self, OAuthConfig, REDIRECT_URI};
 use crate::{http, secrets};
 
@@ -130,7 +130,7 @@ impl Platform for Mastodon {
                 .post(format!("{instance}/api/v1/statuses"))
                 .bearer_auth(&request.secret.access_token)
                 // A retry after a timeout must not produce a second post. Mastodon
-                // honours this header for ~6 hours and answers a REUSED key with
+                // honours this header for up to an hour and answers a REUSED key with
                 // the original status — so it has to name this destination and no
                 // other. Keyed on the account, two different posts to the same
                 // account inside that window would collapse into one, and the
@@ -140,17 +140,17 @@ impl Platform for Mastodon {
                     format!("windbag-target-{}", request.target_id),
                 )
                 .json(&payload)
-                .send()?,
+                .send()
+                // The key only holds for about an hour, less than the retry
+                // ladder spans, so a lost answer is still the user's to check.
+                .map_err(after_send)?,
         );
         if !(200..300).contains(&status) {
             return Err(from_status(status, &body, "Mastodon"));
         }
 
-        let created: Status = serde_json::from_str(&body).map_err(|e| {
-            AppError::Platform(format!(
-                "Mastodon accepted the post but the reply was unreadable: {e}"
-            ))
-        })?;
+        let created: Status =
+            serde_json::from_str(&body).map_err(|e| unreadable_after_send("Mastodon", e))?;
         Ok(Published {
             remote_id: created.id,
             remote_url: created.url,
