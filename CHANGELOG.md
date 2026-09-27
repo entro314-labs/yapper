@@ -141,6 +141,14 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Changed
 
+- **A partly sent post can be edited, and saving re-queues only what did not go
+  out.** Destinations that already published keep their copy and permalink; the
+  composer names them and says the edit applies to the rest. Editing a failed
+  or missed post clears old errors and waiting retries.
+- **Disconnecting an account tidies up the posts it was on.** A post left with
+  no destinations goes back to draft, a partly sent post whose failed
+  destination was removed becomes published, and a disconnect waits until the
+  account has finished sending.
 - **The agent door ships with every install.** It used to be a separate
   `windbag-mcp` binary you had to build from source; it is now the app's own
   executable run with `--mcp`. Settings → Agent door shows the exact
@@ -188,6 +196,23 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Fixed
 
+- **A rescheduled failed post actually sends.** Editing it left the failed
+  destination untouched, so it sat as "Scheduled" with nothing to send.
+- **A post cannot be changed or deleted while it is being sent.** The queue shows
+  it as sending from the moment the send starts, and edits, deletes and
+  removing that destination are refused with a message naming it.
+- **Retrying a destination of a post with no time says why it cannot**, instead
+  of sticking the post in "Sending".
+- **A published post cannot be rescheduled or posted again.**
+- **"Mark it missed" also covers retries.** A post waiting to retry when Windbag
+  closed is marked missed on the next launch instead of going out hours late,
+  and a missed post shows as missed straight away.
+- **The reconnect warning appears as soon as a send finds an account's sign-in
+  no longer works.**
+- **Posts and notes an agent creates over MCP show up in the open window**
+  within about 20 seconds.
+- **The app window can no longer call Meta's ads tools directly.** Nothing used
+  them, and that route skipped the per-call approval an agent host requires.
 - **The delivery chart's "Failed" series is no longer always zero.** Failed
   destinations are drawn on the day the date filter dates them by.
 - **An empty date range no longer hides the stats filters.** The first-run
