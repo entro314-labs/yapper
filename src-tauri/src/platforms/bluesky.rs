@@ -256,7 +256,8 @@ fn post_record(body: &str) -> serde_json::Value {
         // moment the post actually goes out rather than when it was composed.
         "createdAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     });
-    let facets = link_facets(body);
+    let mut facets = link_facets(body);
+    facets.extend(tag_facets(body));
     if !facets.is_empty() {
         record["facets"] = json!(facets);
     }
@@ -692,6 +693,74 @@ fn is_url_terminator(byte: u8) -> bool {
     byte.is_ascii_whitespace() || byte == b'<' || byte == b'>' || byte == b'"'
 }
 
+/// Hashtags, found by the rules Bluesky's own client uses (`TAG_REGEX` and
+/// `detectFacets` in `@atproto/api`), so a tag Windbag posts is the tag
+/// bsky.app would have made of the same text. Like a link, a `#word` with no
+/// facet is plain text: not clickable, not searchable as a tag.
+///
+/// A tag starts with `#` or `＃` at the start of the text or after whitespace
+/// — which is also what keeps a URL's `#fragment` out — and runs to the next
+/// whitespace or invisible separator. It must hold at least one character that
+/// is neither a digit nor punctuation (`#1` is not a tag, `#1st` is), loses its
+/// trailing punctuation, and is dropped past 64 graphemes. The facet spans the
+/// `#` and the tag; the tag value is stored without it.
+fn tag_facets(text: &str) -> Vec<serde_json::Value> {
+    // Zero-width and soft separators the reference regex also stops at.
+    const INVISIBLE: [char; 7] = [
+        '\u{00AD}', '\u{2060}', '\u{200A}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{20E2}',
+    ];
+    let ends_tag = |ch: char| ch.is_whitespace() || INVISIBLE.contains(&ch);
+
+    let mut facets = Vec::new();
+    let mut previous: Option<char> = None;
+    for (start, hash) in text.char_indices() {
+        let after_space = previous.is_none_or(char::is_whitespace);
+        previous = Some(hash);
+        if !(after_space && (hash == '#' || hash == '＃')) {
+            continue;
+        }
+        let rest = &text[start + hash.len_utf8()..];
+        let run = &rest[..rest.find(ends_tag).unwrap_or(rest.len())];
+        // `#️⃣` is the keycap emoji, not a tag.
+        if run.starts_with('\u{FE0F}')
+            || !run
+                .chars()
+                .any(|ch| !ch.is_ascii_digit() && !is_punctuation(ch))
+        {
+            continue;
+        }
+        let tag = run.trim_end_matches(is_punctuation);
+        if tag.is_empty() || tag.graphemes(true).count() > 64 {
+            continue;
+        }
+        let end = start + hash.len_utf8() + tag.len();
+        facets.push(json!({
+            "index": { "byteStart": start, "byteEnd": end },
+            "features": [{ "$type": "app.bsky.richtext.facet#tag", "tag": tag }],
+        }));
+    }
+    facets
+}
+
+/// Unicode's punctuation category (`\p{P}`) for the scripts a post is likely to
+/// use: ASCII, Latin-1, General Punctuation, CJK and fullwidth forms. Not the
+/// symbols — `$`, `+`, `<`, `=`, `>`, `^`, `` ` ``, `|`, `~` are not
+/// punctuation to Unicode, and the reference client keeps them in a tag.
+fn is_punctuation(ch: char) -> bool {
+    matches!(ch,
+        '!' | '"' | '#' | '%' | '&' | '\'' | '(' | ')' | '*' | ',' | '-' | '.' | '/'
+        | ':' | ';' | '?' | '@' | '[' | '\\' | ']' | '_' | '{' | '}'
+        | '\u{A1}' | '\u{A7}' | '\u{AB}' | '\u{B6}' | '\u{B7}' | '\u{BB}' | '\u{BF}'
+        | '\u{2010}'..='\u{2027}' | '\u{2030}'..='\u{2043}' | '\u{2045}'..='\u{2051}'
+        | '\u{2053}'..='\u{205E}'
+        | '\u{3001}'..='\u{3003}' | '\u{3008}'..='\u{3011}' | '\u{3014}'..='\u{301F}'
+        | '\u{3030}' | '\u{303D}' | '\u{30FB}'
+        | '\u{FF01}'..='\u{FF03}' | '\u{FF05}'..='\u{FF0A}' | '\u{FF0C}'..='\u{FF0F}'
+        | '\u{FF1A}' | '\u{FF1B}' | '\u{FF1F}' | '\u{FF20}' | '\u{FF3B}'..='\u{FF3D}'
+        | '\u{FF3F}' | '\u{FF5B}' | '\u{FF5D}' | '\u{FF5F}'..='\u{FF65}'
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -770,6 +839,74 @@ mod tests {
                 .expect_err("outage")
                 .is_retryable()
         );
+    }
+
+    /// The tags `tag_facets` found, with the text each facet spans.
+    fn tags(text: &str) -> Vec<(String, String)> {
+        tag_facets(text)
+            .iter()
+            .map(|facet| {
+                let (start, end) = span(facet);
+                (
+                    facet["features"][0]["tag"]
+                        .as_str()
+                        .expect("tag")
+                        .to_string(),
+                    text[start..end].to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_hashtag_gets_a_tag_facet_over_its_byte_range() {
+        assert_eq!(
+            tags("shipping #rust today"),
+            vec![("rust".into(), "#rust".into())]
+        );
+    }
+
+    #[test]
+    fn trailing_punctuation_is_not_part_of_the_tag() {
+        assert_eq!(
+            tags("so good #rust!"),
+            vec![("rust".into(), "#rust".into())]
+        );
+        assert_eq!(tags("(#rust)."), vec![], "a tag must follow a space");
+    }
+
+    #[test]
+    fn digits_alone_are_not_a_tag_but_digits_with_letters_are() {
+        assert!(tags("we are #1").is_empty());
+        assert_eq!(tags("#1st"), vec![("1st".into(), "#1st".into())]);
+    }
+
+    #[test]
+    fn a_fragment_inside_a_url_is_not_a_tag() {
+        assert!(tags("see https://example.com/#section").is_empty());
+        assert!(tags("a#b").is_empty());
+    }
+
+    #[test]
+    fn tag_ranges_are_utf8_bytes_and_non_latin_tags_count() {
+        assert_eq!(
+            tags("καλημέρα #ελλάδα"),
+            vec![("ελλάδα".into(), "#ελλάδα".into())]
+        );
+        assert_eq!(tags("＃日本"), vec![("日本".into(), "＃日本".into())]);
+    }
+
+    #[test]
+    fn a_keycap_and_an_overlong_tag_are_skipped() {
+        assert!(tags("press #\u{FE0F}\u{20E3}").is_empty());
+        assert!(tags(&format!("#{}", "a".repeat(65))).is_empty());
+        assert_eq!(tags(&format!("#{}", "a".repeat(64))).len(), 1);
+    }
+
+    #[test]
+    fn a_record_carries_link_and_tag_facets_together() {
+        let record = post_record("read https://example.com #rust");
+        assert_eq!(record["facets"].as_array().expect("facets").len(), 2);
     }
 
     #[test]
