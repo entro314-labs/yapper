@@ -437,12 +437,7 @@ pub fn requeue(database: &Arc<Db>, post_id: i64, scheduled_at: &str) -> Result<(
 /// quietly publishes one is the surprising reading. "Post now" is one click
 /// away for the other intent.
 pub fn retry(database: &Db, target_id: i64) -> Result<i64> {
-    let post_id = database
-        .list_posts()?
-        .into_iter()
-        .find(|detail| detail.targets.iter().any(|t| t.id == target_id))
-        .map(|detail| detail.post.id)
-        .ok_or_else(|| AppError::NotFound(format!("No destination with id {target_id}.")))?;
+    let post_id = database.post_of_target(target_id)?;
     if database.get_post(post_id)?.scheduled_at.is_none() {
         return Err(AppError::InvalidInput(
             "This post has no time, so a retry would never send it. Give it a time, or use \

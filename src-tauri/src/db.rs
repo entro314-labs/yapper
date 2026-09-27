@@ -588,6 +588,18 @@ impl Db {
         Ok(())
     }
 
+    /// The post a destination belongs to.
+    pub fn post_of_target(&self, target_id: i64) -> Result<i64> {
+        self.lock()
+            .query_row(
+                "SELECT post_id FROM post_targets WHERE id = ?1",
+                params![target_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound(format!("No destination with id {target_id}.")))
+    }
+
     pub fn list_targets(&self, post_id: i64) -> Result<Vec<PostTarget>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
@@ -1779,6 +1791,17 @@ mod tests {
             !db.claim_target(target).expect("second claim"),
             "two scheduler passes must never publish the same target twice"
         );
+    }
+
+    #[test]
+    fn a_destination_names_its_post() {
+        let (db, _, post) = seeded();
+        let target = db.list_targets(post).expect("targets")[0].id;
+        assert_eq!(db.post_of_target(target).expect("post"), post);
+        assert!(matches!(
+            db.post_of_target(target + 1000),
+            Err(AppError::NotFound(_))
+        ));
     }
 
     #[test]
