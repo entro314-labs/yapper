@@ -178,6 +178,11 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Fixed
 
+- **Assistant drafts are measured the way each destination measures them.**
+  Each draft shows its tightest destination as used/limit from the composer's
+  own check, instead of a raw string length no platform uses.
+- **A hung assistant CLI can no longer freeze Settings.** The version check that
+  decides which backends are available gives up after ten seconds.
 - **The assistant finds `claude` and `codex` when Windbag is opened from Finder,
   the Dock or at login.** It asks your login shell for its PATH instead of using
   the system's minimal one, so neither backend reports "not on PATH" in a
