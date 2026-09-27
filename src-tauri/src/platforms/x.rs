@@ -306,14 +306,64 @@ fn append_segment(
     Ok(())
 }
 
+/// FINALIZE, then — for video and GIF, which X transcodes off the request path —
+/// STATUS until the media is usable. A post naming it earlier is refused.
 fn finalize_upload(token: &str, media_id: &str) -> Result<()> {
-    read(
+    let mut body = read(
         http::client()
             .post(format!("{API_BASE}/media/upload/{media_id}/finalize"))
             .bearer_auth(token)
             .send()?,
     )?;
+    let deadline = std::time::Instant::now() + PROCESSING_BUDGET;
+    while let Some(seconds) = processing_wait(&body)? {
+        let wait = std::time::Duration::from_secs(seconds);
+        if std::time::Instant::now() + wait > deadline {
+            return Err(AppError::Platform(format!(
+                "X is still processing the attachment after {}s.",
+                PROCESSING_BUDGET.as_secs()
+            )));
+        }
+        std::thread::sleep(wait);
+        body = read(
+            http::client()
+                .get(format!("{API_BASE}/media/upload"))
+                .query(&[("command", "STATUS"), ("media_id", media_id)])
+                .bearer_auth(token)
+                .send()?,
+        )?;
+    }
     Ok(())
+}
+
+/// How long one attempt waits for X to process a video. Longer fails
+/// retryably; the next attempt uploads again.
+const PROCESSING_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Reads `processing_info` out of a FINALIZE or STATUS answer: `None` when the
+/// media is ready (no `processing_info` at all means it never needed any),
+/// otherwise the seconds X asked us to wait before looking again.
+fn processing_wait(body: &str) -> Result<Option<u64>> {
+    let parsed: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| AppError::Platform(format!("X returned an unreadable media status: {e}")))?;
+    let Some(info) = parsed.pointer("/data/processing_info") else {
+        return Ok(None);
+    };
+    match info.get("state").and_then(serde_json::Value::as_str) {
+        Some("succeeded") => Ok(None),
+        Some("failed") => Err(AppError::InvalidInput(format!(
+            "X could not process the attachment: {}",
+            info.pointer("/error/message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("no reason given")
+        ))),
+        _ => Ok(Some(
+            info.get("check_after_secs")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1)
+                .max(1),
+        )),
+    }
 }
 
 fn set_alt_text(token: &str, media_id: &str, alt: &str) -> Result<()> {
@@ -457,6 +507,32 @@ mod tests {
             map.insert(*name, value.parse().expect("header value"));
         }
         map
+    }
+
+    #[test]
+    fn media_without_processing_info_is_ready_at_once() {
+        let body = r#"{"data":{"id":"1","media_key":"3_1","size":10}}"#;
+        assert_eq!(processing_wait(body).expect("ready"), None);
+    }
+
+    #[test]
+    fn pending_media_waits_as_long_as_x_asks() {
+        let body =
+            r#"{"data":{"id":"1","processing_info":{"state":"pending","check_after_secs":5}}}"#;
+        assert_eq!(processing_wait(body).expect("pending"), Some(5));
+        let body = r#"{"data":{"id":"1","processing_info":{"state":"in_progress","progress_percent":40}}}"#;
+        assert_eq!(processing_wait(body).expect("in progress"), Some(1));
+        let body =
+            r#"{"data":{"id":"1","processing_info":{"state":"succeeded","progress_percent":100}}}"#;
+        assert_eq!(processing_wait(body).expect("done"), None);
+    }
+
+    #[test]
+    fn media_that_failed_processing_is_terminal_with_xs_reason() {
+        let body = r#"{"data":{"id":"1","processing_info":{"state":"failed","error":{"code":1,"name":"InvalidMedia","message":"Unsupported video codec"}}}}"#;
+        let err = processing_wait(body).expect_err("failed");
+        assert!(!err.is_retryable(), "{err}");
+        assert!(err.to_string().contains("Unsupported video codec"), "{err}");
     }
 
     #[test]
