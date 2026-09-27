@@ -149,17 +149,14 @@ impl Platform for X {
             payload["reply_settings"] = json!(reply_settings);
         }
 
-        let (status, body) = http::read_body(
+        let body = read(
             http::client()
                 .post(format!("{API_BASE}/tweets"))
                 .bearer_auth(token)
                 .json(&payload)
                 .send()
                 .map_err(after_send)?,
-        );
-        if !(200..300).contains(&status) {
-            return Err(map_error(status, &body));
-        }
+        )?;
 
         let created: Created =
             serde_json::from_str(&body).map_err(|e| unreadable_after_send("X", e))?;
@@ -211,16 +208,13 @@ struct MeData {
 }
 
 fn fetch_me(token: &str) -> Result<MeData> {
-    let (status, body) = http::read_body(
+    let body = read(
         http::client()
             .get(format!("{API_BASE}/users/me"))
             .query(&[("user.fields", "profile_image_url")])
             .bearer_auth(token)
             .send()?,
-    );
-    if !(200..300).contains(&status) {
-        return Err(map_error(status, &body));
-    }
+    )?;
 
     let envelope: Envelope = serde_json::from_str(&body)
         .map_err(|e| AppError::Platform(format!("X returned an unreadable profile: {e}")))?;
@@ -250,7 +244,7 @@ fn upload_media(token: &str, item: &MediaItem) -> Result<String> {
 }
 
 fn initialize_upload(token: &str, item: &MediaItem) -> Result<String> {
-    let (status, body) = http::read_body(
+    let body = read(
         http::client()
             .post(format!("{API_BASE}/media/upload/initialize"))
             .bearer_auth(token)
@@ -260,10 +254,7 @@ fn initialize_upload(token: &str, item: &MediaItem) -> Result<String> {
                 "media_category": media_category(&item.mime),
             }))
             .send()?,
-    );
-    if !(200..300).contains(&status) {
-        return Err(map_error(status, &body));
-    }
+    )?;
     let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
         AppError::Platform(format!("X returned an unreadable upload response: {e}"))
     })?;
@@ -289,35 +280,29 @@ fn append_segment(
         .text("segment_index", index.to_string())
         .part("media", part);
 
-    let (status, body) = http::read_body(
+    // APPEND answers 204 with no body when it works.
+    read(
         http::client()
             .post(format!("{API_BASE}/media/upload/{media_id}/append"))
             .bearer_auth(token)
             .multipart(form)
             .send()?,
-    );
-    // APPEND answers 204 with no body when it works.
-    if !(200..300).contains(&status) {
-        return Err(map_error(status, &body));
-    }
+    )?;
     Ok(())
 }
 
 fn finalize_upload(token: &str, media_id: &str) -> Result<()> {
-    let (status, body) = http::read_body(
+    read(
         http::client()
             .post(format!("{API_BASE}/media/upload/{media_id}/finalize"))
             .bearer_auth(token)
             .send()?,
-    );
-    if !(200..300).contains(&status) {
-        return Err(map_error(status, &body));
-    }
+    )?;
     Ok(())
 }
 
 fn set_alt_text(token: &str, media_id: &str, alt: &str) -> Result<()> {
-    let (status, body) = http::read_body(
+    read(
         http::client()
             .post(format!("{API_BASE}/media/metadata"))
             .bearer_auth(token)
@@ -328,11 +313,46 @@ fn set_alt_text(token: &str, media_id: &str, alt: &str) -> Result<()> {
                 "metadata": { "alt_text": { "text": truncate(alt, 1000) } },
             }))
             .send()?,
-    );
-    if !(200..300).contains(&status) {
-        return Err(map_error(status, &body));
-    }
+    )?;
     Ok(())
+}
+
+/// Every X response goes through here: the body on a 2xx, otherwise the
+/// mapped error — carrying, for a rate limit, the wait X's headers named.
+fn read(response: reqwest::blocking::Response) -> Result<String> {
+    let reset = reset_delay(response.headers(), chrono::Utc::now().timestamp());
+    let (status, body) = http::read_body(response);
+    if (200..300).contains(&status) {
+        Ok(body)
+    } else {
+        Err(map_error(status, &body).with_retry_after(reset))
+    }
+}
+
+/// How long a rate-limited response asked us to wait: `Retry-After` when it is
+/// sent, otherwise the reset of whichever window is spent — the 15-minute one
+/// (`x-rate-limit-*`) or the 24-hour user and app caps on posting
+/// (`x-user-limit-24hour-*`, `x-app-limit-24hour-*`). Resets are epoch
+/// seconds; the latest spent one wins, because every spent window refuses.
+fn reset_delay(headers: &reqwest::header::HeaderMap, now: i64) -> Option<std::time::Duration> {
+    let number = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<i64>().ok())
+    };
+    if let Some(seconds) = number("retry-after") {
+        return u64::try_from(seconds)
+            .ok()
+            .map(std::time::Duration::from_secs);
+    }
+    ["x-rate-limit", "x-user-limit-24hour", "x-app-limit-24hour"]
+        .iter()
+        .filter(|window| number(&format!("{window}-remaining")) == Some(0))
+        .filter_map(|window| number(&format!("{window}-reset")))
+        .max()
+        .and_then(|reset| u64::try_from(reset - now).ok())
+        .map(std::time::Duration::from_secs)
 }
 
 fn media_category(mime: &str) -> &'static str {
@@ -414,6 +434,49 @@ mod tests {
             );
             assert!(err.to_string().contains("credit"), "{err}");
         }
+    }
+
+    fn headers(pairs: &[(&'static str, &str)]) -> reqwest::header::HeaderMap {
+        let mut map = reqwest::header::HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, value.parse().expect("header value"));
+        }
+        map
+    }
+
+    #[test]
+    fn a_spent_daily_cap_waits_for_its_reset_not_the_window() {
+        // The 15-minute window still has room; the 24-hour posting cap does
+        // not, and it is the one that decides when a retry can work.
+        let now = 1_000_000;
+        let delay = reset_delay(
+            &headers(&[
+                ("x-rate-limit-remaining", "40"),
+                ("x-rate-limit-reset", "1000900"),
+                ("x-user-limit-24hour-remaining", "0"),
+                ("x-user-limit-24hour-reset", "1036000"),
+            ]),
+            now,
+        );
+        assert_eq!(delay, Some(std::time::Duration::from_secs(36_000)));
+    }
+
+    #[test]
+    fn retry_after_wins_and_no_spent_window_means_no_named_wait() {
+        assert_eq!(
+            reset_delay(&headers(&[("retry-after", "30")]), 0),
+            Some(std::time::Duration::from_secs(30))
+        );
+        assert_eq!(
+            reset_delay(
+                &headers(&[
+                    ("x-rate-limit-remaining", "3"),
+                    ("x-rate-limit-reset", "99")
+                ]),
+                0
+            ),
+            None
+        );
     }
 
     #[test]

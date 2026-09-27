@@ -24,9 +24,17 @@ pub enum AppError {
     /// The request contradicts current state (already published, duplicate account).
     #[error("[CONFLICT] {0}")]
     Conflict(String),
-    /// The remote said no. Retryable: rate limits and 5xx live here.
+    /// The remote said no. Retryable: 5xx and other passing failures live here.
     #[error("[PLATFORM] {0}")]
     Platform(String),
+    /// The remote asked us to slow down. Retryable, and not before
+    /// `retry_after` when the remote said how long — the scheduler waits the
+    /// longer of that and its own backoff.
+    #[error("[RATE_LIMITED] {message}")]
+    RateLimited {
+        message: String,
+        retry_after: Option<std::time::Duration>,
+    },
     /// Could not reach the remote at all. Always retryable.
     #[error("[NETWORK] {0}")]
     Network(String),
@@ -46,7 +54,32 @@ impl AppError {
     /// user must act on (bad credentials, an over-length post) is terminal;
     /// everything the world might fix on its own is not.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::Platform(_) | Self::Network(_))
+        matches!(
+            self,
+            Self::Platform(_) | Self::RateLimited { .. } | Self::Network(_)
+        )
+    }
+
+    /// How long the remote said to wait before trying again, if it said.
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::RateLimited { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
+    /// Attaches the wait a response's headers named to a rate limit. Headers
+    /// are read before the body consumes the response, so the error is built
+    /// first and told the wait after.
+    #[must_use]
+    pub fn with_retry_after(self, delay: Option<std::time::Duration>) -> Self {
+        match self {
+            Self::RateLimited { message, .. } => Self::RateLimited {
+                message,
+                retry_after: delay,
+            },
+            other => other,
+        }
     }
 }
 
@@ -156,7 +189,10 @@ pub fn from_status(status: u16, body: &str, platform: &str) -> AppError {
         403 => AppError::InvalidInput(format!("{platform} refused this request (403): {detail}")),
         404 => AppError::NotFound(format!("{platform} returned 404: {detail}")),
         409 => AppError::Conflict(format!("{platform} returned 409: {detail}")),
-        429 => AppError::Platform(format!("{platform} rate-limited the request. {detail}")),
+        429 => AppError::RateLimited {
+            message: format!("{platform} rate-limited the request. {detail}"),
+            retry_after: None,
+        },
         500..=599 => AppError::Platform(format!("{platform} server error {status}. {detail}")),
         _ => AppError::InvalidInput(format!(
             "{platform} rejected the request ({status}): {detail}"

@@ -257,8 +257,15 @@ pub fn settle(
                 database.set_account_status(target.account_id, db::ACCOUNT_NEEDS_REAUTH)?;
             }
 
+            // A remote that named its reset is waited out: retrying before it
+            // only spends an attempt on the same refusal. Past the ladder's
+            // span that still leaves one attempt, at the reset.
             let retry_at = if err.is_retryable() && attempts < MAX_ATTEMPTS {
-                Some(Utc::now() + backoff(attempts))
+                let asked = err
+                    .retry_after()
+                    .and_then(|delay| chrono::Duration::from_std(delay).ok())
+                    .unwrap_or_else(chrono::Duration::zero);
+                Some(Utc::now() + backoff(attempts).max(asked))
             } else {
                 None
             };
@@ -537,6 +544,42 @@ mod tests {
             log.iter()
                 .any(|entry| !entry.ok && entry.detail.as_deref().unwrap_or("").contains("boom"))
         );
+    }
+
+    fn next_attempt_after(retry_after: Option<std::time::Duration>) -> chrono::Duration {
+        let (database, _, post, target) = store();
+        let before = Utc::now();
+        settle(
+            &database,
+            target,
+            post,
+            1,
+            Err(AppError::RateLimited {
+                message: "slow down".into(),
+                retry_after,
+            }),
+        )
+        .expect("settle");
+        let stored = &database.list_targets(post).expect("targets")[0];
+        assert_eq!(stored.status, TARGET_PENDING);
+        let at = db::parse_rfc3339(stored.next_attempt_at.as_deref().expect("parked"))
+            .expect("timestamp");
+        at - before
+    }
+
+    #[test]
+    fn a_rate_limit_that_names_its_reset_waits_for_it() {
+        // X's daily cap resets hours away; retrying in a minute only spends an
+        // attempt on the same refusal.
+        let wait = next_attempt_after(Some(std::time::Duration::from_hours(3)));
+        assert!(wait >= chrono::Duration::hours(3), "{wait}");
+    }
+
+    #[test]
+    fn a_reset_sooner_than_the_backoff_does_not_shorten_it() {
+        let wait = next_attempt_after(Some(std::time::Duration::from_secs(5)));
+        assert!(wait >= backoff(1), "{wait}");
+        assert!(wait < backoff(1) + chrono::Duration::seconds(5), "{wait}");
     }
 
     #[test]
