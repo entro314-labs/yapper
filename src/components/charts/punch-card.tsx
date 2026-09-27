@@ -5,8 +5,8 @@ import type { Bucket } from '@/lib/tauri/types'
 /**
  * When you actually post: weekday down, hour across.
  *
- * `byHour` and `byWeekday` each collapse one axis of this, and "Tuesday at 09:00" is not
- * recoverable from the two of them — which is the whole reason the backend groups a third time.
+ * An hour breakdown and a weekday breakdown would each collapse one axis of this, and "Tuesday at
+ * 09:00" is not recoverable from the two of them — which is why the backend groups by the slot.
  *
  * A magnitude encoding, so the ramp is ONE hue running light → dark (`--ramp-from` → `--ramp-to`),
  * never a rainbow. An empty cell is the surface, not the lightest step: "never posted here" and

@@ -184,11 +184,10 @@ pub struct Stats {
     pub by_account: Vec<Bucket>,
     /// Local hour of day, 0–23, over published destinations only.
     pub by_hour: Vec<Bucket>,
-    pub by_weekday: Vec<Bucket>,
     pub by_day: Vec<Bucket>,
     /// Weekday × hour, keyed `"{weekday}-{hour}"` with both zero-padded. The
-    /// punch card: `by_hour` and `by_weekday` each collapse one axis of it, and
-    /// "Tuesday at 09:00" is not recoverable from the two of them.
+    /// punch card: "Tuesday at 09:00" is not recoverable from an hour and a
+    /// weekday breakdown, each of which collapses one axis of it.
     pub by_slot: Vec<Bucket>,
     /// Failures grouped by their error code — the taxonomy that says whether a
     /// platform is flaky or the posts are wrong.
@@ -204,13 +203,12 @@ pub struct Stats {
     pub engagement_gaps: Vec<(PlatformId, String)>,
 }
 
-/// The seven breakdowns, filled together as destinations are walked.
+/// The six breakdowns, filled together as destinations are walked.
 #[derive(Default)]
 struct Groupers {
     platform: Grouper,
     account: Grouper,
     hour: Grouper,
-    weekday: Grouper,
     day: Grouper,
     slot: Grouper,
     failure: Grouper,
@@ -257,12 +255,6 @@ impl Groupers {
             self.hour.add(
                 &format!("{:02}", local.hour()),
                 &format!("{:02}:00", local.hour()),
-                post_id,
-                true,
-            );
-            self.weekday.add(
-                &local.weekday().number_from_monday().to_string(),
-                &local.format("%a").to_string(),
                 post_id,
                 true,
             );
@@ -349,7 +341,6 @@ pub fn compute(database: &Db, filter: &StatsFilter) -> Result<Stats> {
         by_platform: groupers.platform.finish(Sort::Count),
         by_account: groupers.account.finish(Sort::Count),
         by_hour: groupers.hour.finish(Sort::Key),
-        by_weekday: groupers.weekday.finish(Sort::Key),
         by_day: groupers.day.finish(Sort::Key),
         by_slot: groupers.slot.finish(Sort::Key),
         failures: groupers.failure.finish(Sort::Count),

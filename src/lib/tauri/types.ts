@@ -322,7 +322,6 @@ export interface Stats {
   byPlatform: Bucket[]
   byAccount: Bucket[]
   byHour: Bucket[]
-  byWeekday: Bucket[]
   byDay: Bucket[]
   /** Weekday × hour, keyed `"{weekday}-{hour}"`. The punch card. */
   bySlot: Bucket[]
