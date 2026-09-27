@@ -356,6 +356,7 @@ pub fn save_post(app: AppHandle, state: State<'_, AppState>, input: SavePostInpu
             account.platform,
             &input.body,
             title,
+            link,
             media.len(),
             scheduler::effective_char_limit(&account, adapter),
         )?;
@@ -467,10 +468,15 @@ pub fn check_post(
     state: State<'_, AppState>,
     body: String,
     title: Option<String>,
+    link: Option<String>,
     media_count: usize,
     account_ids: Vec<i64>,
 ) -> Result<Vec<TargetCheck>> {
     let title = title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let link = link
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
@@ -480,9 +486,10 @@ pub fn check_post(
             let account = state.db.get_account(account_id)?;
             let adapter = platforms::adapter(account.platform);
             let limit = scheduler::effective_char_limit(&account, adapter);
-            let error = platforms::validate(account.platform, &body, title, media_count, limit)
-                .err()
-                .map(|err| err.to_string());
+            let error =
+                platforms::validate(account.platform, &body, title, link, media_count, limit)
+                    .err()
+                    .map(|err| err.to_string());
             Ok(TargetCheck {
                 account_id,
                 platform: account.platform,

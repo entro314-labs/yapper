@@ -40,6 +40,7 @@ impl Platform for Reddit {
                 supports_alt_text: false,
                 requires_title: true,
                 requires_media: false,
+                link_is_content: true,
             },
             connect_fields: Vec::new(),
             app_fields: vec![FieldSpec::text(

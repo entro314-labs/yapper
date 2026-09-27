@@ -58,6 +58,7 @@ impl Platform for Threads {
                 supports_alt_text: true,
                 requires_title: false,
                 requires_media: false,
+                link_is_content: false,
             },
             connect_fields: Vec::new(),
             app_fields: vec![

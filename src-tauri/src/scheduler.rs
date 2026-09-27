@@ -200,6 +200,7 @@ fn publish_one(database: &Arc<Db>, item: &DueTarget) -> Result<Published> {
         account.platform,
         &item.post.body,
         item.post.title.as_deref(),
+        item.post.link.as_deref(),
         media.len(),
         limit,
     )?;

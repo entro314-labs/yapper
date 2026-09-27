@@ -52,6 +52,7 @@ impl Platform for Facebook {
                 supports_alt_text: true,
                 requires_title: false,
                 requires_media: false,
+                link_is_content: true,
             },
             connect_fields: vec![
                 FieldSpec::text(

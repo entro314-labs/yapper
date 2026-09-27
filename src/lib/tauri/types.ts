@@ -40,6 +40,8 @@ export interface Limits {
   requiresTitle: boolean
   /** Instagram: a caption is never a post by itself, so the composer refuses one with no media. */
   requiresMedia: boolean
+  /** Reddit and Facebook: a URL with no text is a whole post (a link submission, a link share). */
+  linkIsContent: boolean
 }
 
 /** `platforms::PlatformInfo` */

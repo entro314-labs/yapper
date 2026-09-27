@@ -280,6 +280,7 @@ impl Session {
                 account.platform,
                 &body,
                 title,
+                link,
                 0,
                 scheduler::effective_char_limit(&account, adapter),
             )?;

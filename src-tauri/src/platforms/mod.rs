@@ -197,6 +197,9 @@ impl FieldSpec {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
+// Each flag is an independent fact a platform documents, read one at a time by
+// `validate` and the composer — a table of facts, not a state to model.
+#[expect(clippy::struct_excessive_bools)]
 pub struct Limits {
     /// Body length the platform accepts. Counted in Unicode scalar values, which
     /// is what most of them actually measure; Bluesky counts graphemes and
@@ -210,6 +213,10 @@ pub struct Limits {
     /// by itself. There is no text-only post to fall back to, so this is refused
     /// at compose time rather than at 3am.
     pub requires_media: bool,
+    /// Reddit and Facebook: a URL with no text is a whole post — a link
+    /// submission, a link share. Everywhere else the link rides along with the
+    /// text (or is ignored), so it cannot stand in for an empty body.
+    pub link_is_content: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -452,6 +459,7 @@ pub fn validate(
     id: PlatformId,
     body: &str,
     title: Option<&str>,
+    link: Option<&str>,
     media_count: usize,
     effective_char_limit: usize,
 ) -> Result<()> {
@@ -459,10 +467,17 @@ pub fn validate(
     let info = platform.info();
     let length = platform.count_body(body);
 
-    if body.trim().is_empty() && media_count == 0 {
+    let stands_on_link =
+        info.limits.link_is_content && link.is_some_and(|url| !url.trim().is_empty());
+    if body.trim().is_empty() && media_count == 0 && !stands_on_link {
         return Err(AppError::InvalidInput(format!(
-            "{} needs text or an attachment.",
-            info.name
+            "{} needs text or an attachment{}.",
+            info.name,
+            if info.limits.link_is_content {
+                ", or a link"
+            } else {
+                ""
+            }
         )));
     }
     if length > effective_char_limit {
@@ -499,7 +514,7 @@ mod tests {
     #[test]
     fn rejects_a_body_over_the_effective_limit() {
         let body = "x".repeat(301);
-        let err = validate(PlatformId::Bluesky, &body, None, 0, 300).unwrap_err();
+        let err = validate(PlatformId::Bluesky, &body, None, None, 0, 300).unwrap_err();
         assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
     }
 
@@ -508,20 +523,31 @@ mod tests {
         // A Mastodon instance raising its own max_characters must let a longer
         // body through even though the platform default is 500.
         let body = "x".repeat(1200);
-        assert!(validate(PlatformId::Mastodon, &body, None, 0, 5000).is_ok());
-        assert!(validate(PlatformId::Mastodon, &body, None, 0, 500).is_err());
+        assert!(validate(PlatformId::Mastodon, &body, None, None, 0, 5000).is_ok());
+        assert!(validate(PlatformId::Mastodon, &body, None, None, 0, 500).is_err());
     }
 
     #[test]
     fn reddit_needs_a_title() {
-        assert!(validate(PlatformId::Reddit, "body", None, 0, 40_000).is_err());
-        assert!(validate(PlatformId::Reddit, "body", Some("Title"), 0, 40_000).is_ok());
+        assert!(validate(PlatformId::Reddit, "body", None, None, 0, 40_000).is_err());
+        assert!(validate(PlatformId::Reddit, "body", Some("Title"), None, 0, 40_000).is_ok());
     }
 
     #[test]
     fn an_empty_post_with_media_is_allowed() {
-        assert!(validate(PlatformId::Bluesky, "", None, 1, 300).is_ok());
-        assert!(validate(PlatformId::Bluesky, "", None, 0, 300).is_err());
+        assert!(validate(PlatformId::Bluesky, "", None, None, 1, 300).is_ok());
+        assert!(validate(PlatformId::Bluesky, "", None, None, 0, 300).is_err());
+    }
+
+    #[test]
+    fn a_link_is_content_where_the_platform_posts_one() {
+        // A Reddit link submission is a title and a URL — no body, no media.
+        let link = Some("https://example.com");
+        assert!(validate(PlatformId::Reddit, "", Some("Title"), link, 0, 40_000).is_ok());
+        assert!(validate(PlatformId::Facebook, "", None, link, 0, 63_206).is_ok());
+        // Bluesky ignores the link field, so a link alone would post nothing.
+        assert!(validate(PlatformId::Bluesky, "", None, link, 0, 300).is_err());
+        assert!(validate(PlatformId::Reddit, "", Some("Title"), None, 0, 40_000).is_err());
     }
 
     #[test]

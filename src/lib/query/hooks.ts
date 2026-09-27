@@ -110,15 +110,17 @@ export function useWebHost() {
 export function useCheckPost(
   body: string,
   title: string | null,
+  link: string | null,
   mediaCount: number,
   accountIds: number[],
 ) {
   return useQuery({
-    queryKey: queryKeys.queue.check(body, title, mediaCount, accountIds),
+    queryKey: queryKeys.queue.check(body, title, link, mediaCount, accountIds),
     queryFn: async () =>
       invokeCommand<TargetCheck[]>(IPC_COMMANDS.checkPost, {
         body,
         title,
+        link,
         mediaCount,
         accountIds,
       }),

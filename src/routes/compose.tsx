@@ -120,7 +120,7 @@ function ComposeScreen() {
     setBody((current) => current || note.body)
   }, [id, noteId, seededNote, notes.data, openSuggest])
 
-  const checks = useCheckPost(body, title || null, media.length, selected)
+  const checks = useCheckPost(body, title || null, link.trim() || null, media.length, selected)
   const platformById = React.useMemo(
     () => new Map((platforms.data ?? []).map((info) => [info.id, info])),
     [platforms.data],

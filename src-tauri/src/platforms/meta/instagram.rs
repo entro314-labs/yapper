@@ -55,6 +55,7 @@ impl Platform for Instagram {
                 supports_alt_text: false,
                 requires_title: false,
                 requires_media: true,
+                link_is_content: false,
             },
             connect_fields: Vec::new(),
             app_fields: vec![
