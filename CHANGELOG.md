@@ -8,6 +8,15 @@ All notable changes to Windbag are documented here. The format follows
 
 ### Added
 
+- **Duplicate a post as a new draft.** Sent posts in the queue and published
+  posts on the calendar open as a copy in the composer — text, destinations,
+  options and attachments. Saving creates a new post; the original is never
+  touched.
+- **Keyboard shortcuts.** Cmd/Ctrl+Enter schedules or saves the draft in the
+  composer, Cmd/Ctrl+S saves a note, and Enter submits the connect dialog.
+- **Reorder attachments.** Move-up and move-down buttons set the order
+  attachments are posted in, which is how a carousel is sequenced.
+
 - **Updates, and the pipeline behind them.** Windbag checks its releases
   repository at launch and once a day after that, and Settings → Updates carries
   the whole flow: the channel to follow (stable, beta, alpha, or matching this
@@ -152,6 +161,31 @@ All notable changes to Windbag are documented here. The format follows
   picker. It previously parsed them out of the help sentence.
 
 ### Fixed
+
+- **Failed loads are shown as errors, not as empty screens.** A store that
+  cannot be read no longer shows "Nothing queued" or "No accounts yet"; each
+  screen says what failed, with a Retry.
+- **Reconnect actually reconnects.** The marker on an account that needs
+  re-authorising is now a button that opens sign-in for that account and
+  updates it in place.
+- **Calendar posts open when clicked, and published ones cannot be dragged.**
+  Dragging a published post used to put it back in the queue, where it later
+  showed as missed.
+- **Disconnecting, removing a platform app and deleting a note ask first.**
+  Disconnect says it removes that account's destinations, delivery history and
+  stats from Windbag, and that published posts stay on the platform.
+- **Unsaved edits are not lost silently.** Leaving the composer, or switching
+  or starting a note with unsaved changes, asks before discarding; "Draft from
+  this" saves the note first.
+- **Pinning a note no longer saves half-finished edits.**
+- **The assistant Model and Grace window fields no longer drop characters.**
+  They save when you leave the field; an empty or out-of-range grace window
+  reverts instead of saving.
+- **A destination that needs reconnecting can be removed from a post.**
+- **The assistant panel shows every selected note, names its backend, and sits
+  below Destinations**, so drafts are written to the chosen destinations'
+  limits.
+- **Settings controls have accessible names.**
 
 - **The macOS traffic lights sit where macOS puts them.** Their position was
   pinned from `tauri.conf.json`, which macOS 26 stopped honouring vertically —
