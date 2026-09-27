@@ -295,11 +295,15 @@ export interface Bucket {
 
 /** `stats::EngagementTotals` */
 export interface EngagementTotals {
-  likes: number
-  reposts: number
-  replies: number
+  /**
+   * Each dimension is `null` when no measured destination reports it — Bluesky and Mastodon publish
+   * no impressions — because a summed zero would be a claim the platform never made.
+   */
+  likes: number | null
+  reposts: number | null
+  replies: number | null
   /** Impressions, where the platform reports them — Threads, Instagram and X. */
-  views: number
+  views: number | null
   /**
    * How many destinations the totals are summed from — without it, "0 likes" and "nothing fetched
    * yet" look identical.
@@ -334,10 +338,11 @@ export interface Stats {
 export interface EngagementRow {
   platform: PlatformId
   label: string
-  likes: number
-  reposts: number
-  replies: number
-  views: number
+  /** `null` per dimension on the same terms as `EngagementTotals`. */
+  likes: number | null
+  reposts: number | null
+  replies: number | null
+  views: number | null
   measured: number
 }
 
@@ -349,11 +354,15 @@ export interface TopPost {
   excerpt: string
   publishedAt: string | null
   remoteUrl: string | null
-  likes: number
-  reposts: number
-  replies: number
-  views: number
-  /** Likes + reposts + replies. What the list is ranked by; views are reach, not earned. */
+  /** `null` where the platform did not report that dimension for this post. */
+  likes: number | null
+  reposts: number | null
+  replies: number | null
+  views: number | null
+  /**
+   * Likes + reposts + replies, over the ones reported. What the list is ranked by; views are reach,
+   * not earned.
+   */
   interactions: number
   fetchedAt: string
 }

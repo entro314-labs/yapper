@@ -22,8 +22,8 @@ export function EngagementChart({ rows }: { rows: EngagementRow[] }) {
   const [hover, setHover] = React.useState<string | null>(null)
   if (rows.length === 0) return null
 
-  const peak = Math.max(...rows.map((row) => row.likes + row.reposts + row.replies), 1)
-  const anyViews = rows.some((row) => row.views > 0)
+  const peak = Math.max(...rows.map(earned), 1)
+  const anyViews = rows.some((row) => row.views !== null)
 
   return (
     <section>
@@ -47,7 +47,7 @@ export function EngagementChart({ rows }: { rows: EngagementRow[] }) {
 
       <ul className="flex flex-col gap-1.5">
         {rows.map((row) => {
-          const total = row.likes + row.reposts + row.replies
+          const total = earned(row)
           const brand = brandOf(row.platform)
           const Icon = brand.icon
           return (
@@ -70,7 +70,7 @@ export function EngagementChart({ rows }: { rows: EngagementRow[] }) {
               <span className="flex h-3 min-w-0 flex-1 gap-0.5 overflow-hidden rounded-sm bg-muted/40">
                 {SERIES.map((series) => {
                   const value = row[series.key]
-                  if (value <= 0) return null
+                  if (value === null || value <= 0) return null
                   return (
                     <span
                       key={series.key}
@@ -92,9 +92,13 @@ export function EngagementChart({ rows }: { rows: EngagementRow[] }) {
                 <span
                   className="w-20 shrink-0 text-right text-xs whitespace-nowrap tabular-nums"
                   style={{ color: 'var(--series-views)' }}
-                  title={`${row.views.toLocaleString()} impressions`}
+                  title={
+                    row.views === null
+                      ? `${row.label} does not report impressions`
+                      : `${row.views.toLocaleString()} impressions`
+                  }
                 >
-                  {row.views > 0 ? `${compact(row.views)} seen` : '—'}
+                  {row.views === null ? '—' : `${compact(row.views)} seen`}
                 </span>
               ) : null}
             </li>
@@ -116,14 +120,18 @@ export function EngagementChart({ rows }: { rows: EngagementRow[] }) {
  * reason a reader never has to distinguish two segments by hue alone.
  */
 function breakdownOf(row: EngagementRow) {
-  const parts = SERIES.filter((series) => row[series.key] > 0).map(
-    (series) => `${row[series.key].toLocaleString()} ${series.label.toLowerCase()}`,
-  )
-  const seen = row.views > 0 ? ` · ${row.views.toLocaleString()} impressions` : ''
+  const parts = SERIES.map((series) => {
+    const value = row[series.key]
+    const name = series.label.toLowerCase()
+    return value === null ? `${name} not reported` : `${value.toLocaleString()} ${name}`
+  })
+  const seen =
+    row.views === null
+      ? ' · impressions not reported'
+      : ` · ${row.views.toLocaleString()} impressions`
   return (
     <span className="tabular-nums">
-      <span className="font-medium text-foreground">{row.label}</span> —{' '}
-      {parts.length > 0 ? parts.join(' · ') : 'nothing yet'}
+      <span className="font-medium text-foreground">{row.label}</span> — {parts.join(' · ')}
       {seen} · from {row.measured} {row.measured === 1 ? 'post' : 'posts'}
     </span>
   )
@@ -139,6 +147,11 @@ const SERIES = [
   label: string
   token: string
 }>
+
+/** Likes + reposts + replies over the ones the platform reports — an unreported one adds nothing. */
+function earned(row: EngagementRow) {
+  return (row.likes ?? 0) + (row.reposts ?? 0) + (row.replies ?? 0)
+}
 
 /** 12400 → "12.4k". Four characters is what the column has. */
 function compact(value: number) {

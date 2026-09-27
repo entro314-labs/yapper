@@ -107,14 +107,18 @@ pub struct Bucket {
     pub post_ids: Vec<i64>,
 }
 
+/// Every engagement dimension is `None` when no measured destination in the set
+/// reports it — Bluesky and Mastodon publish no impressions, Instagram no
+/// reposts — because a summed zero would claim "nobody saw it" where the truth
+/// is "the platform does not say".
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngagementTotals {
-    pub likes: i64,
-    pub reposts: i64,
-    pub replies: i64,
+    pub likes: Option<i64>,
+    pub reposts: Option<i64>,
+    pub replies: Option<i64>,
     /// Impressions, where the platform reports them — Threads, Instagram and X.
-    pub views: i64,
+    pub views: Option<i64>,
     /// How many destinations these totals are summed from — without it, "0
     /// likes" and "nothing fetched yet" look the same.
     pub measured: i64,
@@ -131,10 +135,11 @@ pub struct EngagementTotals {
 pub struct EngagementRow {
     pub platform: PlatformId,
     pub label: &'static str,
-    pub likes: i64,
-    pub reposts: i64,
-    pub replies: i64,
-    pub views: i64,
+    /// `None` per dimension on the same terms as [`EngagementTotals`].
+    pub likes: Option<i64>,
+    pub reposts: Option<i64>,
+    pub replies: Option<i64>,
+    pub views: Option<i64>,
     /// How many destinations these came from — without it, a platform with one
     /// measured post and one with fifty look comparable.
     pub measured: i64,
@@ -151,13 +156,14 @@ pub struct TopPost {
     pub excerpt: String,
     pub published_at: Option<String>,
     pub remote_url: Option<String>,
-    pub likes: i64,
-    pub reposts: i64,
-    pub replies: i64,
-    pub views: i64,
-    /// Likes + reposts + replies. What the list is ranked by, and deliberately
-    /// not including views: impressions are a reach number, not an earned one,
-    /// and only three platforms report them at all.
+    /// `None` where the platform did not report that dimension for this post.
+    pub likes: Option<i64>,
+    pub reposts: Option<i64>,
+    pub replies: Option<i64>,
+    pub views: Option<i64>,
+    /// Likes + reposts + replies, over the ones reported. What the list is
+    /// ranked by, and deliberately not including views: impressions are a reach
+    /// number, not an earned one, and only three platforms report them at all.
     pub interactions: i64,
     pub fetched_at: String,
 }
@@ -408,17 +414,12 @@ impl Engagement {
     /// rather than a zero, and the oldest fetch wins — the totals are only as
     /// fresh as their stalest part.
     fn add(&mut self, row: &Metrics, post: &db::Post, target: &PostTarget, account: &db::Account) {
-        let (likes, reposts, replies, views) = (
-            row.likes.unwrap_or(0),
-            row.reposts.unwrap_or(0),
-            row.replies.unwrap_or(0),
-            row.views.unwrap_or(0),
-        );
+        let (likes, reposts, replies, views) = (row.likes, row.reposts, row.replies, row.views);
 
-        self.totals.likes += likes;
-        self.totals.reposts += reposts;
-        self.totals.replies += replies;
-        self.totals.views += views;
+        fold(&mut self.totals.likes, likes);
+        fold(&mut self.totals.reposts, reposts);
+        fold(&mut self.totals.replies, replies);
+        fold(&mut self.totals.views, views);
         self.totals.measured += 1;
         if self
             .totals
@@ -436,16 +437,16 @@ impl Engagement {
             .or_insert_with(|| EngagementRow {
                 platform,
                 label: platform.label(),
-                likes: 0,
-                reposts: 0,
-                replies: 0,
-                views: 0,
+                likes: None,
+                reposts: None,
+                replies: None,
+                views: None,
                 measured: 0,
             });
-        entry.likes += likes;
-        entry.reposts += reposts;
-        entry.replies += replies;
-        entry.views += views;
+        fold(&mut entry.likes, likes);
+        fold(&mut entry.reposts, reposts);
+        fold(&mut entry.replies, replies);
+        fold(&mut entry.views, views);
         entry.measured += 1;
 
         self.leaderboard.push(TopPost {
@@ -459,7 +460,7 @@ impl Engagement {
             reposts,
             replies,
             views,
-            interactions: likes + reposts + replies,
+            interactions: earned(likes, reposts, replies),
             fetched_at: row.fetched_at.clone(),
         });
     }
@@ -469,8 +470,8 @@ impl Engagement {
     fn by_platform(&self) -> Vec<EngagementRow> {
         let mut rows: Vec<EngagementRow> = self.per_platform.values().cloned().collect();
         rows.sort_by(|a, b| {
-            (b.likes + b.reposts + b.replies)
-                .cmp(&(a.likes + a.reposts + a.replies))
+            earned(b.likes, b.reposts, b.replies)
+                .cmp(&earned(a.likes, a.reposts, a.replies))
                 .then_with(|| a.label.cmp(b.label))
         });
         rows
@@ -487,6 +488,20 @@ impl Engagement {
         rows.truncate(TOP_POSTS);
         rows
     }
+}
+
+/// Adds a reported value to a sum that stays `None` until something reports —
+/// so "no row says" and "the rows say zero" never collapse into one another.
+fn fold(sum: &mut Option<i64>, value: Option<i64>) {
+    if let Some(value) = value {
+        *sum = Some(sum.unwrap_or(0) + value);
+    }
+}
+
+/// Likes + reposts + replies over the ones reported: what a ranking can sort by
+/// when some dimensions are unknown.
+fn earned(likes: Option<i64>, reposts: Option<i64>, replies: Option<i64>) -> i64 {
+    [likes, reposts, replies].into_iter().flatten().sum()
 }
 
 /// Why this account's engagement is not shown. `None` means it is readable.
@@ -1399,16 +1414,35 @@ mod tests {
         .expect("metrics");
 
         let stats = compute(&db, &StatsFilter::default()).expect("stats");
-        assert_eq!(stats.engagement.likes, 7);
+        assert_eq!(stats.engagement.likes, Some(7));
         assert_eq!(
-            stats.engagement.replies, 0,
-            "an unreported count adds nothing"
+            stats.engagement.replies, None,
+            "a dimension no measured row reports is unknown, not zero"
         );
+        assert_eq!(stats.engagement.views, None);
         assert_eq!(stats.engagement.measured, 1);
+
+        let row = &stats.engagement_by_platform[0];
+        assert_eq!((row.likes, row.replies, row.views), (Some(7), None, None));
+        let top = &stats.top_posts[0];
+        assert_eq!((top.likes, top.replies, top.views), (Some(7), None, None));
+        assert_eq!(top.interactions, 9, "ranked on what was reported");
         assert_eq!(
             stats.engagement.oldest_fetch.as_deref(),
             Some("2026-01-01T00:00:00+00:00")
         );
+    }
+
+    #[test]
+    fn a_dimension_is_summed_over_the_rows_that_report_it() {
+        let mut sum = None;
+        fold(&mut sum, None);
+        assert_eq!(sum, None, "nothing reported yet");
+        fold(&mut sum, Some(0));
+        assert_eq!(sum, Some(0), "a reported zero is a zero");
+        fold(&mut sum, Some(5));
+        fold(&mut sum, None);
+        assert_eq!(sum, Some(5));
     }
 
     #[test]

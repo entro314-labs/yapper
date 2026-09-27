@@ -416,13 +416,43 @@ impl Session {
                 "views": post.views,
                 "interactions": post.interactions,
             })).collect::<Vec<_>>(),
-            // Named so a model does not read a missing platform as a zero.
-            "unreadable": computed.engagement_gaps.iter().map(|(platform, reason)| json!({
-                "platform": platform,
-                "reason": reason,
-            })).collect::<Vec<_>>(),
+            // Named so a model does not read a missing platform, or a count a
+            // platform never reports, as a zero.
+            "unreadable": unreadable(&computed),
         }))?)
     }
+}
+
+/// Everything `get_stats` cannot see, in two kinds a model must not conflate:
+/// an ACCOUNT whose engagement Windbag cannot read at all, and a DIMENSION a
+/// measured platform does not report (Bluesky has no impressions, Instagram no
+/// reposts) — which is why that figure is `null` rather than `0`.
+fn unreadable(computed: &stats::Stats) -> Vec<Value> {
+    let mut rows: Vec<Value> = computed
+        .engagement_gaps
+        .iter()
+        .map(|(platform, reason)| json!({ "platform": platform, "reason": reason }))
+        .collect();
+    for row in &computed.engagement_by_platform {
+        for (dimension, value) in [
+            ("likes", row.likes),
+            ("reposts", row.reposts),
+            ("replies", row.replies),
+            ("views", row.views),
+        ] {
+            if value.is_none() {
+                rows.push(json!({
+                    "platform": row.platform,
+                    "dimension": dimension,
+                    "reason": format!(
+                        "{} reports no {dimension} for the posts measured, so it is null, not 0.",
+                        row.label
+                    ),
+                }));
+            }
+        }
+    }
+    rows
 }
 
 /// The tool catalogue. Descriptions are written for a model deciding whether to
@@ -519,7 +549,9 @@ fn store_tools() -> Vec<Value> {
              failed and why, which hours the user posts at, the best-performing posts, and \
              engagement counts per platform as of the last refresh. Engagement is read from \
              Bluesky, Mastodon, Threads, Instagram, Facebook and X; Reddit and LinkedIn come \
-             back under `unreadable` with a reason rather than as zero. Reads only the local \
+             back under `unreadable` with a reason rather than as zero. A count a platform \
+             does not report (impressions on Bluesky, reposts on Instagram) is null, never 0, \
+             and is listed under `unreadable` with its `dimension`. Reads only the local \
              store — it never calls a platform, so the numbers are as of the user's last \
              refresh (`engagement.asOf`).",
             json!({
@@ -807,6 +839,55 @@ mod tests {
             json!({ "body": "body only", "accountIds": [reddit] }),
         );
         assert!(text_of(&frame).contains("title"));
+    }
+
+    #[test]
+    fn an_unreported_engagement_count_is_null_and_explained_not_zero() {
+        let (mut session, account) = session();
+        let post = session
+            .db
+            .create_post(
+                "sent",
+                None,
+                None,
+                Some(&db::now_rfc3339()),
+                db::POST_SCHEDULED,
+            )
+            .expect("post");
+        session
+            .db
+            .set_targets(post, &[(account, json!({}))])
+            .expect("targets");
+        let target = session.db.list_targets(post).expect("targets")[0].id;
+        session
+            .db
+            .finish_target_ok(target, "at://1", None)
+            .expect("ok");
+        session
+            .db
+            .save_metrics(&db::Metrics {
+                target_id: target,
+                fetched_at: db::now_rfc3339(),
+                likes: Some(3),
+                reposts: Some(0),
+                replies: Some(1),
+                quotes: None,
+                // Bluesky publishes no impression count.
+                views: None,
+            })
+            .expect("metrics");
+
+        let text = text_of(&call(&mut session, "get_stats", json!({})));
+        let reply: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(reply.pointer("/engagement/views"), Some(&Value::Null));
+        assert_eq!(reply.pointer("/engagement/reposts"), Some(&json!(0)));
+        assert_eq!(reply.pointer("/topPosts/0/views"), Some(&Value::Null));
+        let explained = reply["unreadable"]
+            .as_array()
+            .expect("unreadable")
+            .iter()
+            .any(|row| row["platform"] == "bluesky" && row["dimension"] == "views");
+        assert!(explained, "{text}");
     }
 
     #[test]

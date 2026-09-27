@@ -17,7 +17,7 @@ import { useAnimatedIcon } from '@/lib/animated-icon'
 import { brandOf } from '@/lib/platform-brand'
 import { useAccounts, usePosts, useRefreshCost, useRefreshEngagement, useStats } from '@/lib/query'
 import { humanMessage } from '@/lib/tauri/client'
-import type { Bucket, PlatformId, StatsFilter } from '@/lib/tauri/types'
+import type { Bucket, EngagementRow, PlatformId, StatsFilter } from '@/lib/tauri/types'
 import { cn, formatRelative } from '@/lib/utils'
 
 export const Route = createFileRoute('/stats')({ component: StatsScreen })
@@ -262,12 +262,29 @@ function StatsScreen() {
           {data && data.engagement.measured > 0 ? (
             <>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <Figure label="Likes" value={data.engagement.likes} />
-                <Figure label="Reposts" value={data.engagement.reposts} />
-                <Figure label="Replies" value={data.engagement.replies} />
+                <Figure
+                  label="Likes"
+                  value={data.engagement.likes}
+                  silent={unreported(data.engagementByPlatform, 'likes')}
+                />
+                <Figure
+                  label="Reposts"
+                  value={data.engagement.reposts}
+                  silent={unreported(data.engagementByPlatform, 'reposts')}
+                />
+                <Figure
+                  label="Replies"
+                  value={data.engagement.replies}
+                  silent={unreported(data.engagementByPlatform, 'replies')}
+                />
                 {/* Impressions sit beside the three rather than among them: a reach number on a
                     scale 100× the others is not a fourth interaction. */}
-                <Figure label="Impressions" value={data.engagement.views} muted />
+                <Figure
+                  label="Impressions"
+                  value={data.engagement.views}
+                  silent={unreported(data.engagementByPlatform, 'views')}
+                  muted
+                />
               </div>
               <p className="mt-2.5 text-xs text-muted-foreground">
                 Across {data.engagement.measured} destination
@@ -388,26 +405,43 @@ function Tile({
   )
 }
 
+/** The platforms in view that report nothing for one engagement dimension. */
+function unreported(
+  rows: EngagementRow[],
+  key: 'likes' | 'reposts' | 'replies' | 'views',
+): string[] {
+  return rows.filter((row) => row[key] === null).map((row) => row.label)
+}
+
+/**
+ * One engagement total. `null` is drawn as "—", never as 0: no measured platform reported it, and a
+ * zero would claim nobody engaged. `silent` names the platforms that do not report this dimension,
+ * so a partial total says which part of the picture it is missing.
+ */
 function Figure({
   label,
   value,
+  silent,
   muted = false,
 }: {
   label: string
-  value: number
+  value: number | null
+  silent: string[]
   muted?: boolean
 }) {
+  const hint = silent.length > 0 ? `Not reported by ${silent.join(', ')}` : undefined
   return (
-    <div>
+    <div title={hint}>
       <p
         className={cn(
           'font-display text-xl font-semibold tabular-nums',
-          muted && 'text-muted-foreground',
+          (muted || value === null) && 'text-muted-foreground',
         )}
       >
-        {value.toLocaleString()}
+        {value === null ? '—' : value.toLocaleString()}
       </p>
       <p className="text-xs text-muted-foreground">{label}</p>
+      {hint ? <p className="text-[0.6875rem] text-muted-foreground/70">{hint}</p> : null}
     </div>
   )
 }

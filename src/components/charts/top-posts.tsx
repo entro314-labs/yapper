@@ -43,7 +43,7 @@ export function TopPosts({ posts }: { posts: TopPost[] }) {
                 <span className="block truncate text-xs">{post.excerpt || '(no text)'}</span>
                 <span className="block truncate text-[0.6875rem] text-muted-foreground">
                   {post.handle}
-                  {post.views > 0 ? ` · ${post.views.toLocaleString()} impressions` : ''}
+                  {post.views === null ? '' : ` · ${post.views.toLocaleString()} impressions`}
                 </span>
               </span>
 
@@ -57,7 +57,7 @@ export function TopPosts({ posts }: { posts: TopPost[] }) {
 
               <span
                 className="w-12 shrink-0 text-right text-xs font-medium tabular-nums"
-                title={`${post.likes} likes · ${post.reposts} reposts · ${post.replies} replies`}
+                title={`${count(post.likes)} likes · ${count(post.reposts)} reposts · ${count(post.replies)} replies`}
               >
                 {post.interactions.toLocaleString()}
               </span>
@@ -80,4 +80,9 @@ export function TopPosts({ posts }: { posts: TopPost[] }) {
       </ul>
     </section>
   )
+}
+
+/** A count as text, with "—" for one the platform does not report — never a zero it did not say. */
+function count(value: number | null) {
+  return value === null ? '—' : value.toLocaleString()
 }
