@@ -92,13 +92,6 @@ impl Scheduler {
     pub fn start(app: AppHandle, database: Arc<Db>) -> Self {
         let (wake, wakeups) = channel();
 
-        // Before anything else touches the queue: a target left mid-send by the
-        // last run would otherwise sit in `publishing` forever.
-        match recover_interrupted(&database) {
-            Ok(0) => {}
-            Ok(count) => log::warn!("{count} destination(s) were interrupted mid-send"),
-            Err(err) => log::error!("recovering interrupted sends failed: {err}"),
-        }
         if let Err(err) = catch_up(&database) {
             log::error!("catch-up pass failed: {err}");
         }
@@ -141,6 +134,15 @@ fn run(app: &AppHandle, database: &Arc<Db>, wakeups: &Receiver<()>) {
 
 /// One sweep. Returns how many destinations were settled, either way.
 fn pass(app: &AppHandle, database: &Arc<Db>) -> Result<usize> {
+    // Recovery first. Only this serial worker claims targets, and every claim
+    // is settled within the pass that made it, so a target still `publishing`
+    // when a pass begins was abandoned — by a crash in an earlier run, or by a
+    // settle that failed to write after the send.
+    match recover_interrupted(database) {
+        Ok(0) => {}
+        Ok(count) => log::warn!("{count} destination(s) were interrupted mid-send"),
+        Err(err) => log::error!("recovering interrupted sends failed: {err}"),
+    }
     // Catch-up runs on EVERY pass, not only at launch. A machine that sleeps
     // overnight with Windbag open wakes to hours of overdue posts, and firing
     // them all at once is exactly what the missed-post policy exists to
@@ -312,13 +314,14 @@ pub fn catch_up(database: &Arc<Db>) -> Result<usize> {
     Ok(overdue.len())
 }
 
-/// The launch pass over destinations the previous run claimed and never
-/// settled — a crash, a force-quit or a failed write after the send. Each is
+/// Fails destinations that were claimed and never settled — a crash, a
+/// force-quit, or a failed write after the send. Runs at the top of every pass
+/// (see [`pass`] for why nothing live can be caught by it). Each is
 /// failed with a message that says to check the platform first, and its post's
 /// status is recomputed. Returns how many destinations it failed.
 pub fn recover_interrupted(database: &Arc<Db>) -> Result<usize> {
     let mut posts = database.fail_interrupted_targets(
-        "Interrupted mid-send: Windbag quit before the platform answered. \
+        "Interrupted mid-send: no answer from the platform was recorded. \
          Check whether it went out before retrying.",
     )?;
     let failed = posts.len();

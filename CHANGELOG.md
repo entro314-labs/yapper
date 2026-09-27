@@ -163,9 +163,10 @@ All notable changes to Windbag are documented here. The format follows
 - **A send interrupted by a crash no longer sticks.** A destination claimed by a
   run that then died stayed in `publishing` forever: never retried, with no
   Retry button, and on a single-destination post later offered "Post now",
-  which could send a second copy. At launch such destinations are now failed
-  with a message saying to check the platform before retrying, and the attempt
-  is logged.
+  which could send a second copy. Such destinations — left by a crash, or by a
+  record that failed to save after the send — are now failed at the start of
+  the next scheduler pass with a message saying to check the platform before
+  retrying, and the attempt is logged.
 - **A time with a UTC offset fires at the right moment.** The agent door (and
   any caller of `save_post` or `reschedule_post`) stored `scheduledAt` exactly
   as sent, and the due query compares stored strings — so `09:00+02:00` went

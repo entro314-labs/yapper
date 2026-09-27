@@ -653,9 +653,9 @@ impl Db {
         Ok(())
     }
 
-    /// Fails every target still marked `publishing` — at launch, the only way
-    /// one can be is a process that died between the claim and the settle — and
-    /// logs the attempt. Returns the post of each failed target, one entry per
+    /// Fails every target still marked `publishing` — between scheduler passes
+    /// the only way one can be is a claim that was never settled — and logs the
+    /// attempt. Returns the post of each failed target, one entry per
     /// target, so their status can be recomputed. Failed rather than requeued: the send may have landed, and
     /// only the user can check before a retry risks a second copy.
     pub fn fail_interrupted_targets(&self, message: &str) -> Result<Vec<i64>> {
