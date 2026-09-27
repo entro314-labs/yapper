@@ -413,9 +413,18 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_403_still_flags_the_account() {
+    fn a_403_that_blames_the_authentication_flags_the_account() {
         let err = map_error(403, r#"{"detail":"Unsupported Authentication"}"#);
         assert!(matches!(err, AppError::Unauthorized(_)), "{err}");
+    }
+
+    #[test]
+    fn a_403_for_a_forbidden_action_leaves_the_account_alone() {
+        let err = map_error(
+            403,
+            r#"{"detail":"You are not permitted to perform this action.","status":403}"#,
+        );
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
     }
 
     #[test]

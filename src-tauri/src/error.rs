@@ -104,13 +104,23 @@ impl From<keyring::Error> for AppError {
 pub type Result<T> = std::result::Result<T, AppError>;
 
 /// Turns a non-2xx HTTP response into the right error class. Rate limits and 5xx
-/// are `Platform` (retryable); 401/403 is `Unauthorized`; the rest is terminal.
+/// are `Platform` (retryable); 401 is `Unauthorized`; the rest is terminal.
+///
+/// 403 is `Unauthorized` only when the body says the TOKEN is the problem. A
+/// 403 otherwise means a working token was refused this one thing — a
+/// subreddit ban, an instance limit, a permission the developer app lacks —
+/// and flagging the account for reconnection would send the user to fix
+/// something that is not broken.
 pub fn from_status(status: u16, body: &str, platform: &str) -> AppError {
     let detail: String = body.chars().take(400).collect();
     match status {
-        401 | 403 => AppError::Unauthorized(format!(
+        401 => AppError::Unauthorized(format!(
             "{platform} rejected the stored credentials ({status}). Reconnect the account. {detail}"
         )),
+        403 if names_the_token(body) => AppError::Unauthorized(format!(
+            "{platform} rejected the stored credentials ({status}). Reconnect the account. {detail}"
+        )),
+        403 => AppError::InvalidInput(format!("{platform} refused this request (403): {detail}")),
         404 => AppError::NotFound(format!("{platform} returned 404: {detail}")),
         409 => AppError::Conflict(format!("{platform} returned 409: {detail}")),
         429 => AppError::Platform(format!("{platform} rate-limited the request. {detail}")),
@@ -121,7 +131,78 @@ pub fn from_status(status: u16, body: &str, platform: &str) -> AppError {
     }
 }
 
+/// Whether a 403 body blames the token rather than the request: RFC 6750's
+/// `invalid_token` and `insufficient_scope` (a reconnect is what grants a
+/// missing scope), Mastodon's scope wording, X's `Unsupported Authentication`,
+/// and plain revoked/expired wording.
+fn names_the_token(body: &str) -> bool {
+    let lowered = body.to_ascii_lowercase();
+    [
+        "invalid_token",
+        "invalid token",
+        "insufficient_scope",
+        "outside the authorized scopes",
+        "unsupported authentication",
+        "revoked",
+        "token expired",
+        "expired token",
+        "token has expired",
+    ]
+    .iter()
+    .any(|phrase| lowered.contains(phrase))
+}
+
 /// `Display` for a boxed cause, used where a third-party error has no `From`.
 pub fn internal(context: &str, cause: impl fmt::Display) -> AppError {
     AppError::Internal(format!("{context}: {cause}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_401_is_a_credential_problem() {
+        assert!(matches!(
+            from_status(401, "", "Reddit"),
+            AppError::Unauthorized(_)
+        ));
+    }
+
+    #[test]
+    fn a_403_about_permission_is_terminal_but_leaves_the_account_alone() {
+        // A subreddit ban, an instance limit, a LinkedIn product the app lacks:
+        // the token works, so flagging the account for reconnection sends the
+        // user to fix the wrong thing.
+        for (platform, body) in [
+            ("Reddit", r#"{"message":"Forbidden","error":403}"#),
+            (
+                "Mastodon",
+                r#"{"error":"Your account is currently limited"}"#,
+            ),
+            (
+                "LinkedIn",
+                r#"{"status":403,"serviceErrorCode":100,"code":"ACCESS_DENIED"}"#,
+            ),
+        ] {
+            let err = from_status(403, body, platform);
+            assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
+            assert!(!err.is_retryable(), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_403_that_names_the_token_still_asks_for_a_reconnect() {
+        for body in [
+            r#"{"error":"invalid_token"}"#,
+            r#"{"error":"This action is outside the authorized scopes"}"#,
+            r#"{"error":"insufficient_scope"}"#,
+            r#"{"detail":"Unsupported Authentication"}"#,
+            r#"{"message":"The access token has been revoked"}"#,
+            r#"{"message":"Token expired"}"#,
+        ] {
+            let err = from_status(403, body, "Mastodon");
+            assert!(matches!(err, AppError::Unauthorized(_)), "{body}: {err}");
+        }
+    }
 }
