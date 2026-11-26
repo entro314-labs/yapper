@@ -104,7 +104,7 @@ jobs:
     # signature check before publishing, and channel pointers that never move
     # to an older version. The attestation is why the two extra permissions
     # below exist — without them GitHub rejects the run before any job starts.
-    uses: entro314-labs/tauri-release-kit/.github/workflows/release.yml@f92737ef5990171065aca347a2e223012d867046
+    uses: entro314-labs/tauri-release-kit/.github/workflows/release.yml@38e09de738e516a1477c0273afc7cf4b2da404b0
     permissions:
       contents: write
       pull-requests: write
