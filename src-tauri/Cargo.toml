@@ -84,7 +84,7 @@ url = "2"
 unicode-segmentation = "1"
 # Opens the system browser for the OAuth handoff. Rust-side, so it works from
 # the scheduler thread as well as from a command.
-opener = "0.8"
+opener = "0.9"
 dirs = "7"
 log = "0.4"
 # The `log` backend: a bundled GUI app has no terminal, so stderr is thrown
